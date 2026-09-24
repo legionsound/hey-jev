@@ -11,7 +11,7 @@ A voice assistant for your Mac. Say "Hey Jev" or hold right Option, say a thing,
 
 ## What it can do
 
-Open or quit apps, Mac volume up / down / mute / set, Spotify volume, play / pause / next / previous, dark mode, lock or sleep the Mac. Two things in one sentence work too: "pause Spotify and open Slack".
+Open or quit apps, Mac volume up / down / mute / set, Spotify volume, play / pause / next / previous, dark mode, lock or sleep the Mac. Two things in one sentence work too, joined with "then": "pause Spotify, then open Slack". A bare "and" is never a split point, so "play rock and roll" stays one request.
 
 Timers and reminders: "set a timer for 5 minutes", "remind me in 20 minutes to call Mum", "how long is left?", "cancel the timer". Each one counts down live in the window, and she tells you when it's done.
 

@@ -650,12 +650,16 @@ def run_screen_type(t, deadline):
         if (facts["secure"] or not facts["enabled"] or not facts["insertable"] or facts["role"] != t["role"]
                 or facts["frame"] != t["frame"] or facts["window"] != t["window"]):
             raise Failed("that field is no longer there")
+        if screen.focus(ref, deadline) != 0:
+            raise Failed("the field wouldn't take focus")
         before = screen.field_value(ref, deadline)
+        rng = screen.selected_range(ref, deadline) if isinstance(before, str) else None
     except (screen.Unavailable, screen.TimedOut, screen.Wedged) as exc:
         raise Failed(f"screen read failed before typing: {exc}")
     if not isinstance(before, str):
         raise Failed("can't read the field, so typing couldn't be checked")
-    _typed[id(t)] = (before, time.monotonic(), ref)
+    expected = screen.expected_after(before, rng, t["text"]) if rng is not None else None
+    _typed[id(t)] = ((before, expected), time.monotonic(), ref)
     try:
         err = screen.insert_text(ref, t["text"], deadline)
     except screen.Wedged as exc:
@@ -669,24 +673,24 @@ def run_screen_type(t, deadline):
 
 
 def verify_screen_type(t, deadline):
-    """done only when the field now holds its old text with exactly the typed text added (the insert may replace a
-    selection, so: the typed text is in it and the rest came from before). The value is compared here and dropped."""
-    before, at, ref = _typed.get(id(t), (None, 0, None))
-    if before is None:
+    """done only when the field now equals exactly what the insert should produce: the old value with the selection
+    read before dispatch (UTF-16 range, as AX counts) replaced by the typed text. Without a readable selection there
+    is no exact expectation, so the result can only be unverified. Values are compared here and dropped."""
+    got, at, ref = _typed.get(id(t), (None, 0, None))
+    if got is None:
         return ("unverified", {"why": "no before-state"})
+    before, expected = got
     after = screen.field_value(ref, deadline)
-    text = t["text"]
-    if isinstance(after, str) and after != before and text in after:
-        i = after.find(text)
-        left, right = after[:i], after[i + len(text):]
-        if before.startswith(left) and before.endswith(right):
-            _typed.pop(id(t), None)
-            return ("done", {"typed": len(text)})
+    if expected is not None and after == expected:
+        _typed.pop(id(t), None)
+        return ("done", {"typed": len(t["text"])})
     if time.monotonic() - at < SETTLE:
         return ("wait", {})
     _typed.pop(id(t), None)
-    return ("unverified", {"delivered": True, "why": "the field doesn't show the text" if isinstance(after, str)
-                           else "the field could not be read back"})
+    why = ("the selection couldn't be read, so the result can't be checked exactly" if expected is None
+           else "the field doesn't show exactly the typed text" if isinstance(after, str)
+           else "the field could not be read back")
+    return ("unverified", {"delivered": True, "why": why})
 
 
 def resolve_screen_submit(args):

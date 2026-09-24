@@ -515,17 +515,22 @@ class TypeTests(unittest.TestCase):
                    "field_value": lambda ref, d: self.value["v"],
                    "focused_field": lambda pid, d: self.field,
                    "process_start": lambda pid, d: self.snap.started,
-                   "insert_text": self.insert}
+                   "insert_text": self.insert, "focus": lambda ref, d: 0,
+                   "selected_range": lambda ref, d: self.range}
         for name, fn in patches.items():
             p = patch.object(screen, name, fn)
             p.start()
             self.addCleanup(p.stop)
         self.effect = "insert"
+        self.range = (len(self.value["v"].encode("utf-16-le")) // 2, 0)  # cursor at the end
 
     def insert(self, ref, text, deadline):
+        """Like the real field: replace the UTF-16 selection with the text."""
         self.inserts.append(text)
         if self.effect == "insert":
-            self.value["v"] += text
+            self.value["v"] = screen.expected_after(self.value["v"], self.range, text)
+        elif self.effect == "delete_other":
+            self.value["v"] = screen.expected_after(self.value["v"], self.range, text)[1:]  # and something else changed
         return 0
 
     def run_type(self, args, policy=None):
@@ -542,11 +547,37 @@ class TypeTests(unittest.TestCase):
                  "type see you in Paris.": {"text": "see you in Paris"}}
         for said, want in cases.items():
             self.assertEqual(planner.type_args(said), want, said)
-        self.assertIsNone(planner.type_args("type in the search field"))
+        for bad in ["type in the search field", 'type "hello" into', 'type "hello" nonsense', 'type "hello" in Firefox',
+                    "type hello into", "type hello into the"]:
+            self.assertIsNone(planner.type_args(bad), bad)  # an unfinished or unknown qualifier: clarify, never drop it
 
     def test_types_into_the_named_field_and_checks_it(self):
         v = self.run_type({"text": "there", "field": "name"})
         self.assertEqual((v["state"], v["steps"][0]["facts"], self.value["v"]), ("completed", {"typed": 5}, "Hi there"))
+
+    def test_selected_text_is_replaced_exactly(self):
+        self.value["v"], self.range = "abcdef", (1, 3)
+        v = self.run_type({"text": "X"})
+        self.assertEqual((v["state"], self.value["v"]), ("completed", "aXef"))
+
+    def test_an_unrelated_change_is_not_done(self):
+        self.value["v"], self.range, self.effect = "abcdef", (6, 0), "delete_other"
+        self.assertEqual(self.run_type({"text": "X"})["state"], "unverified")
+
+    def test_utf16_offsets_with_characters_outside_the_bmp(self):
+        self.value["v"], self.range = "a😀bcdef", (3, 2)  # AX counts the emoji as 2
+        v = self.run_type({"text": "X"})
+        self.assertEqual((v["state"], self.value["v"]), ("completed", "a😀Xdef"))
+        self.assertIsNone(screen.expected_after("a😀b", (2, 0), "X"))  # splits the emoji: no exact expectation
+
+    def test_without_a_readable_selection_it_is_never_done(self):
+        self.range = None
+        self.value["v"] = "Hi "
+        orig = self.insert
+        self.insert = lambda ref, text, d: (self.inserts.append(text), self.value.update(v="Hi " + text))[0] or 0
+        patch.object(screen, "insert_text", self.insert).start()
+        v = self.run_type({"text": "there"})
+        self.assertEqual((v["state"], self.value["v"]), ("unverified", "Hi there"))
 
     def test_focused_field_when_none_is_named(self):
         self.assertEqual(self.run_type({"text": "x"})["state"], "completed")

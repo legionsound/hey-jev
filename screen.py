@@ -565,14 +565,42 @@ def field_value(ref, deadline):
     return bounded(lambda: None if is_secure(ref) else _attr(ref, "AXValue"), deadline)
 
 
+def selected_range(ref, deadline):
+    """(location, length) of the field's selection in UTF-16 units, as AX reports it, or None when unreadable."""
+    def read():
+        st, v = _read(ref, "AXSelectedTextRange")
+        if st != "ok" or v is None:
+            return None
+        ok, rng = _AS().AXValueGetValue(v, _AS().kAXValueCFRangeType, None)
+        if not ok:
+            return None
+        loc, length = (rng.location, rng.length) if hasattr(rng, "location") else rng
+        return int(loc), int(length)
+    return bounded(read, deadline)
+
+
+def expected_after(before, rng, text):
+    """before with the UTF-16 range replaced by text, or None when the range doesn't fit or splits a character."""
+    b, t = before.encode("utf-16-le"), text.encode("utf-16-le")
+    loc, length = rng
+    if loc < 0 or length < 0 or 2 * (loc + length) > len(b):
+        return None
+    try:
+        return (b[:2 * loc] + t + b[2 * (loc + length):]).decode("utf-16-le")
+    except UnicodeDecodeError:
+        return None
+
+
+def focus(ref, deadline):
+    """Give the field keyboard focus. Done before reading its selection, since focusing can change it."""
+    return bounded(lambda: int(_AS().AXUIElementSetAttributeValue(ref, "AXFocused", True)), deadline, effect=True)
+
+
 def insert_text(ref, text, deadline):
-    """Focus the field, then insert at its cursor through AXSelectedText: no keystrokes, so nothing can land in
-    another window. Returns the AX error code of the insert."""
-    def run():
-        AS = _AS()
-        AS.AXUIElementSetAttributeValue(ref, "AXFocused", True)
-        return int(AS.AXUIElementSetAttributeValue(ref, "AXSelectedText", text))
-    return bounded(run, deadline, effect=True)
+    """Insert at the field's selection through AXSelectedText: no keystrokes, so nothing can land in another window.
+    Returns the AX error code."""
+    return bounded(lambda: int(_AS().AXUIElementSetAttributeValue(ref, "AXSelectedText", text)), deadline,
+                   effect=True)
 
 
 def can_confirm(ref, deadline):

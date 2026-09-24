@@ -173,16 +173,23 @@ def type_args(clause):
     q = QUOTED.match(rest)
     if q:
         text, tail = q["text"], q["after"]
-        f = FIELD_TAIL.match(tail) if tail.strip() else None
-        field = (f["f1"] or f["f2"]) if f else None
+        if tail.strip(" .!?,"):  # anything after the quote must be a whole field phrase, never silently dropped
+            f = FIELD_TAIL.fullmatch(tail)
+            if not f:
+                return None
+            field = f["f1"] or f["f2"]
     else:
         f = FIELD_TAIL.search(rest)
         if f:
             rest, field = rest[:f.start()], f["f1"] or f["f2"]
+        elif re.search(r"\s(?:into|in)(?:\s+the)?[\s.!?]*$", rest, re.I):
+            return None  # "type hello into": an unfinished field phrase is not text
         text = rest.strip()
         text = text[:-1] if text.endswith(".") and not text.endswith("..") else text
     if not text or re.fullmatch(r"(?:in|into)(?:\s.*)?", text, re.I):
         return None
+    if field is not None and field.strip(" .,!?").lower() in ("", "the", "a", "an"):
+        return None  # "into the" with no name: unfinished
     return {"text": text, **({"field": field.strip(" .,!?")} if field else {})}
 
 

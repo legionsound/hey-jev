@@ -264,7 +264,7 @@ class Engine:
             return "failed"
         target = got[1]
         self._set(step, target=target)
-        if self.policy().get(action["effect"], "ask") == "ask":
+        if target.get("confirm") or self.policy().get(action["effect"], "ask") == "ask":
             t = time.monotonic()
             verdict = self._confirm(rec, step, target)
             diagnostics.record(rec["id"], "confirm", verdict, (time.monotonic() - t) * 1000, step=step["index"],
@@ -288,8 +288,11 @@ class Engine:
         diagnostics.record(rec["id"], "dispatch", "running", step=step["index"], action=step["action"], target=target)
         started = time.monotonic()
         state = self._execute(action, step, target)
+        facts = step.get("facts") or {}
+        if "items" in facts:  # screen text stays out of the log: counts only
+            facts = {**facts, "items": len(facts["items"])}
         diagnostics.record(rec["id"], "verify", state, (time.monotonic() - started) * 1000, step=step["index"],
-                           detail=step.get("detail"), facts=step.get("facts"), target=target)
+                           detail=step.get("detail"), facts=facts, target=target)
         return state
 
     def _execute(self, action, step, target):

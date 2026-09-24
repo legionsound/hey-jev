@@ -15,7 +15,9 @@ QUESTIONS = {
                "criteria": {"app": "an application", "volume": "sound level", "display": "screen appearance or dark mode",
                             "media": "music playback", "system": "locking or sleeping the computer",
                             "timer": "setting, checking, or cancelling a timer or reminder",
-                            "website": "going to a website or web address"}},
+                            "website": "going to a website or web address",
+                            "screen": "a button, menu, link, tab or other control inside the window on screen, "
+                                      "or what is on the screen"}},
     "app_action": {"type": "choice", "instructions": "What should happen to the app?",
                    "criteria": {"open": "open, launch, or start the app itself", "quit": "quit, close, or kill the app",
                                 "none": "the request is about playback, volume, or something inside the app, not opening or quitting it"}},
@@ -34,12 +36,16 @@ QUESTIONS = {
     "timer_action": {"type": "choice", "instructions": "What should happen with a timer or reminder?",
                      "criteria": {"set": "start a timer or set a reminder", "check": "ask how much time is left",
                                   "cancel": "stop or cancel a timer", "none": None}},
+    "screen_action": {"type": "choice", "instructions": "What should happen on the screen, if anything?",
+                      "criteria": {"list": "say or show what can be clicked or what is on the screen",
+                                   "press": "click, press, tap or choose one named or numbered control on screen",
+                                   "none": None}},
     "system_action": {"type": "choice", "instructions": "What should happen to the computer?",
                       "criteria": {"lock": None, "sleep": None, "none": None}},
 }
-TARGETS = ("app", "website", "volume", "display", "media", "system", "timer")
+TARGETS = ("app", "website", "volume", "display", "media", "system", "timer", "screen")
 BRANCH = {"volume": "volume_action", "display": "display_action", "media": "media_action",
-          "system": "system_action", "timer": "timer_action"}
+          "system": "system_action", "timer": "timer_action", "screen": "screen_action"}
 
 # "then" style joins only. A bare "and" is never a split point: "rock and roll" stays whole.
 SPLIT = re.compile(r"\s*(?:,\s*and\s+then|\band\s+then|,\s*then|\bthen|,\s*after\s+that|\bafter\s+that|,\s*and)\b\s*", re.I)
@@ -62,6 +68,27 @@ URL_SPAN = re.compile(r"\b(?:https?://\S+|(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?(?:
 def url_span(clause):
     m = URL_SPAN.search(clause)
     return m[0].rstrip(".,!?") if m else ""
+
+
+PRESS_SPAN = re.compile(r"\b(?:click|press|tap|hit|choose|select|pick)\s+(?:on\s+)?(?:the\s+)?(.+?)"
+                        r"(?:\s+(?:button|menu|link|tab|item|checkbox|option|icon))?(?:\s+(?:please|for me|now))*[\s.!?]*$",
+                        re.I)
+NUMBER = re.compile(r"^(?:number\s+|item\s+|#\s*)?(\d{1,3}|[a-z]+(?:[\s-][a-z]+)?)$", re.I)
+
+
+def press_args(clause):
+    """{"number": n} for "click 12" / "press number twelve", {"label": "Share"} for a name, None when nothing is named."""
+    m = PRESS_SPAN.search(clause)
+    if not m:
+        return None
+    said = m[1].strip(" .,!?\"“”'")
+    n = NUMBER.match(said)
+    if n:
+        word = n[1].lower()
+        value = int(word) if word.isdigit() else words_value(word.replace("-", " ").split())
+        if value is not None:
+            return {"number": value}
+    return {"label": said} if said else None
 
 
 def app_name(clause):
@@ -119,11 +146,16 @@ def step_for(ans, target, clause):
     if target == "website":
         url = url_span(clause)
         return (ans["target"][1], "url.open", {"url": url}) if url else None
-    act, conf = ans[BRANCH[target]]
+    act, conf = ans.get(BRANCH[target], ("none", 0.0))  # an unanswered branch acts on nothing
     if act == "none" or conf < GATE:
         return None
     if target == "timer":
         return (conf, f"timer.{act}", {"text": clause})
+    if target == "screen":
+        if act == "list":
+            return (conf, "screen.list", {})
+        args = press_args(clause)
+        return (conf, "screen.press", args) if args else None
     if target == "volume":
         scope, scope_conf = ans["volume_scope"]
         spotify = scope == "spotify" and (scope_conf >= 0.5 or re.search(r"\bspotify\b", clause, re.I))

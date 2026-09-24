@@ -13,6 +13,7 @@ import sys
 import time
 
 import app_catalog
+import screen
 import timers
 import url_adapter
 
@@ -408,6 +409,122 @@ def resolve_url(args):
     return url_adapter.resolve_url(args.get("url", ""))
 
 
+# --------------------------------------------------------------------------- screen
+# Labels that always ask first, whatever the Click setting says. They add confirmation; their absence proves nothing.
+RISKY = re.compile(r"\b(buy|purchase|order|pay|checkout|check out|send|submit|post|publish|delete|remove|erase|trash|"
+                   r"empty|discard|uninstall|format|sign out|log out|transfer|confirm|accept|agree|install|share|reply all)\b",
+                   re.I)
+CHOOSE = None  # set by the app: (spoken, [labels]) -> (index or None, confidence). Only control names are sent.
+AX_GONE = (-25202, -25205, -25206, -25201)  # invalid element, no value, action unsupported, illegal argument
+_listed = {}  # id(target) -> the Snapshot run read, for verify
+_pressed = {}  # id(target) -> (before, dispatched_at, ref)
+
+
+def _where(item, frame):
+    x, y, w, h = frame
+    cx, cy = (item.frame[0] + item.frame[2] / 2 - x) / max(w, 1), (item.frame[1] + item.frame[3] / 2 - y) / max(h, 1)
+    return ("top" if cy < 0.33 else "bottom" if cy > 0.66 else "middle") + "-" + (
+        "left" if cx < 0.33 else "right" if cx > 0.66 else "centre")
+
+
+def _screen_target(snap, item):
+    same = [i for i in snap.items if (i.role, i.label) == (item.role, item.label)]
+    return {"pid": snap.pid, "app": snap.app, "window": snap.window, "role": item.role, "label": item.label,
+            "frame": [round(v) for v in item.frame], "occurrence": same.index(item),
+            "confirm": bool(RISKY.search(item.label))}
+
+
+def _observe(**kw):
+    try:
+        return screen.observe(**kw)
+    except screen.Unavailable as exc:
+        raise Failed(f"can't read the screen: {exc}")
+
+
+def resolve_screen_press(args):
+    """A number from the last list the user saw, or a spoken control name, to one control the app declared."""
+    try:
+        snap = screen.observe(ocr=False)
+    except screen.Unavailable as exc:
+        return ("none", f"can't read the screen: {exc}")
+    controls = [i for i in snap.items if i.source != "ocr" and i.pressable]
+    if args.get("number") is not None:
+        shown = screen.last()
+        if shown is None or not 1 <= args["number"] <= len(shown.items):
+            return ("none", "no such number on the last list")
+        seen = shown.items[args["number"] - 1]
+        if (shown.pid, shown.window) != (snap.pid, snap.window):
+            return ("none", "screen_changed")
+        if seen.source == "ocr":
+            return ("none", "not_a_control")
+        now = next((i for i in controls if i.key() == seen.key()), None)
+        return ("target", _screen_target(snap, now)) if now else ("none", "screen_changed")
+    said = screen._norm(args.get("label"))
+    if not said:
+        return ("none", "no control named")
+    exact = [i for i in controls if screen._norm(i.label) == said]
+    if not exact:
+        exact = [i for i in controls if f" {said} " in f" {screen._norm(i.label)} "]
+    if not exact and CHOOSE and controls:
+        names = list(dict.fromkeys(i.label for i in controls))
+        idx, conf = CHOOSE(args.get("label", ""), names)
+        if idx is not None and conf >= 0.65:
+            exact = [i for i in controls if i.label == names[idx]]
+    if not exact:
+        return ("none", "no control by that name")
+    if len({(i.role, i.label, tuple(i.frame)) for i in exact}) > 1:
+        return ("choices", [{"name": f"{i.label} ({_where(i, snap.window_frame)})"} for i in exact[:4]])
+    return ("target", _screen_target(snap, exact[0]))
+
+
+def _find(t, deadline):
+    snap = _observe(pid=t["pid"], ocr=False, deadline=deadline)
+    same = [i for i in snap.items if (i.role, i.label) == (t["role"], t["label"]) and i.pressable]
+    item = same[t["occurrence"]] if t["occurrence"] < len(same) else None
+    if item is None or [round(v) for v in item.frame] != t["frame"] or snap.window != t["window"]:
+        raise Failed("that control is no longer there")
+    return item
+
+
+def run_screen_press(t, deadline):
+    item = _find(t, deadline)
+    before = (screen.signature(t["pid"]), screen.element_state(item.ref))
+    err = screen.press(item.ref)
+    _pressed[id(t)] = (before, time.monotonic(), item.ref)
+    if err in AX_GONE:
+        raise Failed(f"the app refused the press (AX error {err})")
+    if err != 0:
+        raise Uncertain(f"AX error {err} after the press was sent")
+
+
+def verify_screen_press(t, deadline):
+    before, at, ref = _pressed.get(id(t), (None, 0, None))
+    if before is None:
+        return ("unverified", {"why": "no before-state"})
+    after = (screen.signature(t["pid"]), screen.element_state(ref))
+    changed = sorted({k for k in before[0] if before[0].get(k) != after[0].get(k)} |
+                     {k for k in before[1] if before[1].get(k) != after[1].get(k)})
+    if changed:
+        _pressed.pop(id(t), None)
+        return ("done", {"changed": changed})
+    if time.monotonic() - at < 1.5:
+        return ("wait", {})
+    _pressed.pop(id(t), None)
+    return ("unverified", {"why": "pressed, but nothing in the window changed"})
+
+
+def run_screen_list(t, deadline):
+    snap = _observe(ocr=True, deadline=deadline)
+    screen.remember(snap)
+    _listed[id(t)] = snap
+
+
+def verify_screen_list(t, deadline):
+    snap = _listed.pop(id(t), None) or screen.last()
+    return ("done", {"app": snap.app, "window": snap.window, "count": len(snap.items), "ocr": snap.ocr,
+                     "items": [i.public() for i in snap.items]})
+
+
 # --------------------------------------------------------------------------- registry
 def plain(args):
     return ("target", dict(args))
@@ -445,13 +562,18 @@ ACTIONS = {
     "system.sleep": entry("sleep", plain, run_sleep, None, "nothing: the Mac is asleep", 5),
     "timer.set": entry("timer", resolve_timer_set, run_timer_set, verify_timer_set, "the timer is in the running list", 2),
     "timer.check": entry("timer", resolve_timer_check, run_timer_check, verify_timer_check, "read from the running list", 2),
+    "screen.list": entry("look", plain, run_screen_list, verify_screen_list, "the list is what was read", 8),
+    "screen.press": entry("click", resolve_screen_press, run_screen_press, verify_screen_press,
+                          "the window changed after the press; not that the intended result happened", 6),
     "timer.cancel": entry("timer", resolve_timer_cancel, run_timer_cancel, verify_timer_cancel, "the timer left the running list", 2),
 }
 
-EFFECTS = ("open", "navigate", "media", "volume", "display", "timer", "quit", "lock", "sleep")
-DEFAULT_POLICY = {e: ("ask" if e in ("quit", "lock", "sleep") else "auto") for e in EFFECTS}
+EFFECTS = ("open", "navigate", "media", "volume", "display", "timer", "click", "quit", "lock", "sleep")
+DEFAULT_POLICY = {e: ("ask" if e in ("quit", "lock", "sleep", "click") else "auto") for e in EFFECTS}
+DEFAULT_POLICY["look"] = "auto"  # reading the screen has no effect, so it is not a setting
 EFFECT_LABELS = {"open": "Open apps", "navigate": "Open websites", "media": "Music playback", "volume": "Volume",
-                 "display": "Dark mode", "timer": "Timers and reminders", "quit": "Quit apps",
+                 "display": "Dark mode", "timer": "Timers and reminders",
+                 "click": "Click buttons on screen", "quit": "Quit apps",
                  "lock": "Lock screen", "sleep": "Sleep the Mac"}
 
 
@@ -486,5 +608,7 @@ def describe(action, target):
             "display.dark_on": "Turn dark mode on", "display.dark_off": "Turn dark mode off",
             "display.toggle": "Switch dark mode", "media.play": "Play music in Spotify", "media.pause": "Pause Spotify",
             "media.next": "Skip to the next track", "media.previous": "Go back a track",
-            "timer.check": "Read out the time left"}.get(action, action.replace(".", ": ").replace("_", " "))
-    return what.format(name=name, url=t.get("url") or "the website", level=level)
+            "timer.check": "Read out the time left",
+            "screen.list": "Read what's on screen", "screen.press": "Click “{label}” in {app}"}.get(action, action.replace(".", ": ").replace("_", " "))
+    return what.format(name=name, url=t.get("url") or "the website", level=level, label=t.get("label") or "that",
+                       app=t.get("app") or "the app")

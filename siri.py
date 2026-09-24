@@ -66,6 +66,22 @@ def jev(text, questions=None):
     return ans, int((time.time() - t) * 1000), cost
 
 
+def choose_control(spoken, labels):
+    """Jev picks which on-screen control the user named. Only the control names and the spoken words are sent."""
+    from engine import current_rid
+    names = labels[:250]
+    q = {"control": {"type": "choice", "instructions": f"Which on-screen control did the user mean by: {spoken}",
+                     "criteria": {**{n: None for n in names}, "__none__": "none of these controls"}}}
+    try:
+        ans, ms, _ = jev(spoken, q)
+    except Exception as exc:
+        diagnostics.record(current_rid(), "choose_control", "error", error=repr(exc), options=len(names))
+        return None, 0.0
+    pick, conf = ans["control"]
+    diagnostics.record(current_rid(), "choose_control", "ok", ms, options=len(names), confidence=round(conf, 2))
+    return (names.index(pick) if pick in names else None), conf
+
+
 def classify(clause):
     from engine import current_rid
     try:
@@ -108,6 +124,9 @@ REPLIES = {
     "timer.set": ["[cheerful] Timer's set.", "On it. I'll let you know.", "Done, counting down."],
     "reminder_set": ["Got it, I'll remind you.", "[cheerful] Sure, I'll give you a shout."],
     "timer.check": ["{left} left.", "You've got {left} to go."],
+    "screen.list": ["I can see {count} things in {app}. They're numbered on screen.",
+                    "{count} things in {app}, numbered on screen. Say click and a number."],
+    "screen.press": ["Clicked {label}.", "[cheerful] Pressed {label}."],
     "timer.cancel": ["Timer cancelled.", "[sighing] Fine, no timer then."],
     "timers_cancel": ["All timers cancelled.", "Cleared them all."],
     "timer_none": ["[chuckling] There's no timer running."],
@@ -149,6 +168,11 @@ def step_line(step):
         return say_line("timers_cancel" if target.get("all") else "timer.cancel")
     if action == "timer.check":
         return say_line("timer.check", left=facts.get("left", "some time"))
+    if action == "screen.list":
+        line = say_line("screen.list", count=facts.get("count", 0), app=facts.get("app") or "this window")
+        return line + (" Allow Screen Recording and I can read the text too." if facts.get("ocr") == "no_permission" else "")
+    if action == "screen.press":
+        return say_line("screen.press", label=target.get("label") or "it")
     return say_line(action, app=target.get("name") or target.get("app") or "it", level=target.get("level") or "that")
 
 
@@ -191,7 +215,8 @@ def line_for(result):
     if stop and stop["state"] == "failed" and stop["facts"].get("error") == "not_found":
         miss = {"app.open": "I can't find that app.", "app.quit": "I can't find that app.",
                 "timer.check": say_line("timer_none"), "timer.cancel": say_line("timer_none"),
-                "timer.set": say_line("timer_unclear"), "url.open": "That doesn't look like a web address."}
+                "timer.set": say_line("timer_unclear"), "url.open": "That doesn't look like a web address.",
+                "screen.press": "I can't find that on screen.", "screen.list": "I can't read this window."}
         line = miss.get(stop["action"], say_line("failed"))
     elif why in REPLIES:
         line = say_line(why)
@@ -311,7 +336,7 @@ def say(line, notify):
 
 
 # --------------------------------------------------------------------------- Engine wiring
-def make_engine(notify=None, ask=None):
+def make_engine(notify=None, ask=None, show=None):
     """The single engine. Voice-sourced mute/lock/sleep get a short spoken line before they run."""
     spoke_first = set()
 
@@ -327,7 +352,11 @@ def make_engine(notify=None, ask=None):
                 line = say_line(key) if key in REPLIES else "Okay."
                 diagnostics.record(view["id"], "speak", "before_dispatch", line=line)
                 say(line, notify)
-        elif kind == "done" and view["source"] == "cli":
+        if kind == "done" and show:
+            listed = [s for s in view.get("steps", []) if s["action"] == "screen.list" and s["state"] == "completed"]
+            if listed:
+                show(listed[-1]["facts"])  # numbered badges over the window
+        if kind == "done" and view["source"] == "cli":
             emit(notify, "Ready", f"Typed command: {view['state']}")
 
     def answer(text):
@@ -343,6 +372,8 @@ def make_engine(notify=None, ask=None):
                            model=model, said=said)
         return said
 
+    import actions
+    actions.CHOOSE = choose_control
     eng = Engine(classify, policy=confirm_policy, ask=ask,
                  answer=answer if ANSWER_PROVIDER == "openrouter" else None, on_event=on_event)
     eng.spoke_first = spoke_first
@@ -614,9 +645,9 @@ def start_bridge(eng, notify):
     return b
 
 
-def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, ask=None):
+def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, ask=None, show=None):
     global ENGINE, BRIDGE
-    ENGINE = make_engine(notify, ask)
+    ENGINE = make_engine(notify, ask, show)
     diagnostics.init(ENGINE.instance)
     diagnostics.record(None, "startup", "starting", **runtime_facts())
     try:

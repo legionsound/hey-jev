@@ -193,6 +193,40 @@ def label(text, frame, size, color=None):
     return view
 
 
+def numbers_window(facts):
+    """A click-through window spanning the listed items, one small badge per item. Controls are tinted, OCR text grey."""
+    items = facts["items"]
+    top = AppKit.NSScreen.screens()[0].frame().size.height  # AX frames are top-left on the primary display
+    xs = [i["frame"][0] for i in items]
+    ys = [i["frame"][1] for i in items]
+    x0, y0 = min(xs) - 4, min(ys) - 4
+    x1 = max(i["frame"][0] + 40 for i in items)
+    y1 = max(i["frame"][1] + 24 for i in items)
+    frame = NSMakeRect(x0, top - y1, x1 - x0, y1 - y0)
+    win = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(frame, 0, 2, False)
+    win.setOpaque_(False)
+    win.setBackgroundColor_(NSColor.clearColor())
+    win.setIgnoresMouseEvents_(True)
+    win.setLevel_(AppKit.NSStatusWindowLevel)
+    win.setCollectionBehavior_(1 << 0 | 1 << 4)  # all spaces, stationary
+    win.setReleasedWhenClosed_(False)
+    for i in items:
+        text = str(i["n"])
+        badge = NSTextField.labelWithString_(text)
+        badge.setFont_(NSFont.monospacedDigitSystemFontOfSize_weight_(11, 0.6))
+        badge.setTextColor_(NSColor.whiteColor())
+        badge.setAlignment_(1)
+        badge.setWantsLayer_(True)
+        tint = NSColor.systemGrayColor() if i["source"] == "ocr" else NSColor.controlAccentColor()
+        badge.layer().setBackgroundColor_(tint.CGColor())
+        badge.layer().setCornerRadius_(7)
+        w = 10 + 7 * len(text)
+        x, y = i["frame"][0] - x0, i["frame"][1] - y0
+        badge.setFrame_(NSMakeRect(x, (y1 - y0) - y - 15, w, 15))
+        win.contentView().addSubview_(badge)
+    return win
+
+
 class AppDelegate(NSObject):
     def applicationDidFinishLaunching_(self, _notification):
         self.controls = queue.Queue()
@@ -316,7 +350,8 @@ class AppDelegate(NSObject):
     def _run_assistant(self):
         from siri import run_voice_assistant
         try:
-            run_voice_assistant(self.notify, self.controls, self.mode, self.listening, ask=self.ask_confirm)
+            run_voice_assistant(self.notify, self.controls, self.mode, self.listening, ask=self.ask_confirm,
+                                show=self.show_numbers)
         except Exception as exc:
             self.notify("Something went wrong", str(exc))
 
@@ -884,6 +919,24 @@ class AppDelegate(NSObject):
             field.setPlaceholderString_("Default" if key in supported else "N/A")
         context = self.selected_metadata.get("context_length")
         self.model_info.setStringValue_(f"Selected: {self.selected_model}" + (f" · {context:,} context tokens" if context else ""))
+
+    @objc.python_method
+    def show_numbers(self, facts):
+        """Engine worker thread: badge each listed item with its number, over the window, for a few seconds."""
+        self.performSelectorOnMainThread_withObject_waitUntilDone_("showNumbers:", facts or {}, False)
+
+    def showNumbers_(self, facts):
+        for w in getattr(self, "number_windows", []):
+            w.orderOut_(None)
+        self.number_windows = [numbers_window(facts)] if facts.get("items") else []
+        for w in self.number_windows:
+            w.orderFrontRegardless()
+        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(12.0, self, "hideNumbers:", None, False)
+
+    def hideNumbers_(self, _timer):
+        for w in getattr(self, "number_windows", []):
+            w.orderOut_(None)
+        self.number_windows = []
 
     @objc.python_method
     def ask_confirm(self, pending):

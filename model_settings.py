@@ -148,3 +148,20 @@ def confirm_policy():
 
 def save_confirm_policy(policy):
     PREFS.setObject_forKey_(json.dumps({k: v for k, v in policy.items() if v in ("ask", "auto")}), "confirm_policy")
+
+
+TIEBREAK_DEFAULT, TIEBREAK_MIN, TIEBREAK_MAX = 85, 50, 100
+
+
+def tiebreak_threshold():
+    """Jev score (50-100) needed to pick between duplicate apps on its own. 100 means always ask."""
+    try:
+        v = int(PREFS.integerForKey_("tiebreak_threshold")) if PREFS.objectForKey_("tiebreak_threshold") is not None \
+            else TIEBREAK_DEFAULT
+    except (TypeError, ValueError):
+        v = TIEBREAK_DEFAULT
+    return max(TIEBREAK_MIN, min(TIEBREAK_MAX, v))
+
+
+def save_tiebreak_threshold(value):
+    PREFS.setInteger_forKey_(max(TIEBREAK_MIN, min(TIEBREAK_MAX, int(round(value)))), "tiebreak_threshold")

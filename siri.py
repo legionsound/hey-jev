@@ -6,7 +6,7 @@ import os, re, sys, json, time, queue, random, argparse, subprocess, threading, 
 import requests
 from dotenv import load_dotenv
 from secrets_store import get_secret, get_setting, missing_secrets
-from model_settings import answer_payload, answer_settings, confirm_policy
+from model_settings import answer_payload, answer_settings, confirm_policy, tiebreak_threshold
 import diagnostics
 import planner
 import timers
@@ -64,6 +64,31 @@ def jev(text, questions=None):
             ans[k] = (a["choice"], a.get("confidence", 0))
     cost = j.get("usage", {}).get("input_tokens", 0) * 0.042 / 1e6
     return ans, int((time.time() - t) * 1000), cost
+
+
+TIEBREAK_MAX_CHOICES = 6
+
+
+def tiebreak(clause, choices):
+    """Ask Jev which duplicate the user most likely meant. -> (index, score) or None. Engine applies the threshold."""
+    import actions
+    if not 2 <= len(choices) <= TIEBREAK_MAX_CHOICES:
+        return None
+    hints = actions.app_hints(choices, time.monotonic() + 3)
+    criteria = {}
+    for i, h in enumerate(hints):
+        bits = [f"{h['name']} in {h['folder']}"]
+        if h["running"]:
+            bits.append("running right now")
+        if h["last_opened"]:
+            bits.append(f"last opened {h['last_opened']}")
+        criteria[f"app_{i}"] = ", ".join(bits)
+    q = {"pick": {"type": "choice", "instructions": "Several installed apps match. Which one did the user most likely mean?",
+                  "criteria": criteria}}
+    ans, ms, cost = jev(clause, q)
+    choice, conf = ans["pick"]
+    print(f"  jev tiebreak {clause!r}: {choice} {conf:.2f} ({ms}ms ${cost:.6f})")
+    return int(choice.split("_")[1]), conf
 
 
 def classify(clause):
@@ -340,7 +365,8 @@ def make_engine(notify=None, ask=None):
                            model=model, said=said)
         return said
 
-    eng = Engine(classify, policy=confirm_policy, ask=ask,
+    eng = Engine(classify, policy=confirm_policy, ask=ask, tiebreak=tiebreak,
+                 threshold=lambda: float("inf") if tiebreak_threshold() >= 100 else tiebreak_threshold() / 100,
                  answer=answer if ANSWER_PROVIDER == "openrouter" else None, on_event=on_event)
     eng.spoke_first = spoke_first
     return eng

@@ -38,8 +38,9 @@ from AppKit import (
 from AppKit import NSPopover, NSViewController
 from Foundation import NSObject, NSTimer, NSUserDefaults
 from actions import EFFECT_LABELS, EFFECTS
-from model_settings import (PREFS, PARAMETERS, answer_settings, cached_models, confirm_policy, fetch_models,
-                            save_answer_settings, save_confirm_policy, validate_parameters)
+from model_settings import (PREFS, PARAMETERS, TIEBREAK_MAX, TIEBREAK_MIN, answer_settings, cached_models, confirm_policy,
+                            fetch_models, save_answer_settings, save_confirm_policy, save_tiebreak_threshold,
+                            tiebreak_threshold, validate_parameters)
 import voice_output
 from secrets_store import KEY_NAMES, get_secret, get_setting, missing_secrets, save_secret
 
@@ -419,12 +420,27 @@ class AppDelegate(NSObject):
         policy = confirm_policy()
         self.policy_popups = {}
         for i, effect in enumerate(EFFECTS):
-            y = 350 - i * 36
+            y = 360 - i * 32
             confirms.addSubview_(label(EFFECT_LABELS[effect], NSMakeRect(24, y + 2, 250, 24), 13))
             popup = self._popup(confirms, ["Ask first", "Automatic"], NSMakeRect(300, y, 200, 28))
             popup.selectItemAtIndex_(0 if policy[effect] == "ask" else 1)
             popup.setAccessibilityLabel_(f"{EFFECT_LABELS[effect]} confirmation")
             self.policy_popups[effect] = popup
+        confirms.addSubview_(label("Pick between duplicate apps at", NSMakeRect(24, 56, 250, 24), 13))
+        slider = NSSlider.alloc().initWithFrame_(NSMakeRect(300, 56, 200, 24))
+        slider.setMinValue_(TIEBREAK_MIN)
+        slider.setMaxValue_(TIEBREAK_MAX)
+        slider.setDoubleValue_(tiebreak_threshold())
+        slider.setTarget_(self)
+        slider.setAction_("tiebreakChanged:")
+        slider.setAccessibilityLabel_("Jev score needed to pick between duplicate apps")
+        confirms.addSubview_(slider)
+        self.tiebreak_slider = slider
+        self.tiebreak_value = label("", NSMakeRect(510, 56, 90, 24), 13)
+        confirms.addSubview_(self.tiebreak_value)
+        self.tiebreakChanged_(slider)
+        confirms.addSubview_(label("A Jev score, not a guarantee. Below it, Jev asks which one. Quitting always asks.",
+                                   NSMakeRect(24, 28, 575, 20), 11, NSColor.secondaryLabelColor()))
         self.settings_message = label("", NSMakeRect(25, 48, 630, 24), 12, NSColor.systemRedColor())
         content.addSubview_(self.settings_message)
         for title, action, x in (("Cancel", "closeSettings:", 457), ("Save", "saveSettings:", 556)):
@@ -440,6 +456,10 @@ class AppDelegate(NSObject):
         NSApp.activateIgnoringOtherApps_(True)
         if get_secret("OPENROUTER_API_KEY"):
             self.refreshModels_(None)
+
+    def tiebreakChanged_(self, sender):
+        v = int(round(sender.doubleValue()))
+        self.tiebreak_value.setStringValue_("Always ask" if v >= TIEBREAK_MAX else f"{v}")
 
     @objc.python_method
     def _popup(self, parent, titles, frame, action=None):
@@ -480,6 +500,7 @@ class AppDelegate(NSObject):
             save_secret("ANSWER_PROVIDER", answer_provider)
             save_answer_settings(self.selected_model, values, self.selected_metadata)
             save_confirm_policy({e: ("ask", "auto")[p.indexOfSelectedItem()] for e, p in self.policy_popups.items()})
+            save_tiebreak_threshold(self.tiebreak_slider.doubleValue())
             from siri import reload_keys
             reload_keys()
             self.closeSettings_(None)

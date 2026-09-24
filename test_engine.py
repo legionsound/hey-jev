@@ -226,6 +226,35 @@ class PlannerTests(unittest.TestCase):
         for unknown in ["go to Zorblat", "go to YouTube Music", "go to the store", "open YouTube"]:
             self.assertEqual(planner.site_url(unknown), "", unknown)
 
+    def test_explicit_browser_intent(self):
+        def ans_for(target="website"):
+            return {"category": ("mac_command", 0.9), "target": (target, 0.9),
+                    "compound": (False, 0.9), "app_action": ("open", 0.9)}
+        safari = "com.apple.Safari"
+        chrome = "org.google.Chrome"
+        # qualifier in the clause wins
+        kind, got = planner.plan("go to google.com in Safari", lambda _: ans_for())
+        self.assertEqual((kind, got[0]["args"].get("browser")), ("steps", safari))
+        # literal URL path/query/fragment preserved
+        kind, got = planner.plan("go to https://a.com/x?y=1#z in Chrome", lambda _: ans_for())
+        self.assertEqual(got[0]["args"]["url"], "https://a.com/x?y=1#z")
+        self.assertEqual(got[0]["args"]["browser"], chrome)
+        # earlier app.open inherits within the same request
+        def cls(clause):
+            if clause.startswith("open "):
+                return {"category": ("mac_command", 0.9), "target": ("app", 0.9),
+                        "compound": (False, 0.9), "app_action": ("open", 0.9)}
+            return ans_for()
+        kind, got = planner.plan("open Safari, then go to google.com", cls)
+        self.assertEqual(kind, "steps")
+        self.assertEqual(got[1]["args"].get("browser"), safari)
+        # current-clause qualifier beats the earlier app.open
+        kind, got = planner.plan("open Safari, then go to google.com in Chrome", cls)
+        self.assertEqual(got[1]["args"].get("browser"), chrome)
+        # unsupported browser clarifies with zero navigation
+        self.assertEqual(planner.plan("go to google.com in Firefox", lambda _: ans_for()),
+                         ("clarify", "unsupported_browser"))
+
 
 class SpeechTests(unittest.TestCase):
     def setUp(self):

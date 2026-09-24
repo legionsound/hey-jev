@@ -3,6 +3,7 @@ import queue
 import sys
 import threading
 
+import AppKit
 import objc
 from AppKit import (
     NSApp, NSApplicationActivationPolicyAccessory, NSStatusBar, NSVariableStatusItemLength,
@@ -30,6 +31,8 @@ from AppKit import (
     NSVisualEffectMaterialHUDWindow,
     NSVisualEffectStateActive,
     NSVisualEffectView,
+    NSImageView,
+    NSImageSymbolConfiguration,
     NSWindowStyleMaskClosable,
     NSWindowStyleMaskMiniaturizable,
     NSWindowStyleMaskFullSizeContentView,
@@ -45,7 +48,7 @@ import voice_output
 from secrets_store import KEY_NAMES, get_secret, get_setting, missing_secrets, save_secret
 
 
-BASE_HEIGHT, ROW = 250, 24
+WIDTH, BASE_HEIGHT, ROW = 400, 170, 26
 STICK_TOP, STICK_BOTTOM = 8, 32  # NSViewMinYMargin, NSViewMaxYMargin
 NORMAL, FLOATING = 0, 3  # NSNormalWindowLevel, NSFloatingWindowLevel
 HINTS = {"ptt": "Hold right Option to talk", "wake": "Say \u201cHey Jev\u201d, then your command"}
@@ -62,6 +65,55 @@ STATUS_COLORS = {
     "Something went wrong": NSColor.systemRedColor(),
     "Time's up": NSColor.systemYellowColor(),
 }
+
+
+STATE_SYMBOLS = {
+    "Starting": "hourglass", "Ready": "checkmark", "Listening": "waveform", "Transcribing": "text.bubble",
+    "Thinking": "sparkles", "Doing it": "bolt.fill", "Speaking": "speaker.wave.2.fill",
+    "Something went wrong": "exclamationmark.triangle.fill", "Time's up": "bell.fill", "Paused": "pause.fill",
+    "Dictation unavailable": "mic.slash.fill", "Couldn't hear that": "ear", "Mic test": "mic.fill",
+}
+
+
+def symbol(name, size, weight=0.23):
+    image = NSImage.imageWithSystemSymbolName_accessibilityDescription_(name, None)
+    config = NSImageSymbolConfiguration.configurationWithPointSize_weight_(size, weight)
+    return image.imageWithSymbolConfiguration_(config) if image else None
+
+
+def symbol_button(name, target, action, tip, size=15):
+    button = NSButton.buttonWithImage_target_action_(symbol(name, size), target, action)
+    button.setBordered_(False)
+    button.setToolTip_(tip)
+    button.setAccessibilityLabel_(tip)
+    button.setContentTintColor_(NSColor.secondaryLabelColor())
+    return button
+
+
+def text(value, frame, size, color=None, weight=0.0):
+    """Plain system text: regular weight unless asked, one line, tail truncation."""
+    view = label(value, frame, size, color)
+    view.setFont_(NSFont.systemFontOfSize_weight_(size, weight))
+    return view
+
+
+def glass_backdrop(window, content):
+    """Liquid Glass (NSGlassEffectView, macOS 26+) behind the content; the older HUD material elsewhere."""
+    glass_class = objc.lookUpClass("NSGlassEffectView") if hasattr(AppKit, "NSGlassEffectView") else None
+    if glass_class is not None:
+        window.setOpaque_(False)
+        window.setBackgroundColor_(NSColor.clearColor())
+        glass = glass_class.alloc().initWithFrame_(content.frame())
+        glass.setCornerRadius_(26)
+        glass.setContentView_(content)
+        glass.setAutoresizingMask_(18)
+        return glass
+    backdrop = NSVisualEffectView.alloc().initWithFrame_(content.frame())
+    backdrop.setMaterial_(NSVisualEffectMaterialHUDWindow)
+    backdrop.setBlendingMode_(NSVisualEffectBlendingModeBehindWindow)
+    backdrop.setState_(NSVisualEffectStateActive)
+    backdrop.addSubview_(content)
+    return backdrop
 
 
 def label(text, frame, size, color=None):
@@ -88,9 +140,10 @@ class AppDelegate(NSObject):
         style = (NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable
                  | NSWindowStyleMaskFullSizeContentView)
         self.panel = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-            NSMakeRect(0, 0, 460, 250), style, NSBackingStoreBuffered, False
+            NSMakeRect(0, 0, WIDTH, BASE_HEIGHT), style, NSBackingStoreBuffered, False
         )
         self.panel.setTitle_("Hey Jev")
+        self.panel.setTitleVisibility_(1)  # hidden: the status itself is the headline
         self.panel.setTitlebarAppearsTransparent_(True)
         self.panel.setMovableByWindowBackground_(True)
         self.panel.setReleasedWhenClosed_(False)  # closing just hides it, the Dock icon brings it back
@@ -98,58 +151,57 @@ class AppDelegate(NSObject):
         self.panel.setLevel_(FLOATING if self.on_top else NORMAL)
         self._add_window_menu()
 
-        background = NSVisualEffectView.alloc().initWithFrame_(NSMakeRect(0, 0, 460, 250))
-        background.setMaterial_(NSVisualEffectMaterialHUDWindow)
-        background.setBlendingMode_(NSVisualEffectBlendingModeBehindWindow)
-        background.setState_(NSVisualEffectStateActive)
+        background = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, WIDTH, BASE_HEIGHT))
         background.setAutoresizingMask_(18)  # grow with the window
-        self.panel.setContentView_(background)
+        self.panel.setContentView_(glass_backdrop(self.panel, background))
         self.background = background
         self.timer_rows = []
 
-        self.dot = label("●", NSMakeRect(25, 170, 24, 30), 18, NSColor.systemOrangeColor())
-        self.status = label("Starting", NSMakeRect(55, 171, 375, 30), 22)
-        self.detail = label("Loading Whisper…", NSMakeRect(27, 135, 405, 30), 14, NSColor.secondaryLabelColor())
-        self.hint = label(HINTS[self.mode], NSMakeRect(27, 12, 405, 22), 12, NSColor.tertiaryLabelColor())
-        for view in (self.dot, self.status, self.detail, self.hint):
-            background.addSubview_(view)
-        for view in (self.dot, self.status, self.detail):
+        # Headline: a tinted symbol badge, the state, and one line of detail.
+        self.badge = NSView.alloc().initWithFrame_(NSMakeRect(20, BASE_HEIGHT - 94, 44, 44))
+        self.badge.setWantsLayer_(True)
+        self.badge.layer().setCornerRadius_(22)
+        self.badge_icon = NSImageView.alloc().initWithFrame_(NSMakeRect(10, 10, 24, 24))
+        self.badge.addSubview_(self.badge_icon)
+        self.status = text("Starting", NSMakeRect(76, BASE_HEIGHT - 74, WIDTH - 96, 26), 20, weight=0.3)
+        self.detail = text("Loading Whisper…", NSMakeRect(76, BASE_HEIGHT - 96, WIDTH - 96, 20), 13,
+                           NSColor.secondaryLabelColor())
+        self.hint = text(HINTS[self.mode], NSMakeRect(0, 0, 10, 10), 12)  # kept for state, shown via detail
+        for view in (self.badge, self.status, self.detail):
             view.setAutoresizingMask_(STICK_TOP)
-        self.hint.setAutoresizingMask_(STICK_BOTTOM)
+            background.addSubview_(view)
+        self.dot = self.badge  # updateStatus_ paints through _paint_state
 
-        settings = NSButton.buttonWithTitle_target_action_("Settings…", self, "showSettings:")
-        settings.setFrame_(NSMakeRect(350, 212, 98, 24))  # top right, in line with the title bar
-        settings.setBezelStyle_(1)  # rounded, so the title shows (9 is the "?" help button)
-        settings.setControlSize_(1)  # small
-        settings.setFont_(NSFont.systemFontOfSize_(11))
+        settings = symbol_button("gearshape", self, "showSettings:", "Settings", 17)
+        settings.setFrame_(NSMakeRect(WIDTH - 42, BASE_HEIGHT - 30, 28, 28))  # level with the traffic lights
         settings.setAutoresizingMask_(STICK_TOP)
         background.addSubview_(settings)
 
+        # Control bar: mode, voice, pause. Icons carry the meaning; tooltips and accessibility labels spell it out.
         self.mode_switch = NSSegmentedControl.segmentedControlWithLabels_trackingMode_target_action_(
             ["Hold Option", "Hey Jev"], 0, self, "modeChanged:"
         )
-        self.mode_switch.setControlSize_(1)
-        self.mode_switch.setFont_(NSFont.systemFontOfSize_(11))
-        self.mode_switch.setFrame_(NSMakeRect(24, 92, 275, 28))
+        self.mode_switch.setFrame_(NSMakeRect(16, 18, 184, 28))
         self.mode_switch.setSelectedSegment_(MODES.index(self.mode))
-        self.mode_switch.setAutoresizingMask_(STICK_BOTTOM)
-        background.addSubview_(self.mode_switch)
-        self.pause_button = NSButton.buttonWithTitle_target_action_("Pause", self, "toggleListening:")
-        self.pause_button.setFrame_(NSMakeRect(320, 91, 115, 30))
-        background.addSubview_(self.pause_button)
-        self.voice_label = label("Voice", NSMakeRect(27, 57, 85, 22), 12)
-        background.addSubview_(self.voice_label)
-        self.voice_slider = self._slider(NSMakeRect(110, 55, 205, 25))
-        background.addSubview_(self.voice_slider)
-        self.mute_button = NSButton.buttonWithTitle_target_action_("Mute voice", self, "toggleVoice:")
-        self.mute_button.setFrame_(NSMakeRect(320, 51, 115, 30))
-        background.addSubview_(self.mute_button)
+        self.mode_switch.setToolTip_("Hold right Option to talk, or say \u201cHey Jev\u201d")
+        self.mute_button = symbol_button("speaker.wave.2.fill", self, "toggleVoice:", "Mute Jev's voice", 14)
+        self.mute_button.setFrame_(NSMakeRect(212, 19, 26, 26))
+        self.voice_slider = self._slider(NSMakeRect(240, 20, 96, 24))
+        self.voice_slider.setControlSize_(1)
+        self.voice_label = text("Voice", NSMakeRect(0, 0, 10, 10), 12)  # value lives in the slider tooltip
+        self.pause_button = symbol_button("pause.fill", self, "toggleListening:", "Pause listening", 13)
+        self.pause_button.setBordered_(True)
+        self.pause_button.setBezelStyle_(7)  # circular
+        self.pause_button.setFrame_(NSMakeRect(WIDTH - 50, 16, 34, 32))
+        for view in (self.mode_switch, self.mute_button, self.voice_slider, self.pause_button):
+            view.setAutoresizingMask_(STICK_BOTTOM)
+            background.addSubview_(view)
         self._build_status_menu()
         self._sync_controls()
         NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(0.5, self, "tick:", None, True)
 
         screen = NSScreen.mainScreen().visibleFrame()
-        self.panel.setFrameOrigin_(NSMakePoint(screen.origin.x + (screen.size.width - 460) / 2,
+        self.panel.setFrameOrigin_(NSMakePoint(screen.origin.x + (screen.size.width - WIDTH) / 2,
                                                screen.origin.y + screen.size.height - 300))
         if self.menu_only:
             NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
@@ -293,15 +345,21 @@ class AppDelegate(NSObject):
         for i, item in enumerate(self.mode_items):
             item.setState_(int(MODES[i] == self.mode))
         self.pause_item.setTitle_("Pause listening" if self.listening else "Resume listening")
-        self.pause_button.setTitle_("Pause" if self.listening else "Resume")
+        self.pause_button.setImage_(symbol("pause.fill" if self.listening else "play.fill", 13))
+        self.pause_button.setToolTip_("Pause listening" if self.listening else "Resume listening")
+        self.pause_button.setAccessibilityLabel_(self.pause_button.toolTip())
         self.hint.setStringValue_(HINTS[self.mode] if self.listening else "Microphone paused · timers remain active")
         self.menu_only_item.setState_(int(self.menu_only))
         gain, mute = voice_output.volume(), voice_output.muted()
         self.voice_slider.setDoubleValue_(gain)
         self.menu_voice_slider.setDoubleValue_(gain)
         self.voice_label.setStringValue_(f"Voice {round(gain * 100)}%")
+        self.voice_slider.setToolTip_(f"Jev's voice volume · {round(gain * 100)}%")
         self.menu_voice_label.setStringValue_(f"Voice volume · {round(gain * 100)}%" + (" · off" if mute else ""))
-        self.mute_button.setTitle_("Voice off" if mute else "Mute voice")
+        self.mute_button.setImage_(symbol("speaker.slash.fill" if mute else "speaker.wave.2.fill", 14))
+        self.mute_button.setToolTip_("Unmute Jev's voice" if mute else "Mute Jev's voice")
+        self.mute_button.setAccessibilityLabel_(self.mute_button.toolTip())
+        self.voice_slider.setEnabled_(not mute)
         self.mute_item.setState_(int(mute))
 
     def menuMode_(self, sender):
@@ -735,10 +793,10 @@ class AppDelegate(NSObject):
         top = frame.origin.y + frame.size.height
         self.panel.setFrame_display_animate_(NSMakeRect(frame.origin.x, top - height, frame.size.width, height), True, True)
         for i in range(count):
-            y = 130 + ROW * (count - 1 - i)  # soonest on top, just above the bottom row
-            name_view = label("", NSMakeRect(27, y, 280, 20), 13, NSColor.secondaryLabelColor())
-            time_view = label("", NSMakeRect(310, y, 98, 20), 15, NSColor.systemTealColor())
-            time_view.setFont_(NSFont.monospacedDigitSystemFontOfSize_weight_(15, 0.4))
+            y = 62 + ROW * (count - 1 - i)  # soonest on top, just above the control bar
+            name_view = text("", NSMakeRect(76, y, WIDTH - 200, 20), 13, NSColor.secondaryLabelColor())
+            time_view = text("", NSMakeRect(WIDTH - 118, y, 100, 20), 15, NSColor.systemTealColor())
+            time_view.setFont_(NSFont.monospacedDigitSystemFontOfSize_weight_(15, 0.3))
             time_view.setAlignment_(2)  # right
             for v in (name_view, time_view):
                 v.setAutoresizingMask_(STICK_BOTTOM)
@@ -754,7 +812,14 @@ class AppDelegate(NSObject):
         self.status_item.button().setToolTip_(f"Hey Jev: {state}")
         self.status.setStringValue_(state)
         self.detail.setStringValue_(detail)
-        self.dot.setTextColor_(STATUS_COLORS.get(state, NSColor.labelColor()))
+        self._paint_state(state)
+
+    @objc.python_method
+    def _paint_state(self, state):
+        color = STATUS_COLORS.get(state, NSColor.systemGrayColor())
+        self.badge.layer().setBackgroundColor_(color.colorWithAlphaComponent_(0.18).CGColor())
+        self.badge_icon.setImage_(symbol(STATE_SYMBOLS.get(state, "circle.fill"), 19, 0.3))
+        self.badge_icon.setContentTintColor_(color)
 
     def applicationShouldTerminateAfterLastWindowClosed_(self, _application):
         return False  # keep listening with the window closed, the Dock icon reopens it

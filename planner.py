@@ -70,6 +70,17 @@ def url_span(clause):
     return m[0].rstrip(".,!?") if m else ""
 
 
+SITE_SPAN = re.compile(r"\b(?:go|navigate|head|take\s+me)\s+to\s+(?:the\s+)?(.+?)"
+                       r"(?:\s+(?:website|web\s*site|site|homepage|page))?(?:\s+(?:please|for me|now))*[\s.!?]*$", re.I)
+
+
+def site_url(clause):
+    """A curated site for a spoken name with no dot ("go to YouTube"), or "". Unknown names are never guessed."""
+    import url_adapter
+    m = SITE_SPAN.search(clause)
+    return url_adapter.site_for_name(m[1].strip(" .,!?")) or "" if m else ""
+
+
 PRESS_SPAN = re.compile(r"\b(?:click|press|tap|hit|choose|select|pick)\s+(?:on\s+)?(?:the\s+)?(.+?)"
                         r"(?:\s+(?:button|menu|link|tab|item|checkbox|option|icon))?(?:\s+(?:please|for me|now))*[\s.!?]*$",
                         re.I)
@@ -144,7 +155,7 @@ def step_for(ans, target, clause):
             return None
         return (conf, f"app.{act}", {"app": name})
     if target == "website":
-        url = url_span(clause)
+        url = url_span(clause) or site_url(clause)
         return (ans["target"][1], "url.open", {"url": url}) if url else None
     act, conf = ans.get(BRANCH[target], ("none", 0.0))  # an unanswered branch acts on nothing
     if act == "none" or conf < GATE:

@@ -5,8 +5,15 @@ run_url_open(target, deadline) -> None
 verify_url_open(target, deadline) -> ("done"|"wait"|"failed"|"unverified", facts)
 
 Strict comparison: equal after lowercasing host only, and treating empty
-path as "/". Scheme, www, explicit port, path, RAW query string, and
-fragment must match. Any difference (incl. redirects) -> unverified.
+path as "/". Redirect policy (exact, nothing else tolerated):
+- www equivalence only for hosts in WWW_CANONICAL (bare and www. forms
+  are equal in either direction; e.g. youtube.com == www.youtube.com).
+  Any other host pair, including example.test vs www.example.test, must
+  match exactly.
+- http requested -> https observed is an accepted upgrade. https
+  requested -> http observed is never accepted.
+Explicit port, path, RAW query string, and fragment must match. Any other
+difference (incl. other redirects) -> unverified.
 
 Capability split (honest, per dictionary evidence):
 - Chrome exposes a unique per-tab id (scripting.sdef, class tab, property
@@ -80,16 +87,40 @@ def normalize_url(url):
     return p
 
 
+# Hosts whose bare and www. forms are known to serve the same destination.
+# Everything else compares exactly: www.evil.test != evil.test.
+WWW_CANONICAL = frozenset({"youtube.com", "google.com"})
+
+# Observed tab states that mean "navigation hasn't landed yet": keep polling.
+# Any other non-http(s) observed URL is reported, not waited on.
+INITIAL_TAB_STATES = frozenset({"chrome://newtab/", "about:blank", ""})
+
+
+def _hosts_equal(a, b):
+    """Lowercased compare with www equivalence only inside WWW_CANONICAL."""
+    ah, bh = (a or "").lower(), (b or "").lower()
+    if ah == bh:
+        return True
+    if ah.startswith("www."):
+        bare, wwwd = ah[4:], bh
+    elif bh.startswith("www."):
+        bare, wwwd = bh[4:], ah
+    else:
+        return False
+    return bare == wwwd and bare in WWW_CANONICAL
+
+
 def urls_equal(requested, observed):
-    """Strict compare per contract. Returns (equal: bool, detail: str)."""
+    """Compare per contract. Returns (equal: bool, detail: str)."""
     try:
         a = normalize_url(requested)
         b = normalize_url(observed)
     except ValueError as e:
         return False, str(e)
     if a.scheme != b.scheme:
-        return False, "scheme differs"
-    if (a.hostname or "").lower() != (b.hostname or "").lower():
+        if not (a.scheme == "http" and b.scheme == "https"):
+            return False, "scheme differs"
+    if not _hosts_equal(a.hostname, b.hostname):
         return False, "host differs"
     # Explicit ports compared directly: omitted != explicit, even when
     # the explicit value equals the scheme default. Only the two cleared
@@ -120,6 +151,31 @@ def _rebuild(p):
         netloc += f":{port}"
     return urllib.parse.urlunsplit(
         (p.scheme, netloc, p.path or "", p.query, p.fragment))
+
+
+SITE_FOR_NAME = {
+    "youtube": "https://www.youtube.com/",
+    "google": "https://www.google.com/",
+    "gmail": "https://mail.google.com/",
+    "github": "https://github.com/",
+    "reddit": "https://www.reddit.com/",
+    "netflix": "https://www.netflix.com/",
+    "amazon": "https://www.amazon.com/",
+    "wikipedia": "https://www.wikipedia.org/",
+    "twitter": "https://x.com/",
+    "x": "https://x.com/",
+    "facebook": "https://www.facebook.com/",
+    "instagram": "https://www.instagram.com/",
+    "linkedin": "https://www.linkedin.com/",
+    "chatgpt": "https://chatgpt.com/",
+    "claude": "https://claude.ai/",
+}
+
+
+def site_for_name(name):
+    """Curated site URL for a whole spoken name, or None. Never guesses."""
+    key = (name or "").strip().lower()
+    return SITE_FOR_NAME.get(key)
 
 
 def resolve_url(spoken):
@@ -309,24 +365,34 @@ def verify_url_open(target, deadline, _run=subprocess.run):
         if ident.startswith(prefix):
             ident = ident[len(prefix):]
         if not ident:
-            return ("unverified", {"observed": None,
+            return ("unverified", {"requested": url, "observed": None,
                                    "reason": "missing tab identity"})
         rem = _remaining(deadline)
         status, observed = _read_chrome_tab(ident, max(rem, 0.0), _run=_run)
         if status == "GONE":
-            return ("unverified", {"observed": None,
+            return ("unverified", {"requested": url, "observed": None,
                                    "reason": "tab closed; id not reused"})
         if observed is None:
-            return ("wait", {"reason": "tab not readable yet"})
+            return ("wait", {"requested": url, "observed": None,
+                             "reason": "tab not readable yet"})
+        if (observed or "") in INITIAL_TAB_STATES:
+            return ("wait", {"requested": url, "observed": observed,
+                             "reason": "page not loaded yet"})
+        try:
+            normalize_url(observed)
+        except ValueError as e:
+            return ("unverified", {"requested": url, "observed": observed,
+                                   "reason": f"unexpected tab url: {e}"})
         ok, detail = urls_equal(url, observed)
         if ok:
-            return ("done", {"observed": observed})
-        return ("unverified", {"observed": observed, "reason": detail})
+            return ("done", {"requested": url, "observed": observed})
+        return ("unverified", {"requested": url, "observed": observed,
+                               "reason": detail})
     if browser == "com.apple.Safari":
-        return ("unverified", {"observed": None,
+        return ("unverified", {"requested": url, "observed": None,
                                "reason": "safari exposes no tab id; opened only",
                                "opened_with": browser})
-    return ("unverified", {"observed": None,
+    return ("unverified", {"requested": url, "observed": None,
                            "reason": "unsupported browser" if browser
                            else "unknown browser",
                            "opened_with": browser})

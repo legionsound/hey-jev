@@ -216,6 +216,16 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(planner.url_span("go to google.com."), "google.com")
         self.assertEqual(planner.plan("a then b then c then d then e then f", lambda _: {}), ("clarify", "too_many_steps"))
 
+    def test_site_names_without_a_dot(self):
+        ans = {"category": ("mac_command", 0.9), "target": ("website", 0.9), "compound": (False, 0.9)}
+        self.assertEqual(planner.plan("go to YouTube", lambda _: ans),
+                         ("steps", [{"clause": "go to YouTube", "action": "url.open",
+                                     "args": {"url": "https://www.youtube.com/"}}]))
+        self.assertEqual(planner.site_url("take me to the Gmail website please."), "https://mail.google.com/")
+        self.assertEqual(planner.site_url("go to youtube.com"), "")  # dotted names stay url_span's job
+        for unknown in ["go to Zorblat", "go to YouTube Music", "go to the store", "open YouTube"]:
+            self.assertEqual(planner.site_url(unknown), "", unknown)
+
 
 class SpeechTests(unittest.TestCase):
     def setUp(self):

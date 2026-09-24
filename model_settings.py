@@ -80,6 +80,8 @@ def answer_payload(messages, *, reminder=False):
     # Preserve the old 80/120 budgets until changed; user overrides apply to both paths.
     if "max_tokens" in supported:
         payload.setdefault("max_tokens", 120 if reminder else 80)
+    if "reasoning" in supported and not any(k in settings["parameters"] for k in ("reasoning", "reasoning_effort")):
+        payload["reasoning"] = {"effort": "minimal"}  # else thinking can spend the whole short budget, content empty
     if reminder and "response_format" in supported:
         payload["response_format"] = {"type": "json_object"}
     if not reminder:

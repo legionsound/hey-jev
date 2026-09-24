@@ -122,6 +122,7 @@ REPLIES = {
     "declined": ["Okay, I won't.", "Cancelled."],
     "cancelled": ["Stopped."],
     "busy": ["[sighing] I'm swamped, give me a second."],
+    "answer_failed": ["[sighing] I couldn't get an answer to that just now.", "Hm, my answer didn't come through."],
 }
 SPEAK_FIRST = {"volume.mute", "system.lock", "system.sleep"}  # speech can't follow these
 
@@ -171,6 +172,8 @@ def line_for(result):
             misses = 0
             return say_line("give_up")
         return say_line("clarify")
+    if result.get("error") == "answer_failed":
+        return say_line("answer_failed")
     stop = next((s for s in steps if s["state"] not in ("completed", "skipped", "not_started")), None)
     done = [s for s in steps if s["state"] == "completed"]
     why = stop["state"] if stop else state

@@ -174,7 +174,11 @@ class Engine:
             if kind == "clarify":
                 return self._finish(rec, "needs_clarification", detail=payload)
         if kind == "answer":
-            said = self.answer(rec["text"])
+            try:
+                said = self.answer(rec["text"])
+            except Exception as exc:  # no effect was involved: a definite failure with the provider's reason
+                with self.lock:
+                    return self._finish(rec, "failed", error="answer_failed", detail=str(exc)[:300])
             with self.lock:
                 return self._finish(rec, "answered", say=said)
         steps = [{"index": i, "clause": s["clause"], "action": s["action"], "state": "not_started",

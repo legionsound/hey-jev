@@ -5,6 +5,7 @@ resolve(args) -> ("target", t) | ("choices", [...]) | ("none", reason)
 run(target, deadline) -> None, may record prior state in target; raises Failed or Timeout
 verify(target, deadline) -> ("done" | "wait" | "failed" | "unverified", facts), or None when nothing can be read
 """
+import functools
 import os
 import re
 import subprocess
@@ -95,9 +96,18 @@ def verify_app_open(t, deadline):
     return ("wait", facts)
 
 
+def helper_env():
+    """Environment for fixed Python helpers. In the py2app bundle sys.executable is Contents/MacOS/python, a symlink
+    that starts the base interpreter without the app's venv; pass the app's own sys.path so AppKit imports there too."""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(p for p in sys.path if p)
+    return env
+
+
 QUIT_HELPER = "\n".join([
     "import os, sys",
     "from AppKit import NSRunningApplication",
+    "print('ready', flush=True)",
     "bid, path = sys.argv[1], os.path.realpath(sys.argv[2])",
     "for pid in map(int, sys.argv[3:]):",
     "    app = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)",
@@ -116,8 +126,20 @@ def run_app_quit(t, deadline):
     pids = [pid for path, pid in running(t["bundle_id"], deadline) if path == t.get("path") and pid]
     if not pids:
         raise Failed(f"{t.get('name') or 'that app'} is not running from {t.get('path')}")
-    out = sh([sys.executable, "-c", QUIT_HELPER, t["bundle_id"], t["path"], *map(str, pids)], deadline, effect=True)
-    results = dict(line.split() for line in out.splitlines() if line.strip())
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise Timeout("quit helper")
+    try:
+        r = subprocess.run([sys.executable, "-c", QUIT_HELPER, t["bundle_id"], t["path"], *map(str, pids)],
+                           capture_output=True, text=True, timeout=left, env=helper_env())
+    except subprocess.TimeoutExpired:
+        raise Timeout("quit helper")
+    lines = r.stdout.split()
+    if not lines or lines[0] != "ready":  # helper never got to terminate: nothing was sent
+        raise Failed(f"quit helper could not start: {r.stderr.strip()[-300:] or r.returncode}")
+    if r.returncode:
+        raise Uncertain(f"quit helper exited {r.returncode}: {r.stderr.strip()[-300:]}")
+    results = dict(line.split() for line in r.stdout.splitlines()[1:] if line.strip())
     t["quit"] = results
     if "sent" not in results.values():
         raise Failed(f"nothing quit: {results}")
@@ -356,7 +378,8 @@ def run_url(t, deadline):
     Any error from the adapter after that (no tab id, osascript error) is Uncertain: a tab may exist."""
     try:
         url_adapter.normalize_url(t.get("url", ""))
-        browser = url_adapter.default_browser_for_url(t["url"], max(0.1, deadline - time.monotonic()))
+        browser = url_adapter.default_browser_for_url(t["url"], max(0.1, deadline - time.monotonic()),
+                                                      _run=functools.partial(subprocess.run, env=helper_env()))
     except TimeoutError as exc:
         raise Failed(f"browser lookup timed out: {exc}")
     except (RuntimeError, ValueError) as exc:

@@ -145,32 +145,43 @@ class ConfirmationTargetTests(unittest.TestCase):
         kind, t = actions.resolve_timer_cancel({"text": "cancel all timers"})
         self.assertEqual(actions.describe("timer.cancel", t), "Cancel all 1 timer")
 
+    def run_ok(self, out):
+        return MagicMock(returncode=0, stdout=out, stderr="")
+
     def test_quit_targets_the_resolved_install_only(self):
         t = {"name": "Live", "bundle_id": "com.ableton.live", "path": "/Applications/Live.app"}
         running = [("/Applications/Old/Live.app", 111), ("/Applications/Live.app", 222)]
         with patch.object(actions, "running", return_value=running), \
-             patch.object(actions, "sh", return_value="222 sent") as sh:
+             patch.object(actions.subprocess, "run", return_value=self.run_ok("ready\n222 sent\n")) as run:
             actions.run_app_quit(t, time.monotonic() + 5)
-        cmd = sh.call_args[0][0]
+        cmd = run.call_args[0][0]
         self.assertEqual((cmd[0], cmd[1], cmd[3:]), (sys.executable, "-c", ["com.ableton.live", "/Applications/Live.app", "222"]))
-        self.assertTrue(sh.call_args.kwargs["effect"])  # dispatch errors are uncertain
-        with patch.object(actions, "running", return_value=running[:1]), patch.object(actions, "sh") as sh:
+        self.assertLessEqual(run.call_args.kwargs["timeout"], 5)
+        self.assertEqual(t["quit"], {"222": "sent"})
+        with patch.object(actions, "running", return_value=running[:1]), patch.object(actions.subprocess, "run") as run:
             with self.assertRaises(Failed):  # only the other install runs: refuse, never quit it
                 actions.run_app_quit(t, time.monotonic() + 5)
-            sh.assert_not_called()
+            run.assert_not_called()
 
     def test_replaced_process_is_not_terminated(self):
         with patch.object(actions, "running", return_value=[("/Applications/Live.app", 222)]), \
-             patch.object(actions, "sh", return_value="222 mismatch"):
+             patch.object(actions.subprocess, "run", return_value=self.run_ok("ready\n222 mismatch\n")):
             with self.assertRaises(Failed):
                 actions.run_app_quit({"bundle_id": "b", "path": "/Applications/Live.app"}, time.monotonic() + 5)
+
+    def test_helper_crash_after_start_is_uncertain(self):
+        crash = MagicMock(returncode=1, stdout="ready\n", stderr="Traceback")
+        with patch.object(actions, "running", return_value=[("/A.app", 1)]), \
+             patch.object(actions.subprocess, "run", return_value=crash):
+            with self.assertRaises(Uncertain):
+                actions.run_app_quit({"bundle_id": "b", "path": "/A.app"}, time.monotonic() + 5)
 
     def test_quit_helper_rechecks_live_identity(self):
         """Real helper against the real Finder pid, with identities that do not match: never terminated."""
         [(path, pid)] = actions.running("com.apple.finder", time.monotonic() + 5)
         for bid, p in (("com.example.not-finder", path), ("com.apple.finder", "/Applications/Other.app")):
             out = actions.sh([sys.executable, "-c", actions.QUIT_HELPER, bid, p, str(pid)], time.monotonic() + 20)
-            self.assertEqual(out, f"{pid} mismatch")
+            self.assertEqual(out, f"ready\n{pid} mismatch")
 
     def test_quit_is_bounded_by_the_deadline(self):
         with patch.object(actions, "running", return_value=[("/A.app", 1)]):

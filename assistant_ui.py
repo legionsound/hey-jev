@@ -604,7 +604,7 @@ class AppDelegate(NSObject):
             popup.setAccessibilityLabel_(f"{EFFECT_LABELS[effect]} confirmation")
             self.policy_popups[effect] = popup
             rows.append((EFFECT_LABELS[effect], popup))
-        y = form_group(c, 20, "Ask before doing", rows, row_h=34)
+        y = form_group(c, 20, "Ask before doing", rows, row_h=30)
         footnote(c, y, "Applies to voice and typed commands. Ask first shows a pop-down from the menu bar.")
         tie_cell = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, CONTROL_W, 24))
         slider = NSSlider.alloc().initWithFrame_(NSMakeRect(0, 0, CONTROL_W - 90, 24))

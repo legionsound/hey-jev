@@ -442,6 +442,14 @@ class AppDelegate(NSObject):
         self.allow_button = NSButton.buttonWithTitle_target_action_("Allow Apple dictation", self, "allowAppleSpeech:")
         self.allow_button.setFrame_(NSMakeRect(24, 205, 200, 32))
         hearing.addSubview_(self.allow_button)
+        hearing.addSubview_(label("Microphone test", NSMakeRect(24, 160, 560, 24), 16))
+        hearing.addSubview_(label("Records 4 seconds with the backend in use and shows the text. Nothing is run.",
+                                  NSMakeRect(24, 136, 575, 20), 11, NSColor.secondaryLabelColor()))
+        self.test_button = NSButton.buttonWithTitle_target_action_("Test microphone", self, "micTest:")
+        self.test_button.setFrame_(NSMakeRect(24, 96, 170, 32))
+        hearing.addSubview_(self.test_button)
+        self.test_result = label("", NSMakeRect(204, 101, 395, 22), 12)
+        hearing.addSubview_(self.test_result)
         hearing.addSubview_(label("Apple dictation runs only on this Mac. If on-device recognition isn't available,",
                                   NSMakeRect(24, 60, 575, 20), 11, NSColor.secondaryLabelColor()))
         hearing.addSubview_(label("it stays off and says why. It never sends your voice to Apple or switches backends by itself.",
@@ -484,11 +492,17 @@ class AppDelegate(NSObject):
             self.allow_button.setHidden_(state != "not_determined")
         self.backend_status.setStringValue_(status)
         self.backend_next.setStringValue_(nxt)
-        import siri
-        active = siri.ACTIVE_BACKEND
-        self.backend_restart.setStringValue_(
-            "Restart required: Hey Jev is using " + ("Local Whisper" if active == "whisper" else "Apple on-device")
-            + " until you quit and reopen it." if active and active != chosen else "")
+        from siri import STT
+        names = {"whisper": "Local Whisper", "apple": "Apple on-device"}
+        if STT["switching"]:
+            now = "Switching transcription…"
+        elif STT["backend"] is None:
+            now = ""
+        elif STT["blocked"]:
+            now = f"In use: {names[STT['backend']]}, but listening is off. {STT['blocked']}"
+        else:
+            now = f"In use: {names[STT['backend']]}." + (" Save to switch." if STT["backend"] != chosen else "")
+        self.backend_restart.setStringValue_(now)
 
     def backendChanged_(self, _sender):
         self._show_backend()
@@ -502,8 +516,29 @@ class AppDelegate(NSObject):
             self.backend_next.setStringValue_(f"Couldn't ask for access: {exc}")
 
     def speechAccessDone_(self, _payload):
+        from siri import STT
+        if self.worker_started and STT["backend"] == "apple" and STT["blocked"]:
+            self.controls.put(("transcription", "apple"))  # permission changed: reload instead of asking for a restart
         if getattr(self, "settings_sheet", None):
             self._show_backend()
+
+    def micTest_(self, _sender):
+        if not self.worker_started:
+            self.test_result.setStringValue_("Hey Jev isn't running yet.")
+            return
+        self.test_button.setEnabled_(False)
+        self.test_result.setStringValue_("Listening for 4 seconds…")
+        self.controls.put(("mic_test", lambda r: self.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "micTestDone:", r, False)))
+
+    def micTestDone_(self, result):
+        if not getattr(self, "settings_sheet", None):
+            return
+        self.test_button.setEnabled_(True)
+        if result.get("error"):
+            self.test_result.setStringValue_(f"Test failed: {result['error']}")
+        else:
+            self.test_result.setStringValue_(f"Heard “{result['text'] or '(nothing)'}” in {result['ms']} ms")
 
     @objc.python_method
     def _popup(self, parent, titles, frame, action=None):
@@ -544,7 +579,11 @@ class AppDelegate(NSObject):
             save_secret("ANSWER_PROVIDER", answer_provider)
             save_answer_settings(self.selected_model, values, self.selected_metadata)
             save_confirm_policy({e: ("ask", "auto")[p.indexOfSelectedItem()] for e, p in self.policy_popups.items()})
-            save_transcription_backend(BACKENDS[self.backend_popup.indexOfSelectedItem()])
+            backend = BACKENDS[self.backend_popup.indexOfSelectedItem()]
+            save_transcription_backend(backend)
+            from siri import STT
+            if self.worker_started and (STT["backend"] != backend or STT["blocked"]):
+                self.controls.put(("transcription", backend))  # live switch through the control queue
             from siri import reload_keys
             reload_keys()
             self.closeSettings_(None)

@@ -9,21 +9,35 @@ import numpy as np
 import speech_apple
 
 
-def _install_fake(auth=3, on_device=True, available=True, supported_locale=True, final_text="open safari"):
+def _install_fake(auth=3, on_device=True, available=True, supported_locale=True, final_text="open safari",
+                  script="final"):
+    """script: final | partial_then_final | partial_only (never finishes) | error."""
     speech = types.ModuleType("Speech")
     av = types.ModuleType("AVFoundation")
     fnd = types.ModuleType("Foundation")
 
     class FakeResult:
+        def __init__(self, final=True, text=None):
+            self.final, self.text = final, final_text if text is None else text
+
         def isFinal(self):
-            return True
+            return self.final
 
         def bestTranscription(self):
+            text = self.text
+
             class B:
                 def formattedString(self):
-                    return final_text
+                    return text
 
             return B()
+
+    class FakeTask:
+        def __init__(self):
+            self.cancelled = False
+
+        def cancel(self):
+            self.cancelled = True
 
     class FakeRecognizer:
         last = None
@@ -52,7 +66,8 @@ def _install_fake(auth=3, on_device=True, available=True, supported_locale=True,
 
         def recognitionTaskWithRequest_resultHandler_(self, req, handler):
             req._handler = handler
-            return object()
+            speech._task = FakeTask()
+            return speech._task
 
     auth_box = {"v": auth}
 
@@ -94,7 +109,12 @@ def _install_fake(auth=3, on_device=True, available=True, supported_locale=True,
         def endAudio(self):
             assert self.flags.get("on_device") is True, "on-device flag must be True"
             assert self.flags.get("partial") is False, "partial results must be off"
-            self._handler(FakeResult(), None)
+            if script in ("partial_then_final", "partial_only"):
+                self._handler(FakeResult(final=False, text="quit everything"), None)
+            if script in ("final", "partial_then_final"):
+                self._handler(FakeResult(), None)
+            if script == "error":
+                self._handler(None, "Error Domain=kAFAssistantErrorDomain Code=1110 No speech detected")
 
     speech.SFSpeechAudioBufferRecognitionRequest = FakeReq
     speech._fake_req = FakeReq
@@ -224,6 +244,22 @@ class TranscribeTests(unittest.TestCase):
         text, ms = tr.transcribe(audio)
         self.assertEqual(text, "open safari")
         self.assertGreaterEqual(ms, 0)
+
+    def test_partial_hypothesis_never_returned(self):
+        _install_fake(auth=3, final_text="open safari", script="partial_then_final")
+        text, _ = speech_apple.AppleTranscriber(timeout_s=5).transcribe(np.zeros(1600, dtype=np.float32))
+        self.assertEqual(text, "open safari")
+
+    def test_partial_only_times_out_and_cancels(self):
+        speech = _install_fake(auth=3, script="partial_only")
+        with self.assertRaisesRegex(RuntimeError, "timeout"):
+            speech_apple.AppleTranscriber(timeout_s=0.2).transcribe(np.zeros(1600, dtype=np.float32))
+        self.assertTrue(speech._task.cancelled)
+
+    def test_error_callback_raises(self):
+        _install_fake(auth=3, script="error")
+        with self.assertRaisesRegex(RuntimeError, "recognition failed.*No speech"):
+            speech_apple.AppleTranscriber(timeout_s=5).transcribe(np.zeros(1600, dtype=np.float32))
 
     def test_refuses_when_not_ready(self):
         _install_fake(auth=1)

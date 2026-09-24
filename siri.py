@@ -537,7 +537,15 @@ def runtime_facts():
             "transcription": transcription_backend()}
 
 
-ACTIVE_BACKEND = None  # the transcription backend this process started with; Settings shows restart-required on mismatch
+# Live transcription state, read by Settings: backend in use, why listening is blocked (None = usable), switching flag.
+STT = {"backend": None, "blocked": None, "switching": False}
+LOCALE = "en-US"
+MIC_TEST_SECONDS = 4
+
+
+def stt_error(exc):
+    """Short, audio-free error text for the log and the status line."""
+    return f"{type(exc).__name__}: {str(exc)[:160]}"
 
 
 def load_transcriber(backend, notify):
@@ -548,11 +556,11 @@ def load_transcriber(backend, notify):
             import speech_apple
         except ImportError:
             return None, "Apple dictation isn't installed in this build. Choose Local Whisper in Settings."
-        state, reason = speech_apple.status("en-US")
+        state, reason = speech_apple.status(LOCALE)
         if state != "ready":
             return None, f"Apple dictation isn't ready: {reason} Open Settings, Transcription."
         emit(notify, "Starting", "Starting Apple dictation…")
-        return speech_apple.AppleTranscriber("en-US").transcribe, None
+        return speech_apple.AppleTranscriber(LOCALE).transcribe, None
     from faster_whisper import WhisperModel
     print("loading whisper...")
     emit(notify, "Starting", "Loading Whisper…")
@@ -589,14 +597,10 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
     except Exception as exc:
         diagnostics.record(None, "startup", "failed", error=repr(exc))
         raise
-    global ACTIVE_BACKEND
     try:
-        ACTIVE_BACKEND = transcription_backend()
-        transcribe_with, blocked = load_transcriber(ACTIVE_BACKEND, notify)
         rec = Recorder()
-        rec.enabled = listening and not blocked
-        if not rec.enabled:
-            rec.stream.stop()
+        rec.enabled = False
+        rec.stream.stop()
     except BaseException as exc:  # startup failed: leave no socket or engine behind
         diagnostics.record(None, "startup", "failed", error=repr(exc))
         bridge.stop()
@@ -606,9 +610,73 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
     floor = Floor(rec)
     hold = floor.hold
     armed_until = [0.0]
+    want_listening = [listening]
+    stt_fn = [None]
+    switch_lock = threading.Lock()
+
+    def set_listening(on):
+        """The mic runs only when the user wants it and the backend is usable."""
+        on = on and not STT["blocked"]
+        if on != rec.enabled:
+            floor.drop_recording()
+            armed_until[0] = 0
+            rec.enabled = on
+            (rec.stream.start if on else rec.stream.stop)()
+
+    def switch(backend):
+        """Load a backend and swap it in at a clean boundary. Old recordings, queued segments and in-flight
+        transcriptions are invalidated by the epoch bump; nothing falls back to another backend."""
+        with switch_lock:
+            STT.update(switching=True, blocked="Switching transcription…")
+            set_listening(False)
+            floor.drop_recording()
+            try:
+                fn, blocked = load_transcriber(backend, notify)
+            except Exception as exc:
+                fn, blocked = None, f"Couldn't start {backend}: {stt_error(exc)}"
+            stt_fn[0] = fn
+            STT.update(backend=backend, blocked=blocked, switching=False)
+            diagnostics.record(None, "transcription", "blocked" if blocked else "ready", backend=backend,
+                               locale=LOCALE if backend == "apple" else None, reason=blocked)
+            set_listening(want_listening[0])
+            if blocked:
+                emit(notify, "Dictation unavailable", blocked)
+            elif want_listening[0]:
+                emit(notify, "Ready", ready_text(rec.wake))
 
     def transcribe(audio, prompt):
-        return transcribe_with(audio, prompt)
+        fn, backend, t = stt_fn[0], STT["backend"], time.time()
+        if fn is None:
+            raise RuntimeError(STT["blocked"] or "No transcription backend")
+        try:
+            return fn(audio, prompt)
+        except Exception as exc:
+            diagnostics.record(None, "transcribe", "failed", (time.time() - t) * 1000, backend=backend,
+                               locale=LOCALE if backend == "apple" else None, error=stt_error(exc),
+                               audio_s=round(len(audio) / SAMPLE_RATE, 2))
+            raise
+
+    def mic_test(reply, seconds=MIC_TEST_SECONDS):
+        """Transcript only: record from the one capture owner, transcribe, report. Never reaches the engine."""
+        if STT["blocked"]:
+            return reply({"error": STT["blocked"]})
+        if not rec.enabled:
+            return reply({"error": "Listening is paused. Resume it, then test again."})
+        if not floor.start_recording():
+            return reply({"error": "Busy right now. Try again in a moment."})
+        emit(notify, "Mic test", f"Say something… ({seconds} seconds)")
+        time.sleep(seconds)
+        audio = floor.stop_recording()
+        if audio is None or not len(audio):
+            return reply({"error": "Nothing was recorded."})
+        try:
+            text, ms = transcribe(audio, COMMAND_PROMPT)
+        except Exception as exc:
+            return reply({"error": stt_error(exc)})
+        finally:
+            emit(notify, "Ready", ready_text(rec.wake))
+        diagnostics.record(None, "mic_test", "ok", ms, backend=STT["backend"], chars=len(text))
+        reply({"text": text, "ms": ms, "backend": STT["backend"]})
 
     def run_turn(text, stt_ms, epoch):
         with hold():
@@ -628,7 +696,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
         try:
             text, ms = transcribe(audio, COMMAND_PROMPT)
         except Exception as exc:
-            emit(notify, "Something went wrong", str(exc))
+            emit(notify, "Couldn't hear that", stt_error(exc))
             return
         run_turn(text, ms, epoch)
 
@@ -646,8 +714,8 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
             epoch = rec.epoch
             try:
                 text, ms = transcribe(audio, WAKE_PROMPT)
-            except Exception as exc:
-                print(f"\n  transcribe failed: {exc}")
+            except Exception as exc:  # logged by transcribe(); show it, wake mode has no other feedback
+                emit(notify, "Couldn't hear that", stt_error(exc))
                 continue
             if not rec.enabled or not rec.wake or epoch != rec.epoch:
                 continue
@@ -677,8 +745,8 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
             emit(notify, "Ready", ready_text(rec.wake))
 
     def start_recording():
-        if blocked:
-            emit(notify, "Dictation unavailable", blocked)
+        if STT["blocked"]:
+            emit(notify, "Dictation unavailable", STT["blocked"])
             return
         if rec.enabled and not rec.wake and floor.start_recording():
             print("\n[listening]", end="", flush=True)
@@ -701,27 +769,25 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
     threading.Thread(target=warm_cache, daemon=True).start()
     threading.Thread(target=wake_loop, daemon=True).start()
     set_mode(mode)
+    switch(transcription_backend())
     diagnostics.record(None, "startup", "ready", mode=mode, listening=rec.enabled, log=diagnostics.path,
-                       transcription=ACTIVE_BACKEND, blocked=blocked)
-    if blocked:
-        emit(notify, "Dictation unavailable", blocked)
+                       transcription=STT["backend"], blocked=STT["blocked"])
     print("ready. ctrl+c to quit.")
     if controls is not None:
         while True:
             command = controls.get()
             if isinstance(command, tuple) and command[0] == "mode":
                 set_mode(command[1])
+            elif isinstance(command, tuple) and command[0] == "transcription":
+                threading.Thread(target=switch, args=(command[1],), daemon=True).start()
+            elif isinstance(command, tuple) and command[0] == "mic_test":
+                threading.Thread(target=mic_test, args=(command[1],), daemon=True).start()
             elif isinstance(command, tuple) and command[0] == "listening":
-                if blocked:  # the selected backend is not usable: never claim to listen
-                    emit(notify, "Dictation unavailable", blocked)
+                want_listening[0] = bool(command[1])
+                if STT["blocked"]:  # the selected backend is not usable: never claim to listen
+                    emit(notify, "Dictation unavailable", STT["blocked"])
                     continue
-                rec.enabled = bool(command[1])
-                floor.drop_recording()
-                armed_until[0] = 0
-                if rec.enabled:
-                    rec.stream.start()
-                else:
-                    rec.stream.stop()
+                set_listening(want_listening[0])
                 emit(notify, "Ready" if rec.enabled else "Paused",
                      ready_text(rec.wake) if rec.enabled else "Microphone paused. Current action may finish.")
             elif command == "press":

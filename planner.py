@@ -232,6 +232,8 @@ def plan(text, classify, can_answer=False):
             if not hit:
                 return ("clarify", "no_action")
             return ("steps", hit)
+    except ValueError:
+        return ("clarify", "invalid_recipe")
     except Exception:
         pass
     clauses = split_clauses(text)

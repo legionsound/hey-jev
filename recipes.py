@@ -90,11 +90,23 @@ def delete(name):
 
 
 def match(text):
-    """-> steps list when text names a recipe, else None. 'run <name>' or a bare name."""
-    steps = get((text or "").strip())
-    if steps is not None:
-        return steps
-    m = RUN_PREFIX.match(text or "")
-    if m:
-        return get(m.group(1))
+    """-> steps list when text names a recipe, else None. 'run <name>' or a bare name.
+
+    Stored steps are re-validated: a matching but corrupt record raises
+    ValueError so the planner can clarify with zero dispatch."""
+    for candidate in ((text or "").strip(), RUN_PREFIX.match(text or "") and RUN_PREFIX.match(text or "").group(1)):
+        if not candidate:
+            continue
+        data = all_recipes()
+        key = candidate.strip().lower()
+        for k, v in data.items():
+            if k.lower() == key:
+                steps = [dict(s) for s in v] if isinstance(v, list) else None
+                try:
+                    validate(k, steps)
+                except ValueError as e:
+                    raise ValueError(f"Recipe {k!r} is invalid: {e}")
+                except Exception:
+                    raise ValueError(f"Recipe {k!r} is invalid: stored steps are corrupt.")
+                return steps
     return None

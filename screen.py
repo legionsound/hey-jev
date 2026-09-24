@@ -42,8 +42,34 @@ class TimedOut(Exception):
     """The deadline passed with a native call still out."""
 
 
-def bounded(fn, deadline, *args):
-    """Run fn on a daemon thread and wait until the deadline. A call that outlives it is abandoned, never waited on."""
+class Wedged(Exception):
+    """An earlier native call is still out, so no new one starts: the serial boundary holds until it settles."""
+
+
+EFFECT_SETTLE = 10.0  # after a press times out, keep waiting this long for it to finish before calling it wedged
+MAX_ABANDONED_READS = 3
+_abandoned = []  # (thread, is_effect) of calls that outlived their deadline
+_abandoned_lock = threading.Lock()
+
+
+def _outstanding():
+    with _abandoned_lock:
+        _abandoned[:] = [(t, e) for t, e in _abandoned if t.is_alive()]
+        return [e for _, e in _abandoned]
+
+
+def bounded(fn, deadline, *args, effect=False):
+    """Run fn on a daemon thread and wait until the deadline.
+
+    A thread can't be killed, so a call that outlives its deadline is tracked, and nothing new starts while an
+    abandoned effect (a press, an insert) is still out, or while too many abandoned reads are. For an effect the
+    caller waits up to EFFECT_SETTLE more; if it lands in that time it is still reported as TimedOut (late: the outcome
+    is unknown), and if it doesn't the screen is wedged until it does."""
+    out = _outstanding()
+    if any(out):
+        raise Wedged("an earlier press has not finished")
+    if len(out) >= MAX_ABANDONED_READS:
+        raise Wedged("earlier screen reads have not finished")
     left = deadline - time.monotonic()
     if left <= 0:
         raise TimedOut(getattr(fn, "__name__", "call"))
@@ -57,26 +83,35 @@ def bounded(fn, deadline, *args):
     t = threading.Thread(target=run, daemon=True)
     t.start()
     t.join(left)
+    if t.is_alive() and effect:
+        t.join(EFFECT_SETTLE)  # hold the serial boundary: the next command must not overtake a pending press
     if t.is_alive():
+        with _abandoned_lock:
+            _abandoned.append((t, effect))
         raise TimedOut(getattr(fn, "__name__", "call"))
+    if effect and time.monotonic() > deadline:
+        raise TimedOut("answered after the deadline")  # it did land, late: the caller reports unknown
     if "err" in box:
         raise box["err"]
     return box["ok"]
 
 
-_tokens = []  # [(element, token)]: equality is the AX element's own
+_tokens = []  # [(element, token)], oldest first; equality is the AX element's own
 _token_lock = threading.Lock()
+_next_token = [0]  # never reused, whatever the cache size
+TOKEN_CAP = 4000
 
 
 def token(element):
-    """A stable local id for this exact element. Never leaves the Mac."""
+    """A local id for this exact element, never reused. Once evicted, an element's old token names nothing."""
     with _token_lock:
         for el, tok in _tokens:
             if el == element:
                 return tok
-        tok = f"e{len(_tokens) + 1}"
+        _next_token[0] += 1
+        tok = f"e{_next_token[0]}"
         _tokens.append((element, tok))
-        del _tokens[:-4000]
+        del _tokens[:-TOKEN_CAP]
         return tok
 
 
@@ -152,12 +187,28 @@ def _AS():
     return ApplicationServices
 
 
-def _attr(element, name):
+AX_NO_VALUE, AX_UNSUPPORTED, AX_INVALID = -25212, -25205, -25202
+
+
+def _read(element, name):
+    """(status, value): ok, absent (the element has no such attribute or no value), gone (the element was
+    destroyed), or unknown (any other error: nothing can be concluded)."""
     try:
         err, value = _AS().AXUIElementCopyAttributeValue(element, name, None)
-    except Exception:  # a dead element raises from the bridge: a miss, not a crash
-        return None
-    return value if err == 0 else None
+    except Exception:
+        return "unknown", None
+    if err == 0:
+        return "ok", value
+    if err in (AX_NO_VALUE, AX_UNSUPPORTED):
+        return "absent", None
+    if err == AX_INVALID:
+        return "gone", None
+    return "unknown", None
+
+
+def _attr(element, name):
+    """The value, or None for any miss. For decisions that must not guess, use _read."""
+    return _read(element, name)[1]
 
 
 EDITABLE = {"AXTextField", "AXTextArea", "AXSearchField", "AXComboBox", "AXSecureTextField"}
@@ -204,7 +255,9 @@ def _attrs(element):
 
 
 def enabled(element):
-    return _attr(element, "AXEnabled") is not False
+    """True only when the element says it is enabled, or has no enabled state at all. Unknown is not enabled."""
+    status, value = _read(element, "AXEnabled")
+    return status == "absent" or (status == "ok" and value is not False)
 
 
 def _actions(element):
@@ -429,16 +482,24 @@ def last():
 
 # --------------------------------------------------------------------------- acting and reading back
 def press(ref, deadline):
-    """AXPress. Returns the AX error code (0 is delivered). Raises TimedOut when the app never answered: the press
-    may or may not have happened."""
-    return bounded(lambda: int(_AS().AXUIElementPerformAction(ref, "AXPress")), deadline)
+    """AXPress. Returns the AX error code (0 is delivered). Raises TimedOut when the app didn't answer in time: the
+    press may or may not have happened, and no other screen call starts until it settles."""
+    return bounded(lambda: int(_AS().AXUIElementPerformAction(ref, "AXPress")), deadline, effect=True)
+
+
+UNKNOWN = "?unknown"
 
 
 def element_state(ref, deadline):
-    """What a press on this element might flip: value, selection, expansion, and whether it still exists."""
+    """What a press on this element might flip: value, selection, expansion, and whether it still exists.
+    A read that failed is UNKNOWN, never a value: it can't prove a change or a disappearance."""
     def read():
-        role = _attr(ref, "AXRole")
-        return {"exists": role is not None, **{k: repr(_attr(ref, k)) for k in ("AXValue", "AXSelected", "AXExpanded")}}
+        role, _ = _read(ref, "AXRole")
+        state = {"exists": {"ok": "yes", "gone": "no"}.get(role, UNKNOWN)}
+        for k in ("AXValue", "AXSelected", "AXExpanded"):
+            st, v = _read(ref, k)
+            state[k] = repr(v) if st in ("ok", "absent") else UNKNOWN
+        return state
     return bounded(read, deadline)
 
 

@@ -312,5 +312,104 @@ class DeadlineTests(unittest.TestCase):
         self.assertEqual((v["state"], len(fake.presses)), ("unknown", 1))
 
 
+class BoundaryTests(unittest.TestCase):
+    def test_tokens_are_never_reused_and_evicted_ones_go_stale(self):
+        with patch.object(screen, "_tokens", []), patch.object(screen, "_next_token", [0]), \
+                patch.object(screen, "TOKEN_CAP", 50):
+            objs = [object() for _ in range(52)]
+            toks = [screen.token(o) for o in objs]
+            self.assertEqual(len(set(toks)), 52)
+            self.assertIsNone(screen.element_for(toks[0]))  # evicted: names nothing, never a newer element
+            self.assertIs(screen.element_for(toks[-1]), objs[-1])
+            self.assertEqual(screen.token(objs[-1]), toks[-1])
+
+    def test_a_late_press_holds_the_boundary_and_is_never_reported_as_clean(self):
+        import threading
+        import time
+        release = threading.Event()
+        calls = []
+
+        class FakeAS:
+            def AXUIElementPerformAction(self, ref, action):
+                calls.append(ref)
+                release.wait(5)
+                return 0
+        with patch.object(screen, "_AS", lambda: FakeAS()), patch.object(screen, "EFFECT_SETTLE", 0.3), \
+                patch.object(screen, "_abandoned", []):
+            t0 = time.monotonic()
+            with self.assertRaises(screen.TimedOut):
+                screen.press("button", time.monotonic() + 0.2)
+            self.assertGreaterEqual(time.monotonic() - t0, 0.45)  # waited out the settle window too
+            with self.assertRaises(screen.Wedged):  # the next command can't start a native call meanwhile
+                screen.press("other", time.monotonic() + 1)
+            with self.assertRaises(screen.Wedged):
+                screen.element_state("other", time.monotonic() + 1)
+            release.set()
+            time.sleep(0.1)
+            self.assertEqual(screen.press("other", time.monotonic() + 1), 0)  # settled: work resumes
+            self.assertEqual(calls, ["button", "other"])
+
+    def test_engine_timeout_then_queued_command_then_late_press(self):
+        import threading
+        import time
+        release, calls = threading.Event(), []
+
+        class FakeAS:
+            def AXUIElementPerformAction(self, ref, action):
+                calls.append(ref)
+                release.wait(5)
+                return 0
+        real_press = screen.press
+        with patch.object(diagnostics, "record", lambda *a, **k: None):
+            fake = FakeScreen(self, [item(1, "Add one")])
+            for p in (patch.object(screen, "press", real_press), patch.object(screen, "_AS", lambda: FakeAS()),
+                      patch.object(screen, "EFFECT_SETTLE", 0.2), patch.object(screen, "_abandoned", [])):
+                p.start()
+                self.addCleanup(p.stop)
+            entry = dict(actions.ACTIONS["screen.press"], timeout=0.3)
+            with patch.dict(actions.ACTIONS, {"screen.press": entry}), \
+                    patch.object(planner, "plan", lambda *a, **k: ("steps", [{"clause": "c", "action": "screen.press",
+                                                                              "args": {"label": "Add one"}}])):
+                eng = Engine(lambda _: {}, policy=lambda: {**actions.DEFAULT_POLICY, "click": "auto"},
+                             actions=actions.ACTIONS)
+                first = eng.wait(eng.submit("click Add one", "cli")["id"], 10)
+                second = eng.wait(eng.submit("click Add one again", "cli")["id"], 10)
+                release.set()
+                time.sleep(0.1)
+        self.assertEqual(first["state"], "unknown")  # a press that may have landed is never failed or done
+        self.assertEqual(second["state"], "failed")  # the queued command could not start a native call
+        self.assertIn("has not finished", second["steps"][0]["detail"])
+        self.assertEqual(len(calls), 1)  # the late completion was the first press, and nothing else was pressed
+
+    def test_a_press_that_lands_during_settle_is_still_late(self):
+        import time
+
+        class SlowAS:
+            def AXUIElementPerformAction(self, ref, action):
+                time.sleep(0.3)
+                return 0
+        with patch.object(screen, "_AS", lambda: SlowAS()), patch.object(screen, "_abandoned", []):
+            with self.assertRaises(screen.TimedOut):
+                screen.press("button", time.monotonic() + 0.1)
+            self.assertEqual(screen._outstanding(), [])
+
+    def test_failed_reads_prove_nothing(self):
+        import time
+        with patch.object(screen, "_read", lambda el, name: ("unknown", None)):
+            self.assertFalse(screen.enabled("x"))  # unknown is not enabled: dispatch stops
+            state = screen.element_state("x", time.monotonic() + 1)
+        self.assertTrue(all(v == screen.UNKNOWN for v in state.values()))
+        with patch.object(screen, "_read", lambda el, name: ("absent", None)):
+            self.assertTrue(screen.enabled("x"))
+        # checkbox read 0 before; after, every read fails with -25204: not done, not "gone"
+        t = {"pid": 7, "role": "AXCheckBox"}
+        before = ({"text": "a"}, {"exists": "yes", "AXValue": "0", "AXSelected": "None", "AXExpanded": "None"})
+        actions._pressed[id(t)] = (before, time.monotonic() - 5, "ref")
+        with patch.object(screen, "signature", lambda pid, d: {"text": "a"}), \
+                patch.object(screen, "element_state", lambda ref, d: {k: screen.UNKNOWN for k in before[1]}):
+            verdict, facts = actions.verify_screen_press(t, time.monotonic() + 1)
+        self.assertEqual((verdict, facts["unread"]), ("unverified", ["AXExpanded", "AXSelected", "AXValue", "exists"]))
+
+
 if __name__ == "__main__":
     unittest.main()

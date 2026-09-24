@@ -463,7 +463,7 @@ def resolve_screen_press(args):
     deadline = time.monotonic() + RESOLVE_BUDGET
     try:
         snap = screen.observe(ocr=False, deadline=deadline)
-    except (screen.Unavailable, screen.TimedOut) as exc:
+    except (screen.Unavailable, screen.TimedOut, screen.Wedged) as exc:
         return ("none", f"can't read the screen: {exc}")
     controls = [i for i in snap.items if _live(i)]
     if args.get("number") is not None:
@@ -509,7 +509,7 @@ def _find(t, deadline):
         raise Failed("unknown control")
     try:
         snap = screen.observe(pid=t["pid"], ocr=False, deadline=deadline)
-    except (screen.Unavailable, screen.TimedOut) as exc:
+    except (screen.Unavailable, screen.TimedOut, screen.Wedged) as exc:
         raise Failed(f"can't read the screen: {exc}")
     item = next((i for i in snap.items if i.token == t["element"]), None)
     if ((snap.started, snap.window_token) != (t["started"], t["window"]) or item is None or not _live(item)
@@ -522,13 +522,15 @@ def run_screen_press(t, deadline):
     ref = _find(t, deadline)
     try:
         before = (screen.signature(t["pid"], deadline), screen.element_state(ref, deadline))
-    except screen.TimedOut as exc:
-        raise Failed(f"screen read timed out before the press: {exc}")
+    except (screen.TimedOut, screen.Wedged) as exc:
+        raise Failed(f"screen read failed before the press: {exc}")
     _pressed[id(t)] = (before, time.monotonic(), ref)
     try:
         err = screen.press(ref, deadline)
-    except screen.TimedOut:
-        raise Uncertain("the app did not answer the press")
+    except screen.Wedged as exc:
+        raise Failed(str(exc))  # refused before sending: nothing was pressed
+    except screen.TimedOut as exc:
+        raise Uncertain(f"the app did not answer the press in time ({exc})")
     if err in AX_GONE:
         raise Failed(f"the app refused the press (AX error {err})")
     if err != 0:
@@ -542,7 +544,8 @@ def verify_screen_press(t, deadline):
     if before is None:
         return ("unverified", {"why": "no before-state"})
     after = (screen.signature(t["pid"], deadline), screen.element_state(ref, deadline))
-    own = sorted(k for k in before[1] if before[1][k] != after[1][k])
+    known = [k for k in before[1] if screen.UNKNOWN not in (before[1][k], after[1][k])]
+    own = sorted(k for k in known if before[1][k] != after[1][k])  # a failed read proves nothing
     if t["role"] in MENU_ROLES and after[0].get("menu_open") and not before[0].get("menu_open"):
         own.append("menu_open")
     if own:
@@ -552,14 +555,16 @@ def verify_screen_press(t, deadline):
         return ("wait", {})
     _pressed.pop(id(t), None)
     other = sorted(k for k in before[0] if before[0].get(k) != after[0].get(k))
-    return ("unverified", {"delivered": True, "observed": other,
-                           "why": "pressed; the control itself did not change"})
+    unread = sorted(k for k in before[1] if k not in known)
+    return ("unverified", {"delivered": True, "observed": other, "unread": unread,
+                           "why": "pressed; the control itself did not change" if not unread
+                           else "pressed; the control could not be read back"})
 
 
 def run_screen_list(t, deadline):
     try:
         snap = screen.observe(ocr=True, deadline=deadline)
-    except (screen.Unavailable, screen.TimedOut) as exc:
+    except (screen.Unavailable, screen.TimedOut, screen.Wedged) as exc:
         raise Failed(f"can't read the screen: {exc}")
     screen.remember(snap)
     _listed[id(t)] = snap

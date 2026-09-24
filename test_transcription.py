@@ -11,16 +11,25 @@ import siri
 def fake_speech(state, reason=""):
     mod = types.ModuleType("speech_apple")
     mod.status = lambda locale="en-US": (state, reason)
-    mod.AppleTranscriber = lambda locale: types.SimpleNamespace(transcribe=lambda audio, prompt=None: ("hi", 5))
+    mod.hints = []
+
+    def transcriber(locale, contextual_strings=()):
+        mod.hints.append(list(contextual_strings))
+        return types.SimpleNamespace(transcribe=lambda audio, prompt=None: ("hi", 5))
+    mod.AppleTranscriber = transcriber
     return mod
 
 
 class BackendTests(unittest.TestCase):
-    def test_apple_ready_is_used(self):
-        with patch.dict(sys.modules, {"speech_apple": fake_speech("ready")}):
+    def test_apple_ready_is_used_with_the_current_wake_hints(self):
+        mod = fake_speech("ready")
+        with patch.dict(sys.modules, {"speech_apple": mod}):
             fn, blocked = siri.load_transcriber("apple", None)
-        self.assertIsNone(blocked)
-        self.assertEqual(fn(None, None), ("hi", 5))
+            self.assertIsNone(blocked)
+            self.assertEqual(fn(None, None), ("hi", 5))
+            with patch.object(siri, "WAKE", siri.wake.Wake("Okay Zorblat", ["OK Zorblat"])):
+                fn(None, None)  # same loaded backend, new phrase: hinted from the next utterance
+        self.assertEqual(mod.hints, [["Hey Jev"], ["Okay Zorblat", "OK Zorblat"]])
 
     def test_apple_not_ready_blocks_without_loading_whisper(self):
         with patch.dict(sys.modules, {"speech_apple": fake_speech("denied", "Permission denied."),
@@ -84,7 +93,7 @@ class LoopHarness(unittest.TestCase):
         import threading
         self.controls, self.events, self.logged = queue.Queue(), [], []
         self.apple_ready = False
-        self.submitted = []
+        self.submitted, self.prompts, self.heard, self.gate, self.entered = [], [], None, None, threading.Event()
 
         def load(backend, notify):
             if backend == "apple" and not self.apple_ready:
@@ -93,7 +102,13 @@ class LoopHarness(unittest.TestCase):
                 def fail(audio, prompt):
                     raise RuntimeError("recognition failed: Code=1110")
                 return fail, None
-            return (lambda audio, prompt: (f"{backend} heard {len(audio)}", 7)), None
+            def fn(audio, prompt):
+                self.prompts.append(prompt)
+                if self.gate is not None:
+                    self.entered.set()
+                    self.gate.wait(5)
+                return (self.heard or f"{backend} heard {len(audio)}", 7)
+            return fn, None
 
         def submit(*a, **k):
             self.submitted.append(a)
@@ -109,6 +124,7 @@ class LoopHarness(unittest.TestCase):
                         patch.object(siri, "make_engine", lambda *a, **k: eng),
                         patch.object(siri, "start_bridge", lambda *a: types.SimpleNamespace(stop=lambda: None)),
                         patch.object(siri, "transcription_backend", lambda: "apple"),
+                        patch.object(siri, "wake_settings", lambda: ("Hey Jev", [])),
                         patch.object(siri, "warm_cache", lambda: None),
                         patch.object(siri.timers, "start_loop", lambda cb: None),
                         patch.object(siri.diagnostics, "init", lambda *a, **k: None),
@@ -248,6 +264,48 @@ class MicTestIsolationTests(LoopHarness):
         self.assertTrue(self.rec.on and self.rec.isolated)  # the stale finish touched nothing
         self.assertEqual(new.get(timeout=5)["text"], "apple heard 16000")
         self.assertFalse(self.rec.isolated)
+        self.assertEqual(self.submitted, [])
+
+
+class WakePhraseLiveTests(LoopHarness):
+    def setUp(self):
+        super().setUp()
+        self.apple_ready = True
+        self.controls.put(("transcription", "apple"))
+        self.wait(lambda: siri.STT["blocked"] is None and not siri.STT["switching"])
+
+    def test_change_applies_live_and_mic_test_reports_the_match(self):
+        epoch = self.rec.epoch
+        self.controls.put(("wake_phrase", "Okay Zorblat", ["OK Zorblat"]))
+        self.wait(lambda: siri.WAKE.phrase == "Okay Zorblat")
+        self.assertGreater(self.rec.epoch, epoch)  # queued and in-flight audio invalidated
+        self.heard = "OK Zorblat, open Notes"
+        r = self.mic_test()
+        self.assertEqual((r["wake"], r["wake_matched"], r["command"]), ("Okay Zorblat", True, "open Notes"))
+        self.assertIn("Okay Zorblat, open Spotify.", self.prompts[-1])  # Whisper-style prompt follows the phrase
+        self.heard = "Hey Jev, open Notes"  # the old phrase no longer wakes it
+        r = self.mic_test()
+        self.assertEqual((r["wake_matched"], r["command"]), (False, None))
+        self.assertEqual(self.submitted, [])
+
+    def test_invalid_phrase_keeps_the_old_one(self):
+        self.controls.put(("wake_phrase", "Hi", []))
+        self.wait(lambda: any(s == "Wake phrase not changed" for s, _ in self.events))
+        self.assertEqual(siri.WAKE.phrase, "Hey Jev")
+
+    def test_change_during_transcription_drops_the_stale_transcript(self):
+        import threading
+        import numpy as np
+        self.controls.put(("mode", "wake"))
+        self.wait(lambda: self.rec.wake)
+        self.gate, self.heard = threading.Event(), "Okay Zorblat, open Notes"  # would match the new phrase
+        self.rec.segments.put(np.ones(16000, dtype="float32"))
+        self.assertTrue(self.entered.wait(5))  # the wake worker is mid-transcription with the old phrase
+        self.controls.put(("wake_phrase", "Okay Zorblat", []))
+        self.wait(lambda: siri.WAKE.phrase == "Okay Zorblat")
+        self.gate.set()
+        import time
+        time.sleep(0.3)
         self.assertEqual(self.submitted, [])
 
 

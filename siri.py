@@ -6,7 +6,8 @@ import os, re, sys, json, time, queue, random, argparse, subprocess, threading, 
 import requests
 from dotenv import load_dotenv
 from secrets_store import get_secret, get_setting, missing_secrets
-from model_settings import answer_payload, answer_settings, confirm_policy, transcription_backend
+import wake
+from model_settings import answer_payload, answer_settings, confirm_policy, transcription_backend, wake_settings
 import diagnostics
 import planner
 import timers
@@ -24,9 +25,8 @@ VOICE_ID = "9a9cf47702da476aa4629e2506d4a857"
 SAMPLE_RATE = 16000
 WHISPER_MODEL = "small.en"
 COMMAND_PROMPT = "Open Spotify. Set a timer for five minutes. Play. Pause. Next track. Turn Spotify down. Turn the Mac volume down. Mute. Dark mode on. Lock the screen."
-WAKE_PROMPT = "Hey Jev, open Spotify. Hey Jev, pause the music. Hey Jev, turn the volume down."
 # Whisper often hears "Jev" as Jeff or Jeb, so accept the close ones
-WAKE = re.compile(r"^\W*(?:hey|hi|hay|okay|ok|a)\W+(?:jev|jevs|jeff|jeffs|jef|jeb|jab|chev|jeve|jav)\b\W*", re.I)
+WAKE = wake.Wake()  # replaced from preferences at start and live from Settings; see set_wake()
 WAKE_WINDOW = 6.0
 TURN_WAIT = 180  # covers a 60 s confirmation plus the steps
 ENGINE = None  # the one engine in this process; the UI calls ENGINE.decide()
@@ -533,8 +533,8 @@ class Floor:
                 self.rec.paused = False
 
 
-def ready_text(wake):
-    return "Say “Hey Jev” and your command" if wake else "Ready when you are"
+def ready_text(wake_mode):
+    return WAKE.hint_text() if wake_mode else "Ready when you are"
 
 
 def runtime_facts():
@@ -577,7 +577,9 @@ def load_transcriber(backend, notify):
         if state != "ready":
             return None, f"Apple dictation isn't ready: {reason} Open Settings, Transcription."
         emit(notify, "Starting", "Starting Apple dictation…")
-        return speech_apple.AppleTranscriber(LOCALE).transcribe, None
+        # a fresh request per utterance, so a changed wake phrase is hinted from the next one on
+        return (lambda audio, prompt: speech_apple.AppleTranscriber(LOCALE, contextual_strings=WAKE.hints)
+                .transcribe(audio, prompt)), None
     from faster_whisper import WhisperModel
     print("loading whisper...")
     emit(notify, "Starting", "Loading Whisper…")
@@ -670,6 +672,21 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
             elif want_listening[0]:
                 emit(notify, "Ready", ready_text(rec.wake))
 
+    def set_wake(phrase, aliases):
+        """Apply a new wake phrase at a clean boundary: armed follow-ups, queued and in-flight audio are dropped."""
+        global WAKE
+        try:
+            new = wake.Wake(phrase, aliases)
+        except ValueError as exc:
+            emit(notify, "Wake phrase not changed", str(exc))
+            return
+        WAKE = new
+        floor.drop_recording()  # epoch bump: transcripts already in flight are discarded
+        armed_until[0] = 0
+        diagnostics.record(None, "wake_phrase", "set", phrase=new.phrase, aliases=len(new.aliases))
+        if rec.enabled:
+            emit(notify, "Ready", ready_text(rec.wake))
+
     def transcribe(audio, prompt):
         fn, backend, t = stt_fn[0], STT["backend"], time.time()
         if fn is None:
@@ -697,14 +714,17 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
         if audio is None or not len(audio):
             emit(notify, "Ready", ready_text(rec.wake))
             return reply({"error": "The test was interrupted or nothing was recorded."})
+        phrase = WAKE
         try:
-            text, ms = transcribe(audio, COMMAND_PROMPT)
+            text, ms = transcribe(audio, phrase.prompt)
         except Exception as exc:
             return reply({"error": stt_error(exc)})
         finally:
             emit(notify, "Ready", ready_text(rec.wake))
-        diagnostics.record(None, "mic_test", "ok", ms, backend=STT["backend"], chars=len(text))
-        reply({"text": text, "ms": ms, "backend": STT["backend"]})
+        rest = phrase.match(text)
+        diagnostics.record(None, "mic_test", "ok", ms, backend=STT["backend"], chars=len(text), wake_matched=rest is not None)
+        reply({"text": text, "ms": ms, "backend": STT["backend"], "wake": phrase.phrase, "wake_matched": rest is not None,
+               "command": rest})
 
     def run_turn(text, stt_ms, epoch):
         with hold():
@@ -741,15 +761,14 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
                 continue
             epoch = rec.epoch
             try:
-                text, ms = transcribe(audio, WAKE_PROMPT)
+                text, ms = transcribe(audio, WAKE.prompt)
             except Exception as exc:  # logged by transcribe(); show it, wake mode has no other feedback
                 emit(notify, "Couldn't hear that", stt_error(exc))
                 continue
             if not rec.enabled or not rec.wake or epoch != rec.epoch:
                 continue
-            m = WAKE.match(text)
-            if m:
-                rest = text[m.end():].strip(" .,!?")
+            rest = WAKE.match(text)
+            if rest is not None:
                 if rest:
                     armed_until[0] = 0
                     run_turn(rest, ms, epoch)
@@ -802,6 +821,8 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
     threading.Thread(target=warm_cache, daemon=True).start()
     threading.Thread(target=wake_loop, daemon=True).start()
     set_mode(mode)
+    global WAKE
+    WAKE = wake.Wake(*wake_settings())
     switch(transcription_backend())
     diagnostics.record(None, "startup", "ready", mode=mode, listening=rec.enabled, log=diagnostics.path,
                        transcription=STT["backend"], blocked=STT["blocked"])
@@ -813,6 +834,8 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
                 set_mode(command[1])
             elif isinstance(command, tuple) and command[0] == "transcription":
                 threading.Thread(target=switch, args=(command[1],), daemon=True).start()
+            elif isinstance(command, tuple) and command[0] == "wake_phrase":
+                set_wake(command[1], command[2])
             elif isinstance(command, tuple) and command[0] == "mic_test":
                 threading.Thread(target=mic_test, args=(command[1],), daemon=True).start()
             elif isinstance(command, tuple) and command[0] == "listening":

@@ -163,3 +163,20 @@ def save_transcription_backend(backend):
     if backend not in BACKENDS:
         raise ValueError(f"Unknown transcription backend: {backend}")
     PREFS.setObject_forKey_(backend, "transcription_backend")
+
+
+def wake_settings():
+    """-> (phrase, aliases). Anything invalid in storage falls back to the default phrase."""
+    import wake
+    try:
+        saved = json.loads(PREFS.stringForKey_("wake_phrase") or "{}")
+        return wake.validate(saved["phrase"]), [wake.validate(a) for a in saved.get("aliases", [])]
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return wake.DEFAULT, []
+
+
+def save_wake_settings(phrase, aliases):
+    import wake
+    phrase, aliases = wake.validate(phrase), [wake.validate(a) for a in aliases]
+    PREFS.setObject_forKey_(json.dumps({"phrase": phrase, "aliases": aliases}), "wake_phrase")
+    return phrase, aliases

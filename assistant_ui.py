@@ -49,7 +49,8 @@ from Foundation import NSObject, NSTimer, NSUserDefaults
 from actions import EFFECT_LABELS, EFFECTS
 from model_settings import (PREFS, PARAMETERS, answer_settings, cached_models, confirm_policy, fetch_models,
                             save_answer_settings, save_confirm_policy, save_transcription_backend,
-                            transcription_backend, validate_parameters, BACKENDS)
+                            transcription_backend, validate_parameters, BACKENDS, save_wake_settings,
+                            wake_settings)
 import voice_output
 from secrets_store import KEY_NAMES, get_secret, get_setting, missing_secrets, save_secret
 
@@ -57,7 +58,12 @@ from secrets_store import KEY_NAMES, get_secret, get_setting, missing_secrets, s
 WIDTH, BASE_HEIGHT, ROW = 400, 170, 26
 STICK_TOP, STICK_BOTTOM = 8, 32  # NSViewMinYMargin, NSViewMaxYMargin
 NORMAL, FLOATING = 0, 3  # NSNormalWindowLevel, NSFloatingWindowLevel
-HINTS = {"ptt": "Hold right Option to talk", "wake": "Say \u201cHey Jev\u201d, then your command"}
+def hint(mode):
+    """What to do next in this listening mode, with the wake phrase the user chose."""
+    if mode == "ptt":
+        return "Hold right Option to talk"
+    import wake
+    return wake.Wake(*wake_settings()).hint_text()
 MODES = ("ptt", "wake")
 
 STATUS_COLORS = {
@@ -228,7 +234,7 @@ class AppDelegate(NSObject):
         self.status = text("Starting", NSMakeRect(76, BASE_HEIGHT - 74, WIDTH - 96, 26), 20, weight=0.3)
         self.detail = text("Loading Whisper…", NSMakeRect(76, BASE_HEIGHT - 96, WIDTH - 96, 20), 13,
                            NSColor.secondaryLabelColor())
-        self.hint = text(HINTS[self.mode], NSMakeRect(0, 0, 10, 10), 12)  # kept for state, shown via detail
+        self.hint = text(hint(self.mode), NSMakeRect(0, 0, 10, 10), 12)  # kept for state, shown via detail
         for view in (self.badge, self.status, self.detail):
             view.setAutoresizingMask_(STICK_TOP)
             background.addSubview_(view)
@@ -345,7 +351,7 @@ class AppDelegate(NSObject):
     def modeChanged_(self, sender):
         self.mode = MODES[sender.selectedSegment()]
         NSUserDefaults.standardUserDefaults().setObject_forKey_(self.mode, "mode")
-        self.hint.setStringValue_(HINTS[self.mode])
+        self.hint.setStringValue_(hint(self.mode))
         self.controls.put(("mode", self.mode))
         self._sync_controls()
 
@@ -410,7 +416,7 @@ class AppDelegate(NSObject):
         self.pause_button.setImage_(symbol("pause.fill" if self.listening else "play.fill", 13))
         self.pause_button.setToolTip_("Pause listening" if self.listening else "Resume listening")
         self.pause_button.setAccessibilityLabel_(self.pause_button.toolTip())
-        self.hint.setStringValue_(HINTS[self.mode] if self.listening else "Microphone paused · timers remain active")
+        self.hint.setStringValue_(hint(self.mode) if self.listening else "Microphone paused · timers remain active")
         self.menu_only_item.setState_(int(self.menu_only))
         gain, mute = voice_output.volume(), voice_output.muted()
         self.voice_slider.setDoubleValue_(gain)
@@ -434,7 +440,7 @@ class AppDelegate(NSObject):
         PREFS.setBool_forKey_(not self.listening, "listening_paused")
         self.controls.put(("listening", self.listening))
         self._sync_controls()
-        self.updateStatus_({"state": "Ready" if self.listening else "Paused", "detail": HINTS[self.mode] if self.listening else "Microphone paused. Current action may finish."})
+        self.updateStatus_({"state": "Ready" if self.listening else "Paused", "detail": hint(self.mode) if self.listening else "Microphone paused. Current action may finish."})
 
     def voiceVolumeChanged_(self, sender):
         voice_output.configure(gain=sender.doubleValue())
@@ -584,6 +590,18 @@ class AppDelegate(NSObject):
                                     NSColor.secondaryLabelColor())
         for view in (self.backend_next, self.backend_restart):
             h.addSubview_(view)
+        phrase, aliases = wake_settings()
+        self.wake_field = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, CONTROL_W, 22))
+        self.wake_field.setStringValue_(phrase)
+        self.wake_field.setPlaceholderString_("Hey Jev")
+        self.alias_field = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, CONTROL_W, 22))
+        self.alias_field.setStringValue_(", ".join(aliases))
+        self.alias_field.setPlaceholderString_("Optional, comma-separated")
+        self.alias_field.setToolTip_("Other ways the recognizer writes your phrase, from the microphone test. "
+                                     "Only these exact spellings count.")
+        y = form_group(h, y + 28, "Wake phrase", [("Phrase", self.wake_field), ("Also accept", self.alias_field)])
+        footnote(h, y, "Used in Hey Jev mode. Test it below: the test shows what was heard and whether it matched.")
+        y += 8
         self.test_button = NSButton.buttonWithTitle_target_action_("Test Microphone", self, "micTest:")
         self.test_result = text("—", NSMakeRect(0, 0, CONTROL_W + 60, 17), 13, NSColor.secondaryLabelColor())
         self.test_result.setAlignment_(2)
@@ -719,7 +737,8 @@ class AppDelegate(NSObject):
         if result.get("error"):
             self.test_result.setStringValue_(f"Test failed: {result['error']}")
         else:
-            self.test_result.setStringValue_(f"Heard “{result['text'] or '(nothing)'}” in {result['ms']} ms")
+            matched = "wake phrase matched" if result.get("wake_matched") else "no wake phrase"
+            self.test_result.setStringValue_(f"“{result['text'] or '(nothing)'}” · {matched} · {result['ms']} ms")
         self.test_result.setToolTip_(self.test_result.stringValue())  # long results and errors stay readable
 
     @objc.python_method
@@ -755,6 +774,8 @@ class AppDelegate(NSObject):
 
     def saveSettings_(self, _sender):
         try:
+            import wake  # checked first: a bad phrase must not leave a half-saved form
+            phrase, aliases = wake.validate(self.wake_field.stringValue()), wake.parse_aliases(self.alias_field.stringValue())
             values = self._parameter_values()
             validate_parameters(values, self.selected_metadata)
             jev_provider = ("openrouter", "typesafe")[self.jev_provider.indexOfSelectedItem()]
@@ -774,6 +795,10 @@ class AppDelegate(NSObject):
             save_confirm_policy({e: ("ask", "auto")[p.indexOfSelectedItem()] for e, p in self.policy_popups.items()})
             backend = BACKENDS[self.backend_popup.indexOfSelectedItem()]
             save_transcription_backend(backend)
+            if (phrase, aliases) != tuple(wake_settings()):
+                save_wake_settings(phrase, aliases)
+                if self.worker_started:
+                    self.controls.put(("wake_phrase", phrase, aliases))  # applied live, old audio dropped
             from siri import STT
             if self.worker_started and (STT["backend"] != backend or STT["blocked"]):
                 self.controls.put(("transcription", backend))  # live switch through the control queue

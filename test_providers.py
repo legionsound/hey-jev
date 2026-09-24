@@ -38,6 +38,27 @@ class ProviderTests(unittest.TestCase):
                     self.assertEqual(args[0], url)
                     self.assertEqual(kwargs["json"]["model"], model)
                     self.assertEqual(kwargs["headers"]["Authorization"], f"Bearer {key}")
+                    self.assertIs(kwargs.get("allow_redirects"), False)
+
+    def test_key_requests_disable_redirects(self):
+        with patch.object(siri.requests, "post") as post:
+            post.return_value.json.return_value = {
+                "answers": {"intent": {"type": "choice", "choice": "x", "confidence": 0.9}},
+                "usage": {"input_tokens": 0}}
+            with patch.object(siri, "JEV_PROVIDER", "typesafe"), \
+                    patch.object(siri, "TS_KEY", "ts-test"):
+                siri.jev("hello", {"intent": {"type": "choice"}})
+            _, kwargs = post.call_args
+            self.assertIs(kwargs.get("allow_redirects"), False)
+        with patch.object(siri.requests, "post") as post:
+            post.return_value.content = b"RIFF"
+            with patch.object(siri, "FISH_KEY", "fish-test"), \
+                    patch("os.path.exists", return_value=False), \
+                    patch("os.makedirs"), \
+                    patch("builtins.open", create=True):
+                siri.fetch_tts("hi")
+            _, kwargs = post.call_args
+            self.assertIs(kwargs.get("allow_redirects"), False)
 
     def test_disabled_answers_use_scripted_reply(self):
         ans = {"category": ("information_request", 0.9), "target": ("app", 0), "compound": (False, 0.9)}

@@ -156,6 +156,7 @@ REPLIES = {
                     "{count} things in {app}, numbered on screen. Say click and a number."],
     "screen.press": ["Clicked it.", "[cheerful] Done, clicked."],
     "screen.type": ["Typed it.", "[cheerful] Typed."],
+    "screen.submit": ["Submitted.", "Pressed return."],
     "timer.cancel": ["Timer cancelled.", "[sighing] Fine, no timer then."],
     "timers_cancel": ["All timers cancelled.", "Cleared them all."],
     "timer_none": ["[chuckling] There's no timer running."],
@@ -252,7 +253,8 @@ def line_for(result):
                 "timer.check": say_line("timer_none"), "timer.cancel": say_line("timer_none"),
                 "timer.set": say_line("timer_unclear"), "url.open": "That doesn't look like a web address.",
                 "screen.press": "I can't find that on screen.", "screen.list": "I can't read this window.",
-                "screen.type": "I can't find a text field to type into."}
+                "screen.type": "I can't find a text field to type into.",
+                "screen.submit": "There's nothing selected to submit."}
         line = miss.get(stop["action"], say_line("failed"))
         if stop.get("detail") == "password_field":
             line = "I don't type into password fields."

@@ -575,6 +575,15 @@ def insert_text(ref, text, deadline):
     return bounded(run, deadline, effect=True)
 
 
+def can_confirm(ref, deadline):
+    return bounded(lambda: enabled(ref) and "AXConfirm" in _actions(ref), deadline)
+
+
+def confirm(ref, deadline):
+    """AXConfirm: what Return does in a field, sent to that element. No keystroke."""
+    return bounded(lambda: int(_AS().AXUIElementPerformAction(ref, "AXConfirm")), deadline, effect=True)
+
+
 def is_pressable(ref, deadline):
     return bounded(lambda: enabled(ref) and "AXPress" in _actions(ref), deadline)
 

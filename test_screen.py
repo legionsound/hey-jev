@@ -595,5 +595,63 @@ class TypeTests(unittest.TestCase):
         self.assertNotIn("secret plan", repr(logged))
 
 
+class SubmitTests(TypeTests):
+    def setUp(self):
+        super().setUp()
+        self.after = {}
+        self.confirms = []
+        for name, fn in {"can_confirm": lambda ref, d: self.facts.get("confirm", True), "confirm": self.do_confirm,
+                         "element_state": lambda ref, d: {"exists": self.after.get("exists", "yes")},
+                         "focused_field": lambda pid, d: self.after.get("focus", self.field)}.items():
+            p = patch.object(screen, name, fn)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def do_confirm(self, ref, d):
+        self.confirms.append(ref)
+        self.after.update(self.effect_after)
+        return 0
+
+    def submit(self, policy=None):
+        with patch.object(planner, "plan", lambda *a, **k: ("steps", [{"clause": "press enter",
+                                                                        "action": "screen.submit", "args": {}}])):
+            eng = Engine(lambda _: {}, policy=lambda: policy or {**actions.DEFAULT_POLICY, "submit": "auto"})
+            return eng.wait(eng.submit("press enter", "cli")["id"], 10)
+
+    def test_submit_words_are_exact(self):
+        for said in ["press enter", "hit return", "press the enter key", "submit", "submit it please"]:
+            self.assertTrue(planner.SUBMIT_WORDS.match(said), said)
+        for said in ["press play", "submit the form to my boss", "send it"]:
+            self.assertFalse(planner.SUBMIT_WORDS.match(said), said)
+
+    def test_done_only_on_a_change_of_the_field(self):
+        for effect, want in [({"exists": "no"}, ["field_gone"]), ({"focus": object()}, ["focus_moved"])]:
+            self.after, self.effect_after = {}, effect
+            v = self.submit()
+            self.assertEqual((v["state"], v["steps"][0]["facts"]), ("completed", {"changed": want}), effect)
+        self.after, self.effect_after = {}, {}
+        self.value["v"] = "sent text"
+        orig = self.do_confirm
+        self.do_confirm = lambda ref, d: (orig(ref, d), self.value.update(v=""))[0]
+        patch.object(screen, "confirm", self.do_confirm).start()
+        v = self.submit()
+        self.assertEqual(v["steps"][0]["facts"], {"changed": ["text_changed"]})
+
+    def test_no_field_change_is_unverified(self):
+        self.after, self.effect_after = {}, {}
+        self.assertEqual(self.submit()["state"], "unverified")
+
+    def test_nothing_to_submit(self):
+        self.facts["confirm"] = False
+        self.effect_after = {}
+        v = self.submit()
+        self.assertEqual((v["state"], self.confirms), ("failed", []))
+
+    def test_submit_asks_first_by_default(self):
+        self.effect_after = {}
+        v = self.submit(policy=dict(actions.DEFAULT_POLICY))
+        self.assertEqual((v["state"], self.confirms), ("declined", []))
+
+
 if __name__ == "__main__":
     unittest.main()

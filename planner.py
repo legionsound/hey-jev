@@ -282,10 +282,16 @@ UI_WORDS = re.compile(r"^\W*(?:please\s+)?(?:click|tap|double[\s-]click|type)\b|
                       r"\b(?:button|checkbox|check\s+box|link|menu\s+item|icon|toggle)\b", re.I)
 
 
+SUBMIT_WORDS = re.compile(r"^\W*(?:please\s+)?(?:(?:press|hit|tap)\s+(?:the\s+)?(?:enter|return)(?:\s+key)?|submit"
+                          r"(?:\s+(?:it|that|this))?)(?:\s+(?:please|now))?[\s.!?]*$", re.I)
+
+
 def pick(ans, clause, inherited_browser=None):
     """Trust Jev's target if it is fairly sure, else the single most confident action anywhere.
     "Click" and "tap", or a named UI part ("the Loud mode checkbox"), always mean a control on screen:
     Jev's target question hears "Loud" as volume, and that must never turn a click into a volume change."""
+    if SUBMIT_WORDS.match(clause):  # Return in the selected field: exact words only, never inferred
+        return (ans["target"][1], "screen.submit", {})
     if UI_WORDS.search(clause):
         return step_for(ans, "screen", clause)
     target, tconf = ans["target"]

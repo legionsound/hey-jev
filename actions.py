@@ -689,6 +689,79 @@ def verify_screen_type(t, deadline):
                            else "the field could not be read back"})
 
 
+def resolve_screen_submit(args):
+    """The app's focused element, when it accepts AXConfirm: Return, sent to that element."""
+    deadline = time.monotonic() + RESOLVE_BUDGET
+    try:
+        snap = screen.observe(ocr=False, deadline=deadline)
+        ref = screen.focused_field(snap.pid, deadline)
+        if ref is None:
+            return ("none", "no field is selected")
+        facts = screen.field_facts(ref, deadline)
+        if not screen.can_confirm(ref, deadline):
+            return ("none", "nothing here to submit")
+    except (screen.Unavailable, screen.TimedOut, screen.Wedged) as exc:
+        return ("none", f"can't read the screen: {exc}")
+    if facts["window"] != snap.window_token:
+        return ("none", "field is in another window")
+    return ("target", {**_field_target(snap, ref, facts, ""), "confirm_word": "submit"})
+
+
+def run_screen_submit(t, deadline):
+    ref = screen.element_for(t.get("element"))
+    if ref is None:
+        raise Failed("unknown field")
+    try:
+        if screen.process_start(t["pid"], deadline) != t["started"]:
+            raise Failed("the app restarted")
+        facts = screen.field_facts(ref, deadline)
+        if (facts["role"] != t["role"] or facts["frame"] != t["frame"] or facts["window"] != t["window"]
+                or not screen.can_confirm(ref, deadline)):
+            raise Failed("that field is no longer there")
+        before = (screen.field_value(ref, deadline), screen.focused_field(t["pid"], deadline),
+                  screen.element_state(ref, deadline)["exists"])
+    except (screen.Unavailable, screen.TimedOut, screen.Wedged) as exc:
+        raise Failed(f"screen read failed before submitting: {exc}")
+    _typed[id(t)] = (before, time.monotonic(), ref)
+    try:
+        err = screen.confirm(ref, deadline)
+    except screen.Wedged as exc:
+        raise Failed(str(exc))
+    except screen.TimedOut as exc:
+        raise Uncertain(f"the app did not answer in time ({exc})")
+    if err in AX_GONE:
+        raise Failed(f"the field refused (AX error {err})")
+    if err != 0:
+        raise Uncertain(f"AX error {err} after submitting")
+
+
+def verify_screen_submit(t, deadline):
+    """done only on a change of that field: it went away, focus left it, or its text changed (a field that clears
+    after sending). A change elsewhere proves nothing."""
+    before, at, ref = _typed.get(id(t), (None, 0, None))
+    if before is None:
+        return ("unverified", {"why": "no before-state"})
+    value, focus, exists = before
+    now_exists = screen.element_state(ref, deadline)["exists"]
+    changed = []
+    if exists == "yes" and now_exists == "no":
+        changed.append("field_gone")
+    elif now_exists == "yes":
+        now_focus = screen.focused_field(t["pid"], deadline)
+        if focus is not None and now_focus is not None and now_focus != focus:
+            changed.append("focus_moved")
+        now_value = screen.field_value(ref, deadline)
+        if isinstance(value, str) and isinstance(now_value, str) and now_value != value:
+            changed.append("text_changed")
+    if changed:
+        _typed.pop(id(t), None)
+        return ("done", {"changed": changed})
+    if time.monotonic() - at < SETTLE:
+        return ("wait", {})
+    _typed.pop(id(t), None)
+    return ("unverified", {"delivered": True, "why": "submitted; the field itself did not change"})
+
+
 def run_screen_list(t, deadline):
     try:
         snap = screen.observe(ocr=True, deadline=deadline)
@@ -766,17 +839,20 @@ ACTIONS = {
     "screen.list": entry("look", plain, run_screen_list, verify_screen_list, "the list is what was read", 8),
     "screen.press": entry("click", resolve_screen_press, run_screen_press, verify_screen_press,
                           "the window changed after the press; not that the intended result happened", 6),
+    "screen.submit": entry("submit", resolve_screen_submit, run_screen_submit, verify_screen_submit,
+                           "the field went away, lost focus or changed; not that anything was sent", 6),
     "screen.type": entry("type", resolve_screen_type, run_screen_type, verify_screen_type,
                          "the field holds its old text plus exactly the typed text; nothing is submitted", 6),
     "timer.cancel": entry("timer", resolve_timer_cancel, run_timer_cancel, verify_timer_cancel, "the timer left the running list", 2),
 }
 
-EFFECTS = ("open", "navigate", "media", "volume", "display", "timer", "click", "type", "quit", "lock", "sleep")
-DEFAULT_POLICY = {e: ("ask" if e in ("quit", "lock", "sleep", "click", "type") else "auto") for e in EFFECTS}
+EFFECTS = ("open", "navigate", "media", "volume", "display", "timer", "click", "type", "submit", "quit", "lock", "sleep")
+DEFAULT_POLICY = {e: ("ask" if e in ("quit", "lock", "sleep", "click", "type", "submit") else "auto") for e in EFFECTS}
 DEFAULT_POLICY["look"] = "auto"  # reading the screen has no effect, so it is not a setting
 EFFECT_LABELS = {"open": "Open apps", "navigate": "Open websites", "media": "Music playback", "volume": "Volume",
                  "display": "Dark mode", "timer": "Timers and reminders",
-                 "click": "Click buttons on screen", "type": "Type into fields", "quit": "Quit apps",
+                 "click": "Click buttons on screen", "type": "Type into fields",
+                 "submit": "Press Return in fields", "quit": "Quit apps",
                  "lock": "Lock screen", "sleep": "Sleep the Mac"}
 
 
@@ -813,7 +889,8 @@ def describe(action, target):
             "media.next": "Skip to the next track", "media.previous": "Go back a track",
             "timer.check": "Read out the time left",
             "screen.list": "Read what's on screen", "screen.press": "Click “{label}” in {app}",
-            "screen.type": "Type “{text}” into {field} in {app}"}.get(action, action.replace(".", ": ").replace("_", " "))
+            "screen.type": "Type “{text}” into {field} in {app}",
+            "screen.submit": "Press Return in the selected field in {app}"}.get(action, action.replace(".", ": ").replace("_", " "))
     return what.format(name=name, url=t.get("url") or "the website", level=level, label=t.get("label") or "that",
                        text=t.get("text") or "", field=f"“{t['label']}”" if t.get("label") else "the selected field",
                        app=t.get("app") or "the app")

@@ -432,6 +432,18 @@ class VoiceStopLoopTests(LoopHarness):
             time.sleep(1.5)
         self.assertEqual(self.submitted_texts(), ["quit Notes"])
 
+    def test_stop_with_nothing_running_is_one_ordinary_command(self):
+        import time
+        self.controls.put(("mode", "wake"))
+        self.wait(lambda: self.rec.wake)
+        with patch.object(siri, "say", lambda *a: None):
+            self.say_and_wait("Hey Jev stop")  # nothing in flight: plans like any command (pause music)
+            self.wait(lambda: self.submitted_texts())
+            time.sleep(0.3)
+        self.assertEqual(self.submitted_texts(), ["stop"])
+        stops = [k for a, k in self.logged if a[1:2] == ("stop",)]
+        self.assertEqual(stops, [])
+
     def test_stop_in_the_gap_before_the_first_submission(self):
         import threading
         import time

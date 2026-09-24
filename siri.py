@@ -832,9 +832,10 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
     gate = threading.Lock()  # a stop and a submission never interleave
     stop_gen = [0]  # bumped by every stop: turns heard before it never submit
 
-    def stop_queued(drop=False):
+    def stop_queued(drop=False, own=False):
+        """own: asked by the turn the worker is running, which must not count itself as pending work."""
         with gate:
-            waiting = turns.qsize() + (1 if current[0] is not None else 0)
+            waiting = turns.qsize() + (1 if current[0] is not None and not own else 0)
             if drop:
                 stop_gen[0] += 1
                 drain(turns)
@@ -858,7 +859,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
             try:
                 print(f"  (stt {stt_ms}ms)")
                 turn(ENGINE, text, notify, hold=hold, stt_ms=stt_ms, admit=admit_for(gen, epoch),
-                     stop_queued=stop_queued)
+                     stop_queued=lambda drop=False: stop_queued(drop, own=True))
             except Exception as exc:
                 print(f"\n  turn failed: {exc}")
                 emit(notify, "Something went wrong", str(exc))

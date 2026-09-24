@@ -429,7 +429,7 @@ class Recorder:
             return
         if self.on and not self.paused:
             self.frames.append(indata.copy())
-        if not self.wake or self.paused:
+        if not self.wake or self.paused or getattr(self, "isolated", False):  # isolated: transcript-only capture
             if self.speech:
                 self._reset_segment()
             return
@@ -477,30 +477,35 @@ class Floor:
         self.rec = rec
         self.lock = threading.Lock()   # the floor
         self.state = threading.Lock()  # guards the recording start/stop transition
+        self.owner = None              # token of the recording in progress; only its holder may stop it
 
     def locked(self):
         return self.lock.locked()
 
     def start_recording(self):
+        """-> an ownership token, or None when the floor is taken."""
         with self.state:
             if self.rec.on or not self.lock.acquire(blocking=False):
-                return False
-            self.rec.start()
-            return True
-
-    def stop_recording(self):
-        """-> the audio, or None when no recording was running."""
-        with self.state:
-            if not self.rec.on:
                 return None
+            self.owner = object()
+            self.rec.start()
+            return self.owner
+
+    def stop_recording(self, token):
+        """-> the audio, or None when `token` does not own the running recording (stale, dropped or someone else's)."""
+        with self.state:
+            if token is None or token is not self.owner or not self.rec.on:
+                return None
+            self.owner = None
             audio = self.rec.stop()
             self.lock.release()
             return audio
 
     def drop_recording(self):
-        """Mode or mic change: discard any recording and give the floor back if it held it."""
+        """Mode or mic change: discard any recording and give the floor back if it held it. Old tokens go stale."""
         with self.state:
             was = self.rec.on
+            self.owner = None
             self.rec.invalidate()
             if was:
                 self.lock.release()
@@ -573,6 +578,14 @@ def load_transcriber(backend, notify):
     return transcribe, None
 
 
+def drain(q):
+    while True:
+        try:
+            q.get_nowait()
+        except queue.Empty:
+            return
+
+
 def start_bridge(eng, notify):
     """Owning the socket is what makes this the one engine. Any failure stops startup: no second mic or engine."""
     from bridge import Bridge
@@ -611,6 +624,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
     hold = floor.hold
     armed_until = [0.0]
     want_listening = [listening]
+    ptt_token = [None]  # the push-to-talk recording this key press owns
     stt_fn = [None]
     switch_lock = threading.Lock()
 
@@ -662,13 +676,20 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
             return reply({"error": STT["blocked"]})
         if not rec.enabled:
             return reply({"error": "Listening is paused. Resume it, then test again."})
-        if not floor.start_recording():
-            return reply({"error": "Busy right now. Try again in a moment."})
-        emit(notify, "Mic test", f"Say something… ({seconds} seconds)")
-        time.sleep(seconds)
-        audio = floor.stop_recording()
+        rec.isolated = True  # no wake segmentation from test audio
+        try:
+            token = floor.start_recording()
+            if token is None:
+                return reply({"error": "Busy right now. Try again in a moment."})
+            emit(notify, "Mic test", f"Say something… ({seconds} seconds)")
+            time.sleep(seconds)
+            audio = floor.stop_recording(token)  # None if a switch or mode change dropped it meanwhile
+        finally:
+            rec.isolated = False
+            drain(rec.segments)
         if audio is None or not len(audio):
-            return reply({"error": "Nothing was recorded."})
+            emit(notify, "Ready", ready_text(rec.wake))
+            return reply({"error": "The test was interrupted or nothing was recorded."})
         try:
             text, ms = transcribe(audio, COMMAND_PROMPT)
         except Exception as exc:
@@ -748,12 +769,17 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
         if STT["blocked"]:
             emit(notify, "Dictation unavailable", STT["blocked"])
             return
-        if rec.enabled and not rec.wake and floor.start_recording():
-            print("\n[listening]", end="", flush=True)
-            emit(notify, "Listening", "Release right Option when you’re done")
+        if ptt_token[0] is not None and ptt_token[0] is not floor.owner:
+            ptt_token[0] = None  # its recording was dropped by a mode or backend change
+        if rec.enabled and not rec.wake and ptt_token[0] is None:
+            ptt_token[0] = floor.start_recording()
+            if ptt_token[0] is not None:
+                print("\n[listening]", end="", flush=True)
+                emit(notify, "Listening", "Release right Option when you’re done")
 
     def stop_recording():
-        audio = floor.stop_recording()
+        token, ptt_token[0] = ptt_token[0], None
+        audio = floor.stop_recording(token)  # only this key press's own recording
         if audio is not None:
             if len(audio) > SAMPLE_RATE * 0.3:
                 threading.Thread(target=ptt_turn, args=(audio, rec.epoch), daemon=True).start()

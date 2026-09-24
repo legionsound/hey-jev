@@ -278,7 +278,8 @@ class FloorTests(unittest.TestCase):
     def test_late_speech_waits_for_push_to_talk_to_end(self):
         rec = self.rec()
         floor = self.siri.Floor(rec)
-        self.assertTrue(floor.start_recording())
+        token = floor.start_recording()
+        self.assertTrue(token)
         spoke = threading.Event()
 
         def late():
@@ -288,7 +289,7 @@ class FloorTests(unittest.TestCase):
 
         threading.Thread(target=late, daemon=True).start()
         self.assertFalse(spoke.wait(0.3))
-        self.assertEqual(floor.stop_recording(), "audio")
+        self.assertEqual(floor.stop_recording(token), "audio")
         self.assertTrue(spoke.wait(2))
 
     def test_no_recording_starts_while_jev_speaks(self):

@@ -74,7 +74,7 @@ class FakeRecorder:
         return np.ones(16000, dtype="float32")
 
 
-class LiveSwitchTests(unittest.TestCase):
+class LoopHarness(unittest.TestCase):
     """Runs the real run_voice_assistant loop with the mic, engine and socket faked."""
 
     def setUp(self):
@@ -93,9 +93,17 @@ class LiveSwitchTests(unittest.TestCase):
                 return fail, None
             return (lambda audio, prompt: (f"{backend} heard {len(audio)}", 7)), None
 
-        eng = types.SimpleNamespace(instance="t", shutdown=lambda: None,
-                                    submit=lambda *a, **k: self.submitted.append(a))
-        self.patches = [patch.object(siri, "load_transcriber", load), patch.object(siri, "Recorder", FakeRecorder),
+        def submit(*a, **k):
+            self.submitted.append(a)
+            raise RuntimeError("test engine: stop here")  # the submission itself is what these tests count
+        eng = types.SimpleNamespace(instance="t", shutdown=lambda: None, submit=submit)
+        test_self = self
+
+        class Rec(FakeRecorder):
+            def __init__(self):
+                super().__init__()
+                test_self.rec = self
+        self.patches = [patch.object(siri, "load_transcriber", load), patch.object(siri, "Recorder", Rec),
                         patch.object(siri, "make_engine", lambda *a, **k: eng),
                         patch.object(siri, "start_bridge", lambda *a: types.SimpleNamespace(stop=lambda: None)),
                         patch.object(siri, "transcription_backend", lambda: "apple"),
@@ -103,14 +111,15 @@ class LiveSwitchTests(unittest.TestCase):
                         patch.object(siri.timers, "start_loop", lambda cb: None),
                         patch.object(siri.diagnostics, "init", lambda *a, **k: None),
                         patch.object(siri.diagnostics, "record", lambda *a, **k: self.logged.append((a, k))),
-                        patch.object(siri, "MIC_TEST_SECONDS", 0)]
+                        patch.object(siri, "MIC_TEST_SECONDS", getattr(self, "seconds", 0))]
         for p in self.patches:
             p.start()
+        siri.STT.update(backend=None, blocked=None, switching=False)  # module state from an earlier test
         self.thread = threading.Thread(target=siri.run_voice_assistant,
                                        args=(lambda s, d="": self.events.append((s, d)), self.controls, "ptt", True),
                                        daemon=True)
         self.thread.start()
-        self.wait(lambda: siri.STT["backend"] == "apple" and not siri.STT["switching"])
+        self.wait(lambda: siri.STT["backend"] == "apple" and not siri.STT["switching"] and hasattr(self, "rec"))
 
     def tearDown(self):
         self.controls.put("quit")
@@ -127,12 +136,15 @@ class LiveSwitchTests(unittest.TestCase):
             time.sleep(0.01)
         self.fail("condition not reached")
 
-    def mic_test(self):
+    def mic_test(self):  # noqa: E301
         import queue
         got = queue.Queue()
         self.controls.put(("mic_test", got.put))
         return got.get(timeout=5)
 
+
+
+class LiveSwitchTests(LoopHarness):
     def test_blocked_then_permission_granted_recovers_without_restart(self):
         self.assertIn("not_determined", siri.STT["blocked"])
         self.assertIn("not_determined", self.mic_test()["error"])
@@ -156,6 +168,76 @@ class LiveSwitchTests(unittest.TestCase):
         self.assertEqual(failed[0]["backend"], "broken")
         self.assertIn("Code=1110", failed[0]["error"])
         self.assertNotIn("audio", {k for k in failed[0] if k != "audio_s"})
+
+
+class MicTestIsolationTests(LoopHarness):
+    """A real test window (0.4 s) so other input can land inside it. Apple starts ready here."""
+    seconds = 0.4
+
+    def setUp(self):
+        super().setUp()
+        self.apple_ready = True
+        self.controls.put(("transcription", "apple"))
+        self.wait(lambda: siri.STT["blocked"] is None and not siri.STT["switching"])
+
+    def start_test(self):
+        import queue
+        got = queue.Queue()
+        self.controls.put(("mic_test", got.put))
+        self.wait(lambda: self.rec.on)  # the test holds the recording
+        return got
+
+    def settle(self):
+        import time
+        time.sleep(0.3)
+
+    def test_release_during_test_submits_nothing(self):
+        got = self.start_test()
+        self.controls.put("release")  # a stray key-up must not take the test's recording
+        result = got.get(timeout=5)
+        self.settle()
+        self.assertEqual(result["text"], "apple heard 16000")
+        self.assertEqual(self.submitted, [])
+
+    def test_wake_mode_test_audio_never_becomes_a_command(self):
+        self.controls.put(("mode", "wake"))
+        self.wait(lambda: self.rec.wake)
+        got = self.start_test()
+        self.assertTrue(self.rec.isolated)  # wake segmentation is off for the test's audio
+        import numpy as np
+        self.rec.segments.put(np.ones(16000, dtype="float32"))  # a phrase that slipped into the queue anyway
+        got.get(timeout=5)
+        self.settle()
+        self.assertFalse(self.rec.isolated)
+        self.assertTrue(self.rec.segments.empty())
+        self.assertEqual(self.submitted, [])
+
+    def test_switch_then_new_ptt_is_not_taken_by_the_old_test(self):
+        got = self.start_test()
+        self.controls.put(("transcription", "whisper"))  # drops the test's recording
+        self.wait(lambda: siri.STT["backend"] == "whisper" and not siri.STT["switching"])
+        self.controls.put("press")  # a new push-to-talk recording starts while the old test is still sleeping
+        self.wait(lambda: self.rec.on)
+        self.assertIn("interrupted", got.get(timeout=5)["error"])
+        self.assertTrue(self.rec.on)  # the stale test did not stop it
+        self.controls.put("release")
+        self.wait(lambda: self.submitted)
+        self.assertEqual(self.submitted, [("whisper heard 16000", "voice")])
+
+
+class RecorderIsolationTests(unittest.TestCase):
+    def test_isolated_capture_skips_wake_segmentation(self):
+        import queue
+        import numpy as np
+        r = object.__new__(siri.Recorder)
+        r.np, r.enabled, r.on, r.paused, r.wake, r.frames, r.isolated = np, True, True, False, True, [], True
+        r.noise, r.segments = 0.005, queue.Queue()
+        r._reset_segment()
+        for _ in range(40):
+            r._cb(np.full((1600, 1), 0.5, dtype="float32"))
+        self.assertEqual(len(r.frames), 40)  # the test still records
+        self.assertEqual(r.speech, [])
+        self.assertTrue(r.segments.empty())
 
 
 if __name__ == "__main__":

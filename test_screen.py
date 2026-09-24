@@ -1,0 +1,470 @@
+"""Screen control: the walk, the merge, the planner's words, and press/list through the real engine with a fake screen."""
+import unittest
+from unittest.mock import patch
+
+import actions
+import ax_walk
+import diagnostics
+import planner
+import screen
+from engine import Engine
+
+
+class Node:
+    def __init__(self, role, label="", frame=(0, 0, 100, 30), kids=(), acts=("AXPress",)):
+        self.role, self.label, self.frame, self.kids, self.acts = role, label, frame, list(kids), acts
+
+
+def walk(root, area=(0, 0, 1000, 800)):
+    x, y, w, h = area
+    return ax_walk.walk_actionable(root, lambda n: n.kids, lambda n: ax_walk.AxAttrs(n.role, n.label, n.frame),
+                                   lambda n: n.acts, w, h, x0=x, y0=y)
+
+
+class WalkTests(unittest.TestCase):
+    def test_nested_nameless_containers_are_all_walked(self):
+        # WebKit: window > group > group > scroll area > web area, all one frame. Keying them dropped the page.
+        big = (1622, 30, 1578, 1320)
+        page = Node("AXWebArea", frame=big, kids=[Node("AXButton", "Go back", (1732, 38, 24, 28))])
+        root = Node("AXWindow", frame=big, kids=[Node("AXGroup", frame=big, kids=[
+            Node("AXGroup", frame=big, kids=[Node("AXScrollArea", frame=big, kids=[page])])])])
+        found, _, _ = walk(root, big)
+        self.assertEqual([n.label for n in found], ["Go back"])
+
+    def test_window_on_a_second_display(self):
+        root = Node("AXWindow", frame=(2000, 100, 400, 300), kids=[Node("AXButton", "OK", (2100, 200, 80, 30))])
+        found, _, _ = walk(root, (2000, 100, 400, 300))
+        self.assertEqual([n.label for n in found], ["OK"])
+        found, _, _ = walk(root, (0, 0, 1000, 800))  # the old origin-zero area missed it
+        self.assertEqual(found, [])
+
+
+def item(n, label, source="ax", role="AXButton", frame=(10, 10, 80, 30), pressable=True, ref=None, **kw):
+    return screen.Item(n, source, role, label, frame, pressable, ref=ref if ref is not None else object(), **kw)
+
+
+WINDOWS = {}
+
+
+def snap(items, pid=7, window="Pad", app="Pad", started="Thu Sep 24 18:00:00 2026"):
+    return screen.Snapshot(pid, app, "com.pad", window, (0, 0, 400, 300), items,
+                           window_ref=WINDOWS.setdefault((pid, window), object()), started=started)
+
+
+class MergeTests(unittest.TestCase):
+    def test_ocr_on_a_control_marks_it_and_other_text_stays_text(self):
+        control = ax_walk.AxNode("AXButton", "Add one", 20, 100, 180, 34, True, None)
+        texts = [("Add one", 1.0, (60, 108, 60, 14)), ("Count: 0", 1.0, (20, 60, 52, 12)),
+                 ("outside", 1.0, (900, 900, 10, 10))]
+        items = screen.merge([control], texts, (0, 0, 400, 300))
+        self.assertEqual([(i.n, i.source, i.label) for i in items], [(1, "ocr", "Count: 0"), (2, "ax+ocr", "Add one")])
+
+
+class PlannerTests(unittest.TestCase):
+    def test_press_words(self):
+        cases = {"click Share": {"label": "Share"}, "press the New Note button": {"label": "New Note"},
+                 "click 12": {"number": 12}, "click number twelve": {"number": 12}, "tap on Send please": {"label": "Send"},
+                 "choose Two Pages": {"label": "Two Pages"}, "click the dark mode toggle": {"label": "dark mode"}}
+        for said, want in cases.items():
+            self.assertEqual(planner.press_args(said), want, said)
+        self.assertIsNone(planner.press_args("open Safari"))
+
+    def answers(self, target, **branch):
+        ans = {"category": ("mac_command", 0.95), "compound": (False, 0.9), "target": (target, 0.9),
+               "app_action": ("none", 0.9), "volume_action": ("up", 0.8), "volume_scope": ("system", 0.9),
+               "volume_level": ("loud", 0.8), "display_action": ("toggle", 0.9), "media_action": ("play", 0.9),
+               "timer_action": ("none", 0.9), "system_action": ("none", 0.9), "screen_action": ("press", 0.9)}
+        ans.update(branch)
+        return ans
+
+    def test_click_and_ui_nouns_never_become_other_actions(self):
+        # Real Jev heard "click on the Loud mode checkbox" as volume up (0.82): the click must stay a click.
+        for said, target in [("click on the Loud mode checkbox", "volume"), ("tap the Play button", "media"),
+                             ("click the dark mode toggle", "display"), ("click Mute", "volume")]:
+            kind, steps = planner.plan(said, lambda _: self.answers(target))
+            self.assertEqual((kind, steps[0]["action"]), ("steps", "screen.press"), said)
+        kind, steps = planner.plan("press play", lambda _: self.answers("media"))
+        self.assertEqual(steps[0]["action"], "media.play")  # no click word, no UI noun: Jev's target stands
+        kind, steps = planner.plan("switch to dark mode", lambda _: self.answers("display", display_action=("dark_on", 0.9)))
+        self.assertEqual(steps[0]["action"], "display.dark_on")
+
+    def test_list(self):
+        kind, steps = planner.plan("what can I click here", lambda _: self.answers("screen", screen_action=("list", 0.9)))
+        self.assertEqual(steps[0]["action"], "screen.list")
+
+
+class FakeScreen:
+    """Patches screen's native reads and the press so the real actions and engine run without touching the Mac."""
+
+    def __init__(self, test, items, shown=None):
+        self.current, self.shown, self.presses = snap(items), shown, []
+        self.effect = "own"  # own: the pressed control's value flips; other: only unrelated text changes; none
+        self.sig, self.state = {"text": "a", "menu_open": False}, {"exists": True, "AXValue": "0"}
+        for name, fn in {"observe": self.observe, "last": lambda: self.shown,
+                         "signature": lambda pid, deadline: dict(self.sig),
+                         "element_state": lambda ref, deadline: dict(self.state), "press": self.press}.items():
+            p = patch.object(screen, name, fn)
+            p.start()
+            test.addCleanup(p.stop)
+
+    def observe(self, pid=None, ocr=True, deadline=None):
+        return self.current
+
+    def press(self, ref, deadline):
+        self.presses.append(ref)
+        if self.effect == "own":
+            self.state = {**self.state, "AXValue": "1"}
+        elif self.effect == "other":
+            self.sig = {**self.sig, "text": "b"}  # a clock ticking, another window updating
+        return 0
+
+
+class ScreenActionTests(unittest.TestCase):
+    def setUp(self):
+        p = patch.object(diagnostics, "record", lambda *a, **k: None)
+        p.start()
+        self.addCleanup(p.stop)
+        self.chosen = (None, 0.0)
+        p = patch.object(actions, "CHOOSE", lambda spoken, labels: self.chosen)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def run_text(self, text, action, args, policy=None, ask=None):
+        def classify(_):
+            return {}
+        with patch.object(planner, "plan", lambda *a, **k: ("steps", [{"clause": text, "action": action, "args": args}])):
+            eng = Engine(classify, policy=lambda: policy or {**actions.DEFAULT_POLICY, "click": "auto"}, ask=ask)
+            r = eng.submit(text, "cli")
+            return eng.wait(r["id"], 10)
+
+    def test_press_by_name_changes_and_completes(self):
+        fake = FakeScreen(self, [item(1, "Add one"), item(2, "Count: 0", "ocr", "text", pressable=False)])
+        v = self.run_text("click Add one", "screen.press", {"label": "add ONE"})
+        self.assertEqual((v["state"], v["steps"][0]["facts"]), ("completed", {"changed": ["AXValue"]}))
+        self.assertEqual(len(fake.presses), 1)
+
+    def test_press_with_no_change_is_unverified_not_done(self):
+        fake = FakeScreen(self, [item(1, "Add one")])
+        fake.effect = "none"
+        v = self.run_text("click Add one", "screen.press", {"label": "Add one"})
+        self.assertEqual(v["state"], "unverified")
+
+    def test_an_unrelated_change_does_not_complete_a_press(self):
+        fake = FakeScreen(self, [item(1, "Add one")])
+        fake.effect = "other"
+        v = self.run_text("click Add one", "screen.press", {"label": "Add one"})
+        self.assertEqual((v["state"], v["steps"][0]["facts"]["delivered"], v["steps"][0]["facts"]["observed"]),
+                         ("unverified", True, ["text"]))
+        self.assertEqual(len(fake.presses), 1)
+
+    def test_a_menu_opening_from_a_menu_control_completes(self):
+        fake = FakeScreen(self, [item(1, "View", role="AXMenuBarItem")])
+        fake.effect = "none"
+        orig = fake.press
+        fake.press = lambda ref, deadline: (orig(ref, deadline), fake.sig.update(menu_open=True))[0]
+        patch.object(screen, "press", fake.press).start()
+        v = self.run_text("click View", "screen.press", {"label": "View"})
+        self.assertEqual((v["state"], v["steps"][0]["facts"]), ("completed", {"changed": ["menu_open"]}))
+
+    def test_number_uses_the_list_the_user_saw_and_checks_it_is_still_there(self):
+        title, save = item(1, "Title", "ocr", "text", pressable=False), item(2, "Save")
+        shown = snap([title, save])
+        fake = FakeScreen(self, [title, save], shown)
+        self.assertEqual(self.run_text("click 2", "screen.press", {"number": 2})["state"], "completed")
+        v = self.run_text("click 1", "screen.press", {"number": 1})  # OCR text is not a control
+        self.assertEqual((v["state"], v["steps"][0]["detail"]), ("failed", "not_a_control"))
+        stale = {
+            "moved": snap([title, item(2, "Save", frame=(50, 50, 80, 30), ref=save.ref)]),
+            "replaced at the same spot": snap([title, item(2, "Save")]),  # a new element, same role/label/frame
+            "other window, same title": snap([title, save], window="Pad") if False else None,
+            "restarted app, same pid": snap([title, save], started="Thu Sep 24 19:00:00 2026"),
+            "disabled": snap([title, item(2, "Save", ref=save.ref, enabled=False)]),
+        }
+        other = screen.Snapshot(7, "Pad", "com.pad", "Pad", (0, 0, 400, 300), [title, save], window_ref=object(),
+                                started=shown.started)
+        stale["other window, same title"] = other
+        for why, current in stale.items():
+            fake.current = current
+            v = self.run_text("click 2", "screen.press", {"number": 2})
+            self.assertEqual((v["state"], v["steps"][0]["detail"]), ("failed", "screen_changed"), why)
+        self.assertEqual(len(fake.presses), 1)
+
+    def test_a_control_swapped_between_confirm_and_press_is_never_pressed(self):
+        save = item(1, "Save")
+        fake = FakeScreen(self, [save])
+        asked = []
+
+        def ask(pending):
+            if pending:
+                asked.append(pending)
+                fake.current = snap([item(1, "Save")])  # replaced while the pop-down is open
+                eng.decide(pending["token"], True)
+        eng = None
+
+        def classify(_):
+            return {}
+        with patch.object(planner, "plan", lambda *a, **k: ("steps", [{"clause": "click Save", "action": "screen.press",
+                                                                        "args": {"label": "Save"}}])):
+            eng = Engine(classify, policy=lambda: dict(actions.DEFAULT_POLICY), ask=ask)
+            v = eng.wait(eng.submit("click Save", "cli")["id"], 10)
+        self.assertEqual((len(asked), v["state"], v["steps"][0]["detail"]), (1, "failed", "target_changed"))
+        self.assertEqual(fake.presses, [])
+
+    def test_identical_labels_ask_which(self):
+        fake = FakeScreen(self, [item(1, "Buy", frame=(10, 10, 60, 30)), item(2, "Buy", frame=(300, 250, 60, 30))])
+        v = self.run_text("click Buy", "screen.press", {"label": "Buy"})
+        self.assertEqual(v["state"], "needs_clarification")
+        self.assertEqual([c["name"] for c in v["steps"][0]["facts"]["choices"]], ["Buy (top-left)", "Buy (bottom-right)"])
+        self.assertEqual(fake.presses, [])
+
+    def test_jev_picks_only_above_the_gate_and_only_well_formed_answers(self):
+        fake = FakeScreen(self, [item(1, "New Note"), item(2, "Delete Note")])
+        self.chosen = (0, 0.5)
+        self.assertEqual(self.run_text("click compose", "screen.press", {"label": "compose"})["state"], "failed")
+        for bad in [(0, float("inf")), (-1, 0.99), (True, 0.99), (5, 0.99), (0, True), (0, 1.5), ("0", 0.9), (0,), None]:
+            self.chosen = bad
+            v = self.run_text("click compose", "screen.press", {"label": "compose"})
+            self.assertEqual(v["state"], "needs_clarification", bad)
+        self.assertEqual(fake.presses, [])
+        self.chosen = (0, 0.9)
+        v = self.run_text("click compose", "screen.press", {"label": "compose"})
+        self.assertEqual((v["state"], v["steps"][0]["target"]["label"]), ("completed", "New Note"))
+
+    def test_chooser_never_sees_field_or_document_values(self):
+        FakeScreen(self, [item(1, "New Note"), item(2, "Dear Sam, the merger", role="AXCell", from_value=True)])
+        seen = []
+        with patch.object(actions, "CHOOSE", lambda spoken, labels: seen.append(labels) or (None, 0.0)):
+            self.run_text("click compose", "screen.press", {"label": "compose"})
+        self.assertEqual(seen, [["New Note"]])
+
+    def test_risky_labels_always_ask_even_when_clicks_are_automatic(self):
+        fake = FakeScreen(self, [item(1, "Delete everything")])
+        v = self.run_text("click Delete everything", "screen.press", {"label": "Delete everything"})
+        self.assertEqual((v["state"], v["steps"][0]["detail"]), ("declined", "no_confirmation_ui"))
+        self.assertEqual(fake.presses, [])
+
+    def test_clicks_ask_first_by_default(self):
+        fake = FakeScreen(self, [item(1, "Add one")])
+        v = self.run_text("click Add one", "screen.press", {"label": "Add one"}, policy=dict(actions.DEFAULT_POLICY))
+        self.assertEqual(v["state"], "declined")
+        self.assertEqual(fake.presses, [])
+
+    def test_list_remembers_and_reports_items(self):
+        FakeScreen(self, [item(1, "Save"), item(2, "hello", "ocr", "text", pressable=False)])
+        v = self.run_text("what can I click", "screen.list", {})
+        facts = v["steps"][0]["facts"]
+        self.assertEqual((v["state"], facts["count"], [i["label"] for i in facts["items"]]), ("completed", 2, ["Save", "hello"]))
+        self.assertEqual(screen.LAST.app, "Pad")
+
+    def test_screen_text_stays_out_of_the_log_and_speech(self):
+        import siri
+        FakeScreen(self, [item(1, "Private document title")])
+        logged = []
+        with patch.object(diagnostics, "record", lambda *a, **k: logged.append(k)):
+            listed = self.run_text("what can I click", "screen.list", {})
+            self.chosen = (0, 0.9)  # the user said "compose"; Jev picked the control, whose text the user never said
+            pressed = self.run_text("click compose", "screen.press", {"label": "compose"})
+        self.assertEqual(pressed["state"], "completed")
+        self.assertNotIn("Private document", repr(logged))
+        self.assertTrue(any(k.get("facts", {}).get("items") == 1 for k in logged))
+        for v in (listed, pressed):
+            self.assertNotIn("Private", siri.line_for(v))
+
+
+class DeadlineTests(unittest.TestCase):
+    def test_bounded_returns_at_the_deadline_even_when_the_call_hangs(self):
+        import time
+        t = time.monotonic()
+        with self.assertRaises(screen.TimedOut):
+            screen.bounded(lambda: time.sleep(5), t + 0.3)
+        self.assertLess(time.monotonic() - t, 1.0)
+        self.assertEqual(screen.bounded(lambda: 4, time.monotonic() + 1), 4)
+        with self.assertRaises(ZeroDivisionError):  # the call's own error comes back, not a timeout
+            screen.bounded(lambda: 1 / 0, time.monotonic() + 1)
+
+    def test_slow_ocr_keeps_the_controls_and_says_so(self):
+        import time
+        ctl = ax_walk.AxNode("AXButton", "Save", 10, 10, 80, 30, True, object())
+        with patch.object(screen, "trusted", lambda: True), \
+                patch.object(screen, "_app_info", lambda pid: ("Pad", "com.pad")), \
+                patch.object(screen, "process_start", lambda pid, d: "start"), \
+                patch.object(screen, "_read_ax", lambda pid, d: (object(), (0, 0, 400, 300), "Pad", [ctl],
+                                                                 {id(ctl): (True, False)}, False)), \
+                patch.object(screen, "read_text", lambda *a: time.sleep(5)):
+            t = time.monotonic()
+            got = screen.observe(pid=7, deadline=t + 0.5)
+        self.assertLess(time.monotonic() - t, 1.2)
+        self.assertEqual((got.ocr, [i.label for i in got.items]), ("timed_out", ["Save"]))
+
+    def test_a_press_the_app_never_answers_is_unknown_not_failed(self):
+        with patch.object(diagnostics, "record", lambda *a, **k: None):
+            fake = FakeScreen(self, [item(1, "Add one")])
+
+            def hang(ref, deadline):
+                fake.presses.append(ref)
+                raise screen.TimedOut("AXPress")
+            patch.object(screen, "press", hang).start()
+            self.addCleanup(patch.stopall)
+            with patch.object(planner, "plan", lambda *a, **k: ("steps", [{"clause": "c", "action": "screen.press",
+                                                                            "args": {"label": "Add one"}}])):
+                eng = Engine(lambda _: {}, policy=lambda: {**actions.DEFAULT_POLICY, "click": "auto"})
+                v = eng.wait(eng.submit("click Add one", "cli")["id"], 10)
+        self.assertEqual((v["state"], len(fake.presses)), ("unknown", 1))
+
+
+class BoundaryTests(unittest.TestCase):
+    real_press = staticmethod(screen.press)
+
+    def test_tokens_are_never_reused_and_evicted_ones_go_stale(self):
+        with patch.object(screen, "_tokens", []), patch.object(screen, "_next_token", [0]), \
+                patch.object(screen, "TOKEN_CAP", 50):
+            objs = [object() for _ in range(52)]
+            toks = [screen.token(o) for o in objs]
+            self.assertEqual(len(set(toks)), 52)
+            self.assertIsNone(screen.element_for(toks[0]))  # evicted: names nothing, never a newer element
+            self.assertIs(screen.element_for(toks[-1]), objs[-1])
+            self.assertEqual(screen.token(objs[-1]), toks[-1])
+
+    def test_a_late_press_holds_the_boundary_and_is_never_reported_as_clean(self):
+        import threading
+        import time
+        release = threading.Event()
+        calls = []
+
+        class FakeAS:
+            def AXUIElementPerformAction(self, ref, action):
+                calls.append(ref)
+                release.wait(5)
+                return 0
+        with patch.object(screen, "_AS", lambda: FakeAS()), patch.object(screen, "EFFECT_SETTLE", 0.3), \
+                patch.object(screen, "_abandoned", []):
+            t0 = time.monotonic()
+            with self.assertRaises(screen.TimedOut):
+                screen.press("button", time.monotonic() + 0.2)
+            self.assertGreaterEqual(time.monotonic() - t0, 0.45)  # waited out the settle window too
+            with self.assertRaises(screen.Wedged):  # the next command can't start a native call meanwhile
+                screen.press("other", time.monotonic() + 1)
+            with self.assertRaises(screen.Wedged):
+                screen.element_state("other", time.monotonic() + 1)
+            release.set()
+            time.sleep(0.1)
+            self.assertEqual(screen.press("other", time.monotonic() + 1), 0)  # settled: work resumes
+            self.assertEqual(calls, ["button", "other"])
+
+    def test_engine_timeout_then_queued_command_then_late_press(self):
+        import threading
+        import time
+        release, calls = threading.Event(), []
+
+        class FakeAS:
+            def AXUIElementPerformAction(self, ref, action):
+                calls.append(ref)
+                release.wait(5)
+                return 0
+        real_press = screen.press
+        with patch.object(diagnostics, "record", lambda *a, **k: None):
+            fake = FakeScreen(self, [item(1, "Add one")])
+            for p in (patch.object(screen, "press", real_press), patch.object(screen, "_AS", lambda: FakeAS()),
+                      patch.object(screen, "EFFECT_SETTLE", 0.2), patch.object(screen, "_abandoned", []),
+                      patch("engine.PENDING_WAIT", 0.5)):
+                p.start()
+                self.addCleanup(p.stop)
+            entry = dict(actions.ACTIONS["screen.press"], timeout=0.3)
+            with patch.dict(actions.ACTIONS, {"screen.press": entry}), \
+                    patch.object(planner, "plan", lambda *a, **k: ("steps", [{"clause": "c", "action": "screen.press",
+                                                                              "args": {"label": "Add one"}}])):
+                eng = Engine(lambda _: {}, policy=lambda: {**actions.DEFAULT_POLICY, "click": "auto"},
+                             actions=actions.ACTIONS)
+                first = eng.wait(eng.submit("click Add one", "cli")["id"], 10)
+                second = eng.wait(eng.submit("click Add one again", "cli")["id"], 10)
+                release.set()
+                time.sleep(0.1)
+        self.assertEqual(first["state"], "unknown")  # a press that may have landed is never failed or done
+        self.assertEqual(second["state"], "failed")  # the queued command could not dispatch
+        self.assertEqual(second["steps"][0]["detail"], "an earlier action hasn't finished")
+        self.assertEqual(len(calls), 1)  # the late completion was the first press, and nothing else was pressed
+
+    def test_no_action_family_overtakes_a_pending_press(self):
+        import threading
+        import time
+        release, order = threading.Event(), []
+
+        class FakeAS:
+            def AXUIElementPerformAction(self, ref, action):
+                release.wait(5)
+                order.append("late press")
+                return 0
+
+        def run_volume(t, deadline):
+            order.append("volume")
+        vol = actions.entry("volume", actions.plain, run_volume, None, "nothing", 2)
+        with patch.object(diagnostics, "record", lambda *a, **k: None):
+            FakeScreen(self, [item(1, "Add one")])
+            real_press = BoundaryTests.real_press
+            for p in (patch.object(screen, "press", real_press), patch.object(screen, "_AS", lambda: FakeAS()),
+                      patch.object(screen, "EFFECT_SETTLE", 0.2), patch.object(screen, "_abandoned", []),
+                      patch("engine.PENDING_WAIT", 0.5)):
+                p.start()
+                self.addCleanup(p.stop)
+            plans = {"click Add one": ("screen.press", {"label": "Add one"}), "turn it up": ("volume.up", {})}
+            table = {**actions.ACTIONS, "screen.press": dict(actions.ACTIONS["screen.press"], timeout=0.3),
+                     "volume.up": vol}
+            with patch.object(planner, "plan", lambda text, *a, **k: ("steps", [{"clause": text, "action": plans[text][0],
+                                                                                 "args": plans[text][1]}])):
+                eng = Engine(lambda _: {}, policy=lambda: {**actions.DEFAULT_POLICY, "click": "auto"}, actions=table)
+                first = eng.wait(eng.submit("click Add one", "cli")["id"], 10)
+                second = eng.wait(eng.submit("turn it up", "cli")["id"], 10)  # a different family entirely
+                release.set()
+                time.sleep(0.2)
+                third = eng.wait(eng.submit("turn it up", "cli", rid="again")["id"], 10)
+        self.assertEqual(first["state"], "unknown")
+        self.assertEqual((second["state"], second["steps"][0]["detail"]), ("failed", "an earlier action hasn't finished"))
+        self.assertEqual(third["state"], "unverified")  # settled: work resumes
+        self.assertEqual(order, ["late press", "volume"])  # the volume never ran before the late press landed
+
+    def test_cancel_while_waiting_on_a_pending_effect_is_cancelled_not_failed(self):
+        import time
+        runs = []
+        app = actions.entry("open", actions.plain, lambda t, d: runs.append(t), None, "nothing", 2)
+        with patch.object(diagnostics, "record", lambda *a, **k: None), \
+                patch.object(planner, "plan", lambda *a, **k: ("steps", [{"clause": "open Notes", "action": "app.open",
+                                                                          "args": {}}])):
+            eng = Engine(lambda _: {}, actions={"app.open": app}, pending=lambda: True)
+            rid = eng.submit("open Notes", "cli")["id"]
+            time.sleep(0.3)  # the step is waiting on the pending effect
+            eng.cancel(rid)
+            v = eng.wait(rid, 5)
+        self.assertEqual((v["state"], v["steps"][0]["state"], runs), ("cancelled", "skipped", []))
+
+    def test_a_press_that_lands_during_settle_is_still_late(self):
+        import time
+
+        class SlowAS:
+            def AXUIElementPerformAction(self, ref, action):
+                time.sleep(0.3)
+                return 0
+        with patch.object(screen, "_AS", lambda: SlowAS()), patch.object(screen, "_abandoned", []):
+            with self.assertRaises(screen.TimedOut):
+                screen.press("button", time.monotonic() + 0.1)
+            self.assertEqual(screen._outstanding(), [])
+
+    def test_failed_reads_prove_nothing(self):
+        import time
+        with patch.object(screen, "_read", lambda el, name: ("unknown", None)):
+            self.assertFalse(screen.enabled("x"))  # unknown is not enabled: dispatch stops
+            state = screen.element_state("x", time.monotonic() + 1)
+        self.assertTrue(all(v == screen.UNKNOWN for v in state.values()))
+        with patch.object(screen, "_read", lambda el, name: ("absent", None)):
+            self.assertTrue(screen.enabled("x"))
+        # checkbox read 0 before; after, every read fails with -25204: not done, not "gone"
+        t = {"pid": 7, "role": "AXCheckBox"}
+        before = ({"text": "a"}, {"exists": "yes", "AXValue": "0", "AXSelected": "None", "AXExpanded": "None"})
+        actions._pressed[id(t)] = (before, time.monotonic() - 5, "ref")
+        with patch.object(screen, "signature", lambda pid, d: {"text": "a"}), \
+                patch.object(screen, "element_state", lambda ref, d: {k: screen.UNKNOWN for k in before[1]}):
+            verdict, facts = actions.verify_screen_press(t, time.monotonic() + 1)
+        self.assertEqual((verdict, facts["unread"]), ("unverified", ["AXExpanded", "AXSelected", "AXValue", "exists"]))
+
+
+if __name__ == "__main__":
+    unittest.main()

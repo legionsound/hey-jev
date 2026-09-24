@@ -13,6 +13,7 @@ import sys
 import time
 
 import app_catalog
+import screen
 import timers
 import url_adapter
 
@@ -442,6 +443,195 @@ def resolve_url(args):
     return ("none", "unsupported browser")
 
 
+# --------------------------------------------------------------------------- screen
+# Labels that always ask first, whatever the Click setting says. They add confirmation; their absence proves nothing.
+RISKY = re.compile(r"\b(buy|purchase|order|pay|checkout|check out|send|submit|post|publish|delete|remove|erase|trash|"
+                   r"empty|discard|uninstall|format|sign out|log out|transfer|confirm|accept|agree|install|share|reply all)\b",
+                   re.I)
+CHOOSE = None  # set by the app: (spoken, [labels]) -> (index or None, confidence). Only control names are sent.
+CHOOSE_GATE = 0.65
+RESOLVE_BUDGET = 3.0  # one deadline over every native read a resolve makes
+SETTLE = 1.5  # how long a press gets to show a relevant change
+AX_GONE = (-25202, -25205, -25206, -25201)  # invalid element, no value, action unsupported, illegal argument
+MENU_ROLES = ("AXMenuBarItem", "AXMenuButton", "AXPopUpButton")
+_listed = {}  # id(target) -> the Snapshot run read, for verify
+_pressed = {}  # id(target) -> (before, dispatched_at, ref)
+
+
+def _where(item, frame):
+    x, y, w, h = frame
+    cx, cy = (item.frame[0] + item.frame[2] / 2 - x) / max(w, 1), (item.frame[1] + item.frame[3] / 2 - y) / max(h, 1)
+    return ("top" if cy < 0.33 else "bottom" if cy > 0.66 else "middle") + "-" + (
+        "left" if cx < 0.33 else "right" if cx > 0.66 else "centre")
+
+
+def _screen_target(snap, item):
+    """Exact identity: the process (pid + start time), the window element and the control element."""
+    return {"pid": snap.pid, "started": snap.started, "app": snap.app, "window": snap.window_token,
+            "element": item.token, "role": item.role, "label": item.label, "frame": [round(v) for v in item.frame],
+            "confirm": bool(RISKY.search(item.label))}
+
+
+def _live(item):
+    return item.source != "ocr" and item.pressable and item.enabled
+
+
+def valid_choice(got, n):
+    """The chooser's answer only when it has exactly the expected shape: (int index in range or None, finite 0-1)."""
+    import math
+    try:
+        idx, conf = got
+    except (TypeError, ValueError):
+        return None
+    if isinstance(conf, bool) or not isinstance(conf, (int, float)) or not math.isfinite(conf) or not 0 <= conf <= 1:
+        return None
+    if idx is None:
+        return (None, float(conf))
+    if isinstance(idx, bool) or not isinstance(idx, int) or not 0 <= idx < n:
+        return None
+    return (idx, float(conf))
+
+
+def resolve_screen_press(args):
+    """A number from the last list the user saw, or a spoken control name, to one exact control the app declared."""
+    deadline = time.monotonic() + RESOLVE_BUDGET
+    try:
+        snap = screen.observe(ocr=False, deadline=deadline)
+    except (screen.Unavailable, screen.TimedOut, screen.Wedged) as exc:
+        return ("none", f"can't read the screen: {exc}")
+    controls = [i for i in snap.items if _live(i)]
+    if args.get("number") is not None:
+        shown = screen.last()
+        if shown is None or not 1 <= args["number"] <= len(shown.items):
+            return ("none", "no such number on the last list")
+        seen = shown.items[args["number"] - 1]
+        if seen.source == "ocr":
+            return ("none", "not_a_control")
+        if (shown.pid, shown.started, shown.window_token) != (snap.pid, snap.started, snap.window_token):
+            return ("none", "screen_changed")
+        now = next((i for i in controls if i.token == seen.token and i.key() == seen.key()), None)
+        return ("target", _screen_target(snap, now)) if now else ("none", "screen_changed")
+    said = screen._norm(args.get("label"))
+    if not said:
+        return ("none", "no control named")
+    exact = [i for i in controls if screen._norm(i.label) == said]
+    if not exact:
+        exact = [i for i in controls if f" {said} " in f" {screen._norm(i.label)} "]
+    if not exact and CHOOSE:
+        named = [i for i in controls if not i.from_value]  # a field's or document's value is never sent
+        names = list(dict.fromkeys(i.label for i in named))
+        if names:
+            try:
+                got = valid_choice(CHOOSE(args.get("label", ""), names), len(names))
+            except Exception:
+                got = None
+            if got is None:
+                return ("choices", [])  # a malformed answer asks again; nothing is pressed
+            if got[0] is not None and got[1] >= CHOOSE_GATE:
+                exact = [i for i in named if i.label == names[got[0]]]
+    if not exact:
+        return ("none", "no control by that name")
+    if len({i.token for i in exact}) > 1:
+        return ("choices", [{"name": f"{i.label} ({_where(i, snap.window_frame)})"} for i in exact[:4]])
+    return ("target", _screen_target(snap, exact[0]))
+
+
+def _find(t, deadline):
+    """The target's own element, still in the same window of the same process, still enabled and pressable."""
+    ref = screen.element_for(t.get("element"))
+    if ref is None:
+        raise Failed("unknown control")
+    try:
+        snap = screen.observe(pid=t["pid"], ocr=False, deadline=deadline)
+    except (screen.Unavailable, screen.TimedOut, screen.Wedged) as exc:
+        raise Failed(f"can't read the screen: {exc}")
+    item = next((i for i in snap.items if i.token == t["element"]), None)
+    if ((snap.started, snap.window_token) != (t["started"], t["window"]) or item is None or not _live(item)
+            or [round(v) for v in item.frame] != t["frame"] or (item.role, item.label) != (t["role"], t["label"])):
+        raise Failed("that control is no longer there")
+    return ref
+
+
+def run_screen_press(t, deadline):
+    ref = _find(t, deadline)
+    try:
+        before = (screen.signature(t["pid"], deadline), screen.element_state(ref, deadline))
+    except (screen.TimedOut, screen.Wedged) as exc:
+        raise Failed(f"screen read failed before the press: {exc}")
+    _pressed[id(t)] = (before, time.monotonic(), ref)
+    try:
+        err = screen.press(ref, deadline)
+    except screen.Wedged as exc:
+        raise Failed(str(exc))  # refused before sending: nothing was pressed
+    except screen.TimedOut as exc:
+        raise Uncertain(f"the app did not answer the press in time ({exc})")
+    if err in AX_GONE:
+        raise Failed(f"the app refused the press (AX error {err})")
+    if err != 0:
+        raise Uncertain(f"AX error {err} after the press was sent")
+
+
+def verify_screen_press(t, deadline):
+    """done only on a change of the pressed control itself: its value, selection or expansion, it going away, or a
+    menu opening from a menu control. Anything else that changed is recorded, and the press stays unverified."""
+    before, at, ref = _pressed.get(id(t), (None, 0, None))
+    if before is None:
+        return ("unverified", {"why": "no before-state"})
+    after = (screen.signature(t["pid"], deadline), screen.element_state(ref, deadline))
+    known = [k for k in before[1] if screen.UNKNOWN not in (before[1][k], after[1][k])]
+    own = sorted(k for k in known if before[1][k] != after[1][k])  # a failed read proves nothing
+    if t["role"] in MENU_ROLES and after[0].get("menu_open") and not before[0].get("menu_open"):
+        own.append("menu_open")
+    if own:
+        _pressed.pop(id(t), None)
+        return ("done", {"changed": own})
+    if time.monotonic() - at < SETTLE:
+        return ("wait", {})
+    _pressed.pop(id(t), None)
+    other = sorted(k for k in before[0] if before[0].get(k) != after[0].get(k))
+    unread = sorted(k for k in before[1] if k not in known)
+    return ("unverified", {"delivered": True, "observed": other, "unread": unread,
+                           "why": "pressed; the control itself did not change" if not unread
+                           else "pressed; the control could not be read back"})
+
+
+def run_screen_list(t, deadline):
+    try:
+        snap = screen.observe(ocr=True, deadline=deadline)
+    except (screen.Unavailable, screen.TimedOut, screen.Wedged) as exc:
+        raise Failed(f"can't read the screen: {exc}")
+    screen.remember(snap)
+    _listed[id(t)] = snap
+
+
+def verify_screen_list(t, deadline):
+    snap = _listed.pop(id(t), None) or screen.last()
+    return ("done", {"app": snap.app, "count": len(snap.items), "ocr": snap.ocr,
+                     "items": [i.public() for i in snap.items]})
+
+
+def effect_pending():
+    """Any native effect from an earlier step that may still land. Checked by the engine before every dispatch."""
+    return screen.effect_pending()
+
+
+def loggable(action, value):
+    """Screen actions log shapes, never screen text: labels become their length, item lists their count."""
+    if not (action or "").startswith("screen.") or not isinstance(value, dict):
+        return value
+    out = {}
+    for k, v in value.items():
+        if k in ("label", "window") and isinstance(v, str):
+            out[k] = f"<{len(v)} chars>"
+        elif k == "items" and isinstance(v, list):
+            out[k] = len(v)
+        elif k == "choices" and isinstance(v, list):
+            out[k] = len(v)
+        else:
+            out[k] = v
+    return out
+
+
 # --------------------------------------------------------------------------- registry
 def plain(args):
     return ("target", dict(args))
@@ -479,13 +669,18 @@ ACTIONS = {
     "system.sleep": entry("sleep", plain, run_sleep, None, "nothing: the Mac is asleep", 5),
     "timer.set": entry("timer", resolve_timer_set, run_timer_set, verify_timer_set, "the timer is in the running list", 2),
     "timer.check": entry("timer", resolve_timer_check, run_timer_check, verify_timer_check, "read from the running list", 2),
+    "screen.list": entry("look", plain, run_screen_list, verify_screen_list, "the list is what was read", 8),
+    "screen.press": entry("click", resolve_screen_press, run_screen_press, verify_screen_press,
+                          "the window changed after the press; not that the intended result happened", 6),
     "timer.cancel": entry("timer", resolve_timer_cancel, run_timer_cancel, verify_timer_cancel, "the timer left the running list", 2),
 }
 
-EFFECTS = ("open", "navigate", "media", "volume", "display", "timer", "quit", "lock", "sleep")
-DEFAULT_POLICY = {e: ("ask" if e in ("quit", "lock", "sleep") else "auto") for e in EFFECTS}
+EFFECTS = ("open", "navigate", "media", "volume", "display", "timer", "click", "quit", "lock", "sleep")
+DEFAULT_POLICY = {e: ("ask" if e in ("quit", "lock", "sleep", "click") else "auto") for e in EFFECTS}
+DEFAULT_POLICY["look"] = "auto"  # reading the screen has no effect, so it is not a setting
 EFFECT_LABELS = {"open": "Open apps", "navigate": "Open websites", "media": "Music playback", "volume": "Volume",
-                 "display": "Dark mode", "timer": "Timers and reminders", "quit": "Quit apps",
+                 "display": "Dark mode", "timer": "Timers and reminders",
+                 "click": "Click buttons on screen", "quit": "Quit apps",
                  "lock": "Lock screen", "sleep": "Sleep the Mac"}
 
 
@@ -520,5 +715,7 @@ def describe(action, target):
             "display.dark_on": "Turn dark mode on", "display.dark_off": "Turn dark mode off",
             "display.toggle": "Switch dark mode", "media.play": "Play music in Spotify", "media.pause": "Pause Spotify",
             "media.next": "Skip to the next track", "media.previous": "Go back a track",
-            "timer.check": "Read out the time left"}.get(action, action.replace(".", ": ").replace("_", " "))
-    return what.format(name=name, url=t.get("url") or "the website", level=level)
+            "timer.check": "Read out the time left",
+            "screen.list": "Read what's on screen", "screen.press": "Click “{label}” in {app}"}.get(action, action.replace(".", ": ").replace("_", " "))
+    return what.format(name=name, url=t.get("url") or "the website", level=level, label=t.get("label") or "that",
+                       app=t.get("app") or "the app")

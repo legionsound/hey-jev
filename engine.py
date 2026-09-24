@@ -7,7 +7,7 @@ import uuid
 
 import diagnostics
 import planner
-from actions import ACTIONS, DEFAULT_POLICY, Failed, Timeout, describe
+from actions import ACTIONS, DEFAULT_POLICY, Failed, Timeout, describe, effect_pending, loggable
 
 QUEUE_MAX = 8
 QUEUE_TTL = 30.0
@@ -15,6 +15,7 @@ RESULT_TTL = 600.0
 LEDGER_MAX = 10_000
 CONFIRM_TTL = 60.0
 POLL = 0.2
+PENDING_WAIT = 10.0  # how long a new dispatch waits for an earlier, still-outstanding effect before refusing
 _local = threading.local()
 
 
@@ -38,7 +39,7 @@ def _same_target(a, b):
 
 class Engine:
     def __init__(self, classify, policy=lambda: DEFAULT_POLICY, ask=None, answer=None, on_event=None, actions=ACTIONS,
-                 tiebreak=None, threshold=lambda: 0.85):
+                 tiebreak=None, threshold=lambda: 0.85, pending=effect_pending):
         """classify(clause) -> Jev answers. ask(pending) shows the pop-down (None: no UI, Ask-first steps decline).
         answer(text) -> spoken answer, or None when deeper answers are off. on_event(kind, record, step).
         tiebreak(clause, choices) -> (index, score 0..1) or None: Jev's pick among duplicate targets, used only when
@@ -47,6 +48,7 @@ class Engine:
         self.tiebreak, self.threshold = tiebreak, threshold
         self.on_event = on_event or (lambda *a: None)
         self.actions = actions
+        self.effect_pending = pending  # an earlier effect that may still land holds every later dispatch
         self.instance = uuid.uuid4().hex[:12]
         self.lock = threading.Condition()
         self.ledger = {}  # id -> record
@@ -255,10 +257,13 @@ class Engine:
             got = action["resolve"](args)
         except Exception as exc:  # nothing dispatched yet
             got = ("none", f"could not resolve: {exc}")
+        act = step["action"]
+        screen_step = act.startswith("screen.")
         diagnostics.record(rec["id"], "resolve", got[0], (time.monotonic() - t) * 1000, step=step["index"],
-                           action=step["action"], args=args,
-                           target=got[1] if got[0] == "target" else None,
-                           choices=[c.get("path") or c.get("name") for c in got[1]] if got[0] == "choices" else None,
+                           action=act, args=loggable(act, args),
+                           target=loggable(act, got[1]) if got[0] == "target" else None,
+                           choices=(len(got[1]) if screen_step else [c.get("path") or c.get("name") for c in got[1]])
+                           if got[0] == "choices" else None,
                            reason=got[1] if got[0] == "none" else None)
         picked = None
         if got[0] == "choices":
@@ -277,11 +282,12 @@ class Engine:
         target = got[1]
         self._set(step, target=target)
         forced = picked is not None and action["effect"] == "quit"  # a guessed quit target always asks
-        if forced or self.policy().get(action["effect"], "ask") == "ask":
+        if forced or target.get("confirm") or self.policy().get(action["effect"], "ask") == "ask":
             t = time.monotonic()
             verdict = self._confirm(rec, step, target)
             diagnostics.record(rec["id"], "confirm", verdict, (time.monotonic() - t) * 1000, step=step["index"],
-                               prompt=describe(step["action"], target), forced=forced)
+                               prompt="<screen control>" if step["action"].startswith("screen.")
+                               else describe(step["action"], target), forced=forced)
             if verdict != "confirmed":
                 self._set(step, state="declined" if verdict != "cancelled" else "skipped", detail=verdict)
                 return "declined" if verdict != "cancelled" else "cancelled"
@@ -294,18 +300,39 @@ class Engine:
             if not still:
                 self._set(step, state="failed", detail="target_changed")
                 return "failed"
+        settled = self._settled(rec)
+        if settled == "cancelled":
+            self._set(step, state="skipped")
+            return "cancelled"
+        if not settled:  # an earlier step's effect is still out: nothing overtakes it
+            self._set(step, state="failed", detail="an earlier action hasn't finished")
+            return "failed"
         with self.lock:  # dispatch boundary: a cancel that lands before this line stops the step, after it cannot
             if rec["cancel"]:
                 step["state"] = "skipped"
                 return "cancelled"
             step["state"] = "running"
         self._emit("step", self._view(rec), dict(step))
-        diagnostics.record(rec["id"], "dispatch", "running", step=step["index"], action=step["action"], target=target)
+        diagnostics.record(rec["id"], "dispatch", "running", step=step["index"], action=step["action"],
+                           target=loggable(step["action"], target))
         started = time.monotonic()
         state = self._execute(action, step, target)
         diagnostics.record(rec["id"], "verify", state, (time.monotonic() - started) * 1000, step=step["index"],
-                           detail=step.get("detail"), facts=step.get("facts"), target=target)
+                           detail=step.get("detail"), facts=loggable(step["action"], step.get("facts") or {}),
+                           target=loggable(step["action"], target))
         return state
+
+    def _settled(self, rec):
+        """Wait up to PENDING_WAIT for any outstanding effect to land. True: clear. False: still out, so this step must
+        not run. "cancelled": the request was cancelled while waiting."""
+        end = time.monotonic() + PENDING_WAIT
+        while self.effect_pending():
+            if rec["cancel"]:
+                return "cancelled"
+            if time.monotonic() >= end:
+                return False
+            time.sleep(POLL)
+        return True
 
     def _execute(self, action, step, target):
         deadline = time.monotonic() + action["timeout"]

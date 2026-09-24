@@ -58,14 +58,15 @@ def request_access(done):
     Speech.SFSpeechRecognizer.requestAuthorization_(done)
 
 
-NO_SPEECH = 1110  # kAFAssistantErrorDomain "No speech detected"
+NO_SPEECH = ("kAFAssistantErrorDomain", 1110)  # "No speech detected"
 
 
 def _no_speech(error):
+    """Only that exact domain and code. Anything else, or anything that isn't an NSError, is a real failure."""
     try:
-        return error.code() == NO_SPEECH
-    except AttributeError:
-        return f"Code={NO_SPEECH}" in str(error)
+        return (str(error.domain()), int(error.code())) == NO_SPEECH
+    except (AttributeError, TypeError, ValueError):
+        return False
 
 
 class AppleTranscriber:

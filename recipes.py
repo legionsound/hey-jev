@@ -101,8 +101,8 @@ def match(text):
         key = candidate.strip().lower()
         for k, v in data.items():
             if k.lower() == key:
-                steps = [dict(s) for s in v] if isinstance(v, list) else None
                 try:
+                    steps = [dict(s) for s in v] if isinstance(v, list) else None
                     validate(k, steps)
                 except ValueError as e:
                     raise ValueError(f"Recipe {k!r} is invalid: {e}")

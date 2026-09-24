@@ -63,6 +63,32 @@ class RecipeTests(unittest.TestCase):
         kind, got = planner.plan("run focus", lambda c: (_ for _ in ()).throw(AssertionError("no classify")))
         self.assertEqual((kind, got), ("steps", steps))
 
+    def test_malformed_load_clarifies_invalid(self):
+        def plan_with(raw, text):
+            self.store.d[recipes.KEY] = raw
+            calls = []
+            def classify(c):
+                calls.append(c)
+                return {"category": ("app", 0.9), "compound": (False, 0.0),
+                        "target": ("app", 0.9), "app_action": ("open", 0.9),
+                        "volume_action": ("none", 0.0), "volume_scope": ("system", 0.0),
+                        "volume_level": ("medium", 0.5), "display_action": ("none", 0.0),
+                        "media_action": ("none", 0.0), "timer_action": ("none", 0.0),
+                        "system_action": ("none", 0.0)}
+            out = planner.plan(text, classify)
+            self.assertEqual(out, ("clarify", "invalid_recipe"))
+            self.assertEqual(calls, [])
+            return out
+        good = {"clause": "x", "action": "app.open", "args": {"app": "S"}}
+        # null / non-dict steps must not fall through to classification
+        plan_with(json.dumps({"bad": [None]}), "run bad")
+        plan_with(json.dumps({"bad2": ["oops"]}), "bad2")
+        plan_with(json.dumps({"bad3": "notalist"}), "run bad3")
+        # six stored steps bypass no limit
+        plan_with(json.dumps({"six": [dict(good)] * 6}), "run six")
+        # unknown action in stored record
+        plan_with(json.dumps({"weird": [{"clause": "x", "action": "nope.nope", "args": {}}]}), "run weird")
+
     def test_engine_runs_recipe_as_one_request(self):
         import engine as engine_mod
         from test_engine import act, Calls

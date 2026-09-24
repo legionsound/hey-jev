@@ -383,8 +383,12 @@ def run_url(t, deadline):
     Any error from the adapter after that (no tab id, osascript error) is Uncertain: a tab may exist."""
     try:
         url_adapter.normalize_url(t.get("url", ""))
-        browser = url_adapter.default_browser_for_url(t["url"], max(0.1, deadline - time.monotonic()),
-                                                      _run=functools.partial(subprocess.run, env=helper_env()))
+        explicit = t.get("browser")
+        if explicit in url_adapter.SUPPORTED_BROWSERS:
+            browser = explicit  # planner-set intent: skip the default-handler lookup
+        else:
+            browser = url_adapter.default_browser_for_url(t["url"], max(0.1, deadline - time.monotonic()),
+                                                          _run=functools.partial(subprocess.run, env=helper_env()))
     except TimeoutError as exc:
         raise Failed(f"browser lookup timed out: {exc}")
     except (RuntimeError, ValueError) as exc:

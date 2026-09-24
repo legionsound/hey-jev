@@ -58,6 +58,36 @@ def split_clauses(text):
 
 URL_SPAN = re.compile(r"\b(?:https?://\S+|(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?(?:[/?#]\S*)?)", re.I)
 
+# Explicit browser choice. Supported names map to bundle ids; named but
+# unsupported browsers clarify with zero navigation; anything else is prose.
+BROWSERS = {"safari": "com.apple.Safari", "chrome": "org.google.Chrome"}
+BROWSER_QUAL = re.compile(r"\bin\s+(safari|chrome|firefox|edge|brave|arc|opera|vivaldi|chromium)\b", re.I)
+
+
+def browser_qualifier(clause):
+    """-> (clause without the qualifier, bundle id or None, unsupported name or None).
+
+    Only the recognized qualifier is removed, so the URL's path, query
+    and fragment survive untouched."""
+    m = BROWSER_QUAL.search(clause)
+    if not m:
+        return clause, None, None
+    name = m.group(1).lower()
+    rest = re.sub(r"\s+", " ", (clause[:m.start()] + " " + clause[m.end():])).strip(" ,.")
+    if name in BROWSERS:
+        return rest, BROWSERS[name], None
+    return clause, None, name
+
+
+def app_browser(name):
+    """Bundle id when an opened app is a supported browser, else None."""
+    n = (name or "").strip().lower()
+    if n in ("safari",):
+        return BROWSERS["safari"]
+    if n in ("chrome", "google chrome"):
+        return BROWSERS["chrome"]
+    return None
+
 
 def url_span(clause):
     m = URL_SPAN.search(clause)
@@ -119,7 +149,7 @@ def percent(clause):
     return (n if n is not None and 0 <= n <= 100 else None, relative)
 
 
-def step_for(ans, target, clause):
+def step_for(ans, target, clause, inherited_browser=None):
     """One (confidence, action, args) for this target, or None when Jev is not sure."""
     if target == "app":
         act, conf = ans["app_action"]
@@ -128,8 +158,16 @@ def step_for(ans, target, clause):
             return None
         return (conf, f"app.{act}", {"app": name})
     if target == "website":
-        url = url_span(clause) or site_url(clause)
-        return (ans["target"][1], "url.open", {"url": url}) if url else None
+        rest, bid, unsupported = browser_qualifier(clause)
+        if unsupported:
+            return (ans["target"][1], "clarify", "unsupported_browser")  # named browser we don't drive: no navigation
+        url = url_span(rest) or site_url(rest)
+        if not url:
+            return None
+        args = {"url": url}
+        if bid or inherited_browser:  # explicit qualifier in this clause wins over an earlier app.open
+            args["browser"] = bid or inherited_browser
+        return (ans["target"][1], "url.open", args)
     act, conf = ans[BRANCH[target]]
     if act == "none" or conf < GATE:
         return None
@@ -151,17 +189,17 @@ def step_for(ans, target, clause):
     return (conf, f"{target}.{act}", {})
 
 
-def pick(ans, clause):
+def pick(ans, clause, inherited_browser=None):
     """Trust Jev's target if it is fairly sure, else the single most confident action anywhere."""
     target, tconf = ans["target"]
-    s = step_for(ans, target, clause) if tconf >= 0.5 else None
+    s = step_for(ans, target, clause, inherited_browser) if tconf >= 0.5 else None
     if s is None:
-        cands = [x for x in (step_for(ans, t, clause) for t in TARGETS) if x]
+        cands = [x for x in (step_for(ans, t, clause, inherited_browser) for t in TARGETS) if x]
         s = max(cands, key=lambda x: x[0]) if cands else None
     return s
 
 
-def judge(ans, clause, can_answer=False):
+def judge(ans, clause, can_answer=False, inherited_browser=None):
     """One clause -> ("step", step) | ("reply", key) | ("answer", None) | ("clarify", reason)."""
     cat, cconf = ans["category"]
     if ans["target"][0] == "timer" and ans["target"][1] >= GATE and not ans["compound"][0]:
@@ -176,7 +214,7 @@ def judge(ans, clause, can_answer=False):
         return ("answer", None) if can_answer else ("reply", "info")
     if ans["compound"][0] and ans["compound"][1] >= GATE:
         return ("clarify", "compound_unsplit")  # say it as "X, then Y"
-    s = pick(ans, clause)
+    s = pick(ans, clause, inherited_browser)
     if s and s[1] == "clarify":
         return ("clarify", s[2])
     if not s:
@@ -196,9 +234,14 @@ def plan(text, classify, can_answer=False):
         kind, got = judge(classify(clauses[0]), clauses[0], can_answer)
         return ("steps", [got]) if kind == "step" else (kind, got)
     steps = []
+    browser = None  # same-request only: an earlier "open Safari/Chrome" applies to later website steps
     for clause in clauses:
-        kind, got = judge(classify(clause), clause)
+        kind, got = judge(classify(clause), clause, inherited_browser=browser)
         if kind != "step":
             return ("clarify", got if kind == "clarify" else "no_action")
+        if got["action"] == "app.open":
+            bid = app_browser(got["args"].get("app"))
+            if bid:
+                browser = bid
         steps.append(got)
     return ("steps", steps)

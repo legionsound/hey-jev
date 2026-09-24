@@ -150,6 +150,7 @@ class Item:
     ref: object = field(default=None, repr=False, compare=False)
     enabled: bool = True
     from_value: bool = False  # the label is the element's AXValue, not its name
+    secure: bool = False  # a password field: never typed into, its value never read
 
     @property
     def token(self):
@@ -229,7 +230,8 @@ def _named(element):
             return " ".join(text.split()), False
     role, sub = str(_attr(element, "AXRole") or ""), str(_attr(element, "AXSubrole") or "")
     if role in EDITABLE or sub == "AXSecureTextField":
-        return "", False
+        hint = _attr(element, "AXPlaceholderValue")  # the field's prompt text is UI, not what anyone typed
+        return (" ".join(hint.split()), False) if isinstance(hint, str) and hint.strip() else ("", False)
     value = _attr(element, "AXValue")
     if isinstance(value, str) and 0 < len(value.strip()) <= AX_VALUE_CHARS:
         return " ".join(value.split()), True
@@ -264,6 +266,14 @@ def enabled(element):
     """True only when the element says it is enabled, or has no enabled state at all. Unknown is not enabled."""
     status, value = _read(element, "AXEnabled")
     return status == "absent" or (status == "ok" and value is not False)
+
+
+def is_secure(element):
+    """A password field, or one whose kind can't be read: either way, never typed into and never read."""
+    (rs, role), (ss, sub) = _read(element, "AXRole"), _read(element, "AXSubrole")
+    if rs != "ok" or ss not in ("ok", "absent"):
+        return True
+    return "AXSecureTextField" in (str(role), str(sub or ""))
 
 
 def _actions(element):
@@ -453,7 +463,7 @@ def _read_ax(pid, deadline):
     bar = [ax_walk.AxNode(r, l, *f, True, k) for k in (_children(menubar) if menubar is not None else [])
            for r, l, f in [_attrs(k)] if l and f and r == "AXMenuBarItem" and l != "Apple"]
     controls = bar + found
-    extra = {id(c): (enabled(c.ref), _named(c.ref)[1]) for c in controls}
+    extra = {id(c): (enabled(c.ref), _named(c.ref)[1], is_secure(c.ref)) for c in controls}
     return win, wframe, _label(win), controls, extra, truncated
 
 
@@ -481,8 +491,8 @@ def observe(pid=None, ocr=True, deadline=None):
     items = merge(controls, texts, wframe)
     for i in items:
         if i.source != "ocr":
-            ref_extra = next((v for c in controls if c.ref is i.ref for v in [extra[id(c)]]), (True, False))
-            i.enabled, i.from_value = ref_extra
+            ref_extra = next((v for c in controls if c.ref is i.ref for v in [extra[id(c)]]), (True, False, False))
+            i.enabled, i.from_value, i.secure = ref_extra
     return Snapshot(pid, app, bundle, title, wframe, items[:MAX_ITEMS], truncated or len(items) > MAX_ITEMS, ocr_state,
                     {"ax": round((t_ax - t0) * 1000), "ocr": round((time.monotonic() - t_ax) * 1000)},
                     window_ref=win, started=started)
@@ -520,6 +530,49 @@ def element_state(ref, deadline):
             state[k] = repr(v) if st in ("ok", "absent") else UNKNOWN
         return state
     return bounded(read, deadline)
+
+
+def field_facts(ref, deadline):
+    """Role, secure flag, frame, window token and whether text can be inserted, read fresh from the element."""
+    def read():
+        return {"role": str(_attr(ref, "AXRole") or ""), "secure": is_secure(ref), "enabled": enabled(ref),
+                "frame": [round(v) for v in (_frame(ref) or (0, 0, 0, 0))],
+                "window": token(_attr(ref, "AXWindow")) if _attr(ref, "AXWindow") is not None else None,
+                "insertable": _settable(ref, "AXSelectedText")}
+    return bounded(read, deadline)
+
+
+def _settable(ref, name):
+    try:
+        err, ok = _AS().AXUIElementIsAttributeSettable(ref, name, None)
+    except Exception:
+        return False
+    return err == 0 and bool(ok)
+
+
+def focused_field(pid, deadline):
+    """The app's focused element, or None."""
+    def read():
+        AS = _AS()
+        app_el = AS.AXUIElementCreateApplication(pid)
+        AS.AXUIElementSetMessagingTimeout(app_el, AX_MESSAGE_TIMEOUT)
+        return _attr(app_el, "AXFocusedUIElement")
+    return bounded(read, deadline)
+
+
+def field_value(ref, deadline):
+    """The field's text, for the before/after check only: never stored, logged or sent. Secure fields read as None."""
+    return bounded(lambda: None if is_secure(ref) else _attr(ref, "AXValue"), deadline)
+
+
+def insert_text(ref, text, deadline):
+    """Focus the field, then insert at its cursor through AXSelectedText: no keystrokes, so nothing can land in
+    another window. Returns the AX error code of the insert."""
+    def run():
+        AS = _AS()
+        AS.AXUIElementSetAttributeValue(ref, "AXFocused", True)
+        return int(AS.AXUIElementSetAttributeValue(ref, "AXSelectedText", text))
+    return bounded(run, deadline, effect=True)
 
 
 def is_pressable(ref, deadline):

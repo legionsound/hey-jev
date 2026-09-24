@@ -595,6 +595,100 @@ def verify_screen_press(t, deadline):
                            else "pressed; the control could not be read back"})
 
 
+EDITABLE_ROLES = ("AXTextField", "AXTextArea", "AXSearchField", "AXComboBox")
+_typed = {}  # id(target) -> (value before, dispatched_at, ref)
+
+
+def _field_target(snap, ref, facts, label):
+    return {"pid": snap.pid, "started": snap.started, "app": snap.app, "window": facts["window"],
+            "element": screen.token(ref), "role": facts["role"], "label": label, "frame": facts["frame"]}
+
+
+def resolve_screen_type(args):
+    """The named field, or the focused one, as an exact element: editable, enabled, not a password field, and
+    accepting inserted text. The text itself is the user's own words, taken literally."""
+    text = args.get("text")
+    if not isinstance(text, str) or not text or len(text) > 2000:
+        return ("none", "no text to type")
+    deadline = time.monotonic() + RESOLVE_BUDGET
+    try:
+        snap = screen.observe(ocr=False, deadline=deadline)
+        if args.get("field"):
+            said = screen._norm(args["field"])
+            fields = [i for i in snap.items if i.role in EDITABLE_ROLES and i.source != "ocr" and not i.from_value]
+            hits = [i for i in fields if screen._norm(i.label) == said] or \
+                   [i for i in fields if f" {said} " in f" {screen._norm(i.label)} "]
+            if len({i.token for i in hits}) > 1:
+                return ("choices", [{"name": f"{i.label} ({_where(i, snap.window_frame)})"} for i in hits[:4]])
+            if not hits:
+                return ("none", "no field by that name")
+            ref, label = hits[0].ref, hits[0].label
+        else:
+            ref, label = screen.focused_field(snap.pid, deadline), ""
+            if ref is None:
+                return ("none", "no field is selected")
+        facts = screen.field_facts(ref, deadline)
+    except (screen.Unavailable, screen.TimedOut, screen.Wedged) as exc:
+        return ("none", f"can't read the screen: {exc}")
+    if facts["secure"]:
+        return ("none", "password_field")  # never typed into, whatever was asked
+    if facts["role"] not in EDITABLE_ROLES or not facts["enabled"] or not facts["insertable"]:
+        return ("none", "not_a_text_field")
+    if facts["window"] != snap.window_token:
+        return ("none", "field is in another window")
+    return ("target", {**_field_target(snap, ref, facts, label), "text": text})
+
+
+def run_screen_type(t, deadline):
+    ref = screen.element_for(t.get("element"))
+    if ref is None:
+        raise Failed("unknown field")
+    try:
+        if screen.process_start(t["pid"], deadline) != t["started"]:
+            raise Failed("the app restarted")
+        facts = screen.field_facts(ref, deadline)
+        if (facts["secure"] or not facts["enabled"] or not facts["insertable"] or facts["role"] != t["role"]
+                or facts["frame"] != t["frame"] or facts["window"] != t["window"]):
+            raise Failed("that field is no longer there")
+        before = screen.field_value(ref, deadline)
+    except (screen.Unavailable, screen.TimedOut, screen.Wedged) as exc:
+        raise Failed(f"screen read failed before typing: {exc}")
+    if not isinstance(before, str):
+        raise Failed("can't read the field, so typing couldn't be checked")
+    _typed[id(t)] = (before, time.monotonic(), ref)
+    try:
+        err = screen.insert_text(ref, t["text"], deadline)
+    except screen.Wedged as exc:
+        raise Failed(str(exc))
+    except screen.TimedOut as exc:
+        raise Uncertain(f"the app did not answer in time ({exc})")
+    if err in AX_GONE:
+        raise Failed(f"the field refused the text (AX error {err})")
+    if err != 0:
+        raise Uncertain(f"AX error {err} after the text was sent")
+
+
+def verify_screen_type(t, deadline):
+    """done only when the field now holds its old text with exactly the typed text added (the insert may replace a
+    selection, so: the typed text is in it and the rest came from before). The value is compared here and dropped."""
+    before, at, ref = _typed.get(id(t), (None, 0, None))
+    if before is None:
+        return ("unverified", {"why": "no before-state"})
+    after = screen.field_value(ref, deadline)
+    text = t["text"]
+    if isinstance(after, str) and after != before and text in after:
+        i = after.find(text)
+        left, right = after[:i], after[i + len(text):]
+        if before.startswith(left) and before.endswith(right):
+            _typed.pop(id(t), None)
+            return ("done", {"typed": len(text)})
+    if time.monotonic() - at < SETTLE:
+        return ("wait", {})
+    _typed.pop(id(t), None)
+    return ("unverified", {"delivered": True, "why": "the field doesn't show the text" if isinstance(after, str)
+                           else "the field could not be read back"})
+
+
 def run_screen_list(t, deadline):
     try:
         snap = screen.observe(ocr=True, deadline=deadline)
@@ -621,7 +715,7 @@ def loggable(action, value):
         return value
     out = {}
     for k, v in value.items():
-        if k in ("label", "window") and isinstance(v, str):
+        if k in ("label", "window", "text", "field") and isinstance(v, str):
             out[k] = f"<{len(v)} chars>"
         elif k == "items" and isinstance(v, list):
             out[k] = len(v)
@@ -672,15 +766,17 @@ ACTIONS = {
     "screen.list": entry("look", plain, run_screen_list, verify_screen_list, "the list is what was read", 8),
     "screen.press": entry("click", resolve_screen_press, run_screen_press, verify_screen_press,
                           "the window changed after the press; not that the intended result happened", 6),
+    "screen.type": entry("type", resolve_screen_type, run_screen_type, verify_screen_type,
+                         "the field holds its old text plus exactly the typed text; nothing is submitted", 6),
     "timer.cancel": entry("timer", resolve_timer_cancel, run_timer_cancel, verify_timer_cancel, "the timer left the running list", 2),
 }
 
-EFFECTS = ("open", "navigate", "media", "volume", "display", "timer", "click", "quit", "lock", "sleep")
-DEFAULT_POLICY = {e: ("ask" if e in ("quit", "lock", "sleep", "click") else "auto") for e in EFFECTS}
+EFFECTS = ("open", "navigate", "media", "volume", "display", "timer", "click", "type", "quit", "lock", "sleep")
+DEFAULT_POLICY = {e: ("ask" if e in ("quit", "lock", "sleep", "click", "type") else "auto") for e in EFFECTS}
 DEFAULT_POLICY["look"] = "auto"  # reading the screen has no effect, so it is not a setting
 EFFECT_LABELS = {"open": "Open apps", "navigate": "Open websites", "media": "Music playback", "volume": "Volume",
                  "display": "Dark mode", "timer": "Timers and reminders",
-                 "click": "Click buttons on screen", "quit": "Quit apps",
+                 "click": "Click buttons on screen", "type": "Type into fields", "quit": "Quit apps",
                  "lock": "Lock screen", "sleep": "Sleep the Mac"}
 
 
@@ -716,6 +812,8 @@ def describe(action, target):
             "display.toggle": "Switch dark mode", "media.play": "Play music in Spotify", "media.pause": "Pause Spotify",
             "media.next": "Skip to the next track", "media.previous": "Go back a track",
             "timer.check": "Read out the time left",
-            "screen.list": "Read what's on screen", "screen.press": "Click “{label}” in {app}"}.get(action, action.replace(".", ": ").replace("_", " "))
+            "screen.list": "Read what's on screen", "screen.press": "Click “{label}” in {app}",
+            "screen.type": "Type “{text}” into {field} in {app}"}.get(action, action.replace(".", ": ").replace("_", " "))
     return what.format(name=name, url=t.get("url") or "the website", level=level, label=t.get("label") or "that",
+                       text=t.get("text") or "", field=f"“{t['label']}”" if t.get("label") else "the selected field",
                        app=t.get("app") or "the app")

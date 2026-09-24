@@ -299,7 +299,7 @@ class DeadlineTests(unittest.TestCase):
                 patch.object(screen, "_app_info", lambda pid: ("Pad", "com.pad")), \
                 patch.object(screen, "process_start", lambda pid, d: "start"), \
                 patch.object(screen, "_read_ax", lambda pid, d: (object(), (0, 0, 400, 300), "Pad", [ctl],
-                                                                 {id(ctl): (True, False)}, False)), \
+                                                                 {id(ctl): (True, False, False)}, False)), \
                 patch.object(screen, "read_text", lambda *a: time.sleep(5)):
             t = time.monotonic()
             got = screen.observe(pid=7, deadline=t + 0.5)
@@ -496,6 +496,103 @@ class PermissionTests(unittest.TestCase):
         v = {"state": "failed", "steps": [{"action": "screen.list", "state": "failed", "facts": {}, "clause": "c",
                                            "detail": "can't read the screen: accessibility_permission"}]}
         self.assertIn("Accessibility", siri.line_for(v))
+
+
+class TypeTests(unittest.TestCase):
+    def setUp(self):
+        p = patch.object(diagnostics, "record", lambda *a, **k: None)
+        p.start()
+        self.addCleanup(p.stop)
+        self.field = object()
+        self.value = {"v": "Hi "}
+        self.facts = {"role": "AXTextField", "secure": False, "enabled": True, "frame": [10, 10, 100, 24],
+                      "insertable": True}
+        self.inserts = []
+        self.snap = snap([item(1, "Name", role="AXTextField", pressable=False, ref=self.field)])
+        self.facts["window"] = self.snap.window_token
+        patches = {"observe": lambda pid=None, ocr=True, deadline=None: self.snap,
+                   "field_facts": lambda ref, d: dict(self.facts),
+                   "field_value": lambda ref, d: self.value["v"],
+                   "focused_field": lambda pid, d: self.field,
+                   "process_start": lambda pid, d: self.snap.started,
+                   "insert_text": self.insert}
+        for name, fn in patches.items():
+            p = patch.object(screen, name, fn)
+            p.start()
+            self.addCleanup(p.stop)
+        self.effect = "insert"
+
+    def insert(self, ref, text, deadline):
+        self.inserts.append(text)
+        if self.effect == "insert":
+            self.value["v"] += text
+        return 0
+
+    def run_type(self, args, policy=None):
+        with patch.object(planner, "plan", lambda *a, **k: ("steps", [{"clause": "t", "action": "screen.type",
+                                                                        "args": args}])):
+            eng = Engine(lambda _: {}, policy=lambda: policy or {**actions.DEFAULT_POLICY, "type": "auto"})
+            return eng.wait(eng.submit("type something", "cli")["id"], 10)
+
+    def test_words(self):
+        cases = {"type hello world": {"text": "hello world"},
+                 "type hello world into the search field": {"text": "hello world", "field": "search"},
+                 "enter my address in the Name box": {"text": "my address", "field": "Name"},
+                 'type "see you in Paris." into Notes': {"text": "see you in Paris.", "field": "Notes"},
+                 "type see you in Paris.": {"text": "see you in Paris"}}
+        for said, want in cases.items():
+            self.assertEqual(planner.type_args(said), want, said)
+        self.assertIsNone(planner.type_args("type in the search field"))
+
+    def test_types_into_the_named_field_and_checks_it(self):
+        v = self.run_type({"text": "there", "field": "name"})
+        self.assertEqual((v["state"], v["steps"][0]["facts"], self.value["v"]), ("completed", {"typed": 5}, "Hi there"))
+
+    def test_focused_field_when_none_is_named(self):
+        self.assertEqual(self.run_type({"text": "x"})["state"], "completed")
+
+    def test_never_types_into_password_fields(self):
+        self.facts["secure"] = True
+        v = self.run_type({"text": "hunter2"})
+        self.assertEqual((v["state"], v["steps"][0]["detail"], self.inserts), ("failed", "password_field", []))
+
+    def test_an_unreadable_field_kind_counts_as_secure(self):
+        with patch.object(screen, "_read", lambda el, name: ("unknown", None)):
+            self.assertTrue(screen.is_secure("x"))
+
+    def test_not_a_text_field(self):
+        self.facts["insertable"] = False
+        v = self.run_type({"text": "x"})
+        self.assertEqual((v["steps"][0]["detail"], self.inserts), ("not_a_text_field", []))
+
+    def test_field_that_changed_before_typing_is_left_alone(self):
+        orig = screen.field_facts
+        calls = []
+
+        def moving(ref, d):
+            calls.append(1)
+            f = dict(self.facts)
+            if len(calls) > 1:
+                f["frame"] = [50, 50, 100, 24]  # moved between resolve and run
+            return f
+        with patch.object(screen, "field_facts", moving):
+            v = self.run_type({"text": "x"})
+        self.assertEqual((v["state"], self.inserts), ("failed", []))
+
+    def test_text_that_does_not_show_up_is_unverified(self):
+        self.effect = "nothing"
+        v = self.run_type({"text": "x"})
+        self.assertEqual((v["state"], v["steps"][0]["facts"]["delivered"]), ("unverified", True))
+
+    def test_typing_asks_first_by_default(self):
+        v = self.run_type({"text": "x"}, policy=dict(actions.DEFAULT_POLICY))
+        self.assertEqual((v["state"], self.inserts), ("declined", []))
+
+    def test_typed_text_stays_out_of_the_log(self):
+        logged = []
+        with patch.object(diagnostics, "record", lambda *a, **k: logged.append(k)):
+            self.run_type({"text": "my secret plan", "field": "Name"})
+        self.assertNotIn("secret plan", repr(logged))
 
 
 if __name__ == "__main__":

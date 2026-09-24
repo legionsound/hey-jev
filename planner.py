@@ -16,8 +16,8 @@ QUESTIONS = {
                             "media": "music playback", "system": "locking or sleeping the computer",
                             "timer": "setting, checking, or cancelling a timer or reminder",
                             "website": "going to a website or web address",
-                            "screen": "a button, menu, link, tab or other control inside the window on screen, "
-                                      "or what is on the screen"}},
+                            "screen": "a button, menu, link, tab, text field or other control inside the window on "
+                                      "screen, or what is on the screen"}},
     "app_action": {"type": "choice", "instructions": "What should happen to the app?",
                    "criteria": {"open": "open, launch, or start the app itself", "quit": "quit, close, or kill the app",
                                 "none": "the request is about playback, volume, or something inside the app, not opening or quitting it"}},
@@ -39,6 +39,7 @@ QUESTIONS = {
     "screen_action": {"type": "choice", "instructions": "What should happen on the screen, if anything?",
                       "criteria": {"list": "a question about what is visible or available on screen",
                                    "press": "an instruction to click, press or select a particular named or numbered thing",
+                                   "type": "an instruction to type, write or enter given words into a text field or box",
                                    "none": "neither"}},
     "system_action": {"type": "choice", "instructions": "What should happen to the computer?",
                       "criteria": {"lock": None, "sleep": None, "none": None}},
@@ -156,6 +157,35 @@ def press_args(clause):
     return {"label": said} if said else None
 
 
+TYPE_SPAN = re.compile(r"^\W*(?:please\s+)?(?:type|write|enter|input)\s+(?P<rest>.+)$", re.I)
+FIELD_TAIL = re.compile(r"\s+(?:into\s+(?:the\s+)?(?P<f1>.+?)(?:\s+(?:field|box|bar|area))?"
+                        r"|in\s+(?:the\s+)?(?P<f2>.+?)\s+(?:field|box|bar|area))[\s.!?]*$", re.I)
+QUOTED = re.compile(r'^\s*["“](?P<text>[^"”]*)["”](?P<after>.*)$')
+
+
+def type_args(clause):
+    """{"text": literal, "field": name or absent} for "type hello into the Search field", None when there is no text.
+    Quoted text is taken exactly. Unquoted text loses only a trailing full stop, which recognizers add."""
+    m = TYPE_SPAN.match(clause)
+    if not m:
+        return None
+    rest, field = m["rest"], None
+    q = QUOTED.match(rest)
+    if q:
+        text, tail = q["text"], q["after"]
+        f = FIELD_TAIL.match(tail) if tail.strip() else None
+        field = (f["f1"] or f["f2"]) if f else None
+    else:
+        f = FIELD_TAIL.search(rest)
+        if f:
+            rest, field = rest[:f.start()], f["f1"] or f["f2"]
+        text = rest.strip()
+        text = text[:-1] if text.endswith(".") and not text.endswith("..") else text
+    if not text or re.fullmatch(r"(?:in|into)(?:\s.*)?", text, re.I):
+        return None
+    return {"text": text, **({"field": field.strip(" .,!?")} if field else {})}
+
+
 def app_name(clause):
     m = APP_SPAN.search(clause)
     return m[1].strip(" .,!?") if m else ""
@@ -227,6 +257,9 @@ def step_for(ans, target, clause, inherited_browser=None):
     if target == "screen":
         if act == "list":
             return (conf, "screen.list", {})
+        if act == "type":
+            args = type_args(clause)
+            return (conf, "screen.type", args) if args else None
         args = press_args(clause)
         return (conf, "screen.press", args) if args else None
     if target == "volume":
@@ -245,7 +278,7 @@ def step_for(ans, target, clause, inherited_browser=None):
     return (conf, f"{target}.{act}", {})
 
 
-UI_WORDS = re.compile(r"^\W*(?:please\s+)?(?:click|tap|double[\s-]click)\b|"
+UI_WORDS = re.compile(r"^\W*(?:please\s+)?(?:click|tap|double[\s-]click|type)\b|"
                       r"\b(?:button|checkbox|check\s+box|link|menu\s+item|icon|toggle)\b", re.I)
 
 

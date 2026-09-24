@@ -387,7 +387,8 @@ def make_engine(notify=None, ask=None, show=None):
                 key = "volume.mute" if step["action"] == "volume.set" else step["action"]  # "about to", not "done"
                 line = say_line(key) if key in REPLIES else "Okay."
                 diagnostics.record(view["id"], "speak", "before_dispatch", line=line)
-                say(line, notify)
+                with eng.hold():  # the voice turn no longer holds the floor while it waits, so speech takes it here
+                    say(line, notify)
         if kind == "done" and show:
             listed = [s for s in view.get("steps", []) if s["action"] == "screen.list" and s["state"] == "completed"]
             if listed:
@@ -414,7 +415,16 @@ def make_engine(notify=None, ask=None, show=None):
                  threshold=lambda: float("inf") if tiebreak_threshold() >= 100 else tiebreak_threshold() / 100,
                  answer=answer if ANSWER_PROVIDER == "openrouter" else None, on_event=on_event)
     eng.spoke_first = spoke_first
+    eng.hold = contextlib.nullcontext  # the voice loop sets the floor's hold once the microphone exists
     return eng
+
+
+STOP_WORDS = {"stop", "stop it", "stop that", "cancel", "cancel that", "cancel it", "never mind", "nevermind",
+              "abort", "halt", "stop stop"}
+
+
+def is_stop(text):
+    return " ".join(re.findall(r"[a-z]+", text.lower())) in STOP_WORDS
 
 
 def turn(eng, text, notify, hold=contextlib.nullcontext, stt_ms=None):
@@ -424,12 +434,20 @@ def turn(eng, text, notify, hold=contextlib.nullcontext, stt_ms=None):
     if not text.strip():
         emit(notify, "Ready", "Didn't catch anything")
         return
+    if is_stop(text) and eng.active():  # out of band: never queued behind the work it stops
+        stopped = [eng.cancel(rid) for rid in eng.active()]
+        diagnostics.record(None, "stop", "cancelled", ids=[v["id"] for v in stopped])
+        with hold():
+            say(say_line("cancelled"), notify)
+        emit(notify, "Ready", "Stopped")
+        return
     first = eng.submit(text, "voice")
     diagnostics.record(first.get("id"), "recognize", first["state"], text=text, stt_ms=stt_ms)
     if first["state"] in ("busy", "id_conflict"):  # never queued: nothing to wait for
         line = say_line("busy")
         diagnostics.record(first.get("id"), "speak", first["state"], line=line)
-        say(line, notify)
+        with hold():
+            say(line, notify)
         emit(notify, "Ready", line)
         return
     rid = first["id"]
@@ -438,7 +456,8 @@ def turn(eng, text, notify, hold=contextlib.nullcontext, stt_ms=None):
         emit(notify, "Ready", "Still working on that")
         threading.Thread(target=_late, args=(eng, rid, notify, hold), daemon=True).start()
         return
-    _deliver(eng, result, notify)
+    with hold():  # the floor is held only while speaking, so "stop" can be heard while the work runs
+        _deliver(eng, result, notify)
 
 
 def _late(eng, rid, notify, hold):
@@ -704,6 +723,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
         raise
     floor = Floor(rec)
     hold = floor.hold
+    ENGINE.hold = hold
     armed_until = [0.0]
     want_listening = [listening]
     ptt_token = [None]  # the push-to-talk recording this key press owns
@@ -794,10 +814,11 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
         reply({"text": text, "ms": ms, "backend": STT["backend"], "wake": phrase.phrase, "wake_matched": rest is not None,
                "command": rest})
 
-    def run_turn(text, stt_ms, epoch):
-        with hold():
-            if not rec.enabled or epoch != rec.epoch:
-                return
+    turns = queue.Queue()  # ordinary turns, one at a time and in the order they were heard
+
+    def turn_worker():
+        while True:
+            text, stt_ms = turns.get()
             try:
                 print(f"  (stt {stt_ms}ms)")
                 turn(ENGINE, text, notify, hold=hold, stt_ms=stt_ms)
@@ -806,6 +827,17 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
                 emit(notify, "Something went wrong", str(exc))
                 time.sleep(2)
                 emit(notify, "Ready", ready_text(rec.wake))
+    threading.Thread(target=turn_worker, daemon=True).start()
+
+    def run_turn(text, stt_ms, epoch):
+        """Ordinary turns wait on the turn worker, which takes the floor only to speak, so the listener stays free.
+        "Stop" skips the line: it is handled here at once and cancels what is running or queued."""
+        if not rec.enabled or epoch != rec.epoch:
+            return
+        if is_stop(text) and ENGINE.active():
+            turn(ENGINE, text, notify, hold=hold, stt_ms=stt_ms)
+            return
+        turns.put((text, stt_ms))
 
     def ptt_turn(audio, epoch):
         emit(notify, "Transcribing", "Working out what you said…")

@@ -81,6 +81,11 @@ class Engine:
             self.lock.notify_all()
             return self._view(rec)
 
+    def active(self):
+        """Ids of the running request and every queued one, oldest first: what a spoken "stop" cancels."""
+        with self.lock:
+            return ([self.running["id"]] if self.running else []) + [r["id"] for r in self.queue]
+
     def status(self, rid):
         with self.lock:
             rec = self.ledger.get(rid)

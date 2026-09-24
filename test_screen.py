@@ -39,12 +39,16 @@ class WalkTests(unittest.TestCase):
         self.assertEqual(found, [])
 
 
-def item(n, label, source="ax", role="AXButton", frame=(10, 10, 80, 30), pressable=True):
-    return screen.Item(n, source, role, label, frame, pressable, ref=object())
+def item(n, label, source="ax", role="AXButton", frame=(10, 10, 80, 30), pressable=True, ref=None, **kw):
+    return screen.Item(n, source, role, label, frame, pressable, ref=ref if ref is not None else object(), **kw)
 
 
-def snap(items, pid=7, window="Pad", app="Pad"):
-    return screen.Snapshot(pid, app, "com.pad", window, (0, 0, 400, 300), items)
+WINDOWS = {}
+
+
+def snap(items, pid=7, window="Pad", app="Pad", started="Thu Sep 24 18:00:00 2026"):
+    return screen.Snapshot(pid, app, "com.pad", window, (0, 0, 400, 300), items,
+                           window_ref=WINDOWS.setdefault((pid, window), object()), started=started)
 
 
 class MergeTests(unittest.TestCase):
@@ -90,25 +94,28 @@ class PlannerTests(unittest.TestCase):
 
 
 class FakeScreen:
-    """Patches screen's observe/last/signature/press so the real actions and engine run without touching the Mac."""
+    """Patches screen's native reads and the press so the real actions and engine run without touching the Mac."""
 
     def __init__(self, test, items, shown=None):
-        self.current, self.shown, self.presses, self.changes = snap(items), shown, [], True
-        self.sig = {"text": "a"}
-        for name, fn in {"observe": self.observe, "last": lambda: self.shown, "signature": lambda pid: dict(self.sig),
-                         "element_state": lambda ref: {}, "press": self.press}.items():
+        self.current, self.shown, self.presses = snap(items), shown, []
+        self.effect = "own"  # own: the pressed control's value flips; other: only unrelated text changes; none
+        self.sig, self.state = {"text": "a", "menu_open": False}, {"exists": True, "AXValue": "0"}
+        for name, fn in {"observe": self.observe, "last": lambda: self.shown,
+                         "signature": lambda pid, deadline: dict(self.sig),
+                         "element_state": lambda ref, deadline: dict(self.state), "press": self.press}.items():
             p = patch.object(screen, name, fn)
             p.start()
             test.addCleanup(p.stop)
-        test.addCleanup(patch.stopall)
 
     def observe(self, pid=None, ocr=True, deadline=None):
         return self.current
 
-    def press(self, ref):
+    def press(self, ref, deadline):
         self.presses.append(ref)
-        if self.changes:
-            self.sig = {"text": "b"}
+        if self.effect == "own":
+            self.state = {**self.state, "AXValue": "1"}
+        elif self.effect == "other":
+            self.sig = {**self.sig, "text": "b"}  # a clock ticking, another window updating
         return 0
 
 
@@ -117,8 +124,8 @@ class ScreenActionTests(unittest.TestCase):
         p = patch.object(diagnostics, "record", lambda *a, **k: None)
         p.start()
         self.addCleanup(p.stop)
-        self.chosen = None
-        p = patch.object(actions, "CHOOSE", lambda spoken, labels: self.chosen or (None, 0.0))
+        self.chosen = (None, 0.0)
+        p = patch.object(actions, "CHOOSE", lambda spoken, labels: self.chosen)
         p.start()
         self.addCleanup(p.stop)
 
@@ -133,27 +140,75 @@ class ScreenActionTests(unittest.TestCase):
     def test_press_by_name_changes_and_completes(self):
         fake = FakeScreen(self, [item(1, "Add one"), item(2, "Count: 0", "ocr", "text", pressable=False)])
         v = self.run_text("click Add one", "screen.press", {"label": "add ONE"})
-        self.assertEqual((v["state"], v["steps"][0]["facts"]), ("completed", {"changed": ["text"]}))
+        self.assertEqual((v["state"], v["steps"][0]["facts"]), ("completed", {"changed": ["AXValue"]}))
         self.assertEqual(len(fake.presses), 1)
 
     def test_press_with_no_change_is_unverified_not_done(self):
         fake = FakeScreen(self, [item(1, "Add one")])
-        fake.changes = False
+        fake.effect = "none"
         v = self.run_text("click Add one", "screen.press", {"label": "Add one"})
         self.assertEqual(v["state"], "unverified")
 
+    def test_an_unrelated_change_does_not_complete_a_press(self):
+        fake = FakeScreen(self, [item(1, "Add one")])
+        fake.effect = "other"
+        v = self.run_text("click Add one", "screen.press", {"label": "Add one"})
+        self.assertEqual((v["state"], v["steps"][0]["facts"]["delivered"], v["steps"][0]["facts"]["observed"]),
+                         ("unverified", True, ["text"]))
+        self.assertEqual(len(fake.presses), 1)
+
+    def test_a_menu_opening_from_a_menu_control_completes(self):
+        fake = FakeScreen(self, [item(1, "View", role="AXMenuBarItem")])
+        fake.effect = "none"
+        orig = fake.press
+        fake.press = lambda ref, deadline: (orig(ref, deadline), fake.sig.update(menu_open=True))[0]
+        patch.object(screen, "press", fake.press).start()
+        v = self.run_text("click View", "screen.press", {"label": "View"})
+        self.assertEqual((v["state"], v["steps"][0]["facts"]), ("completed", {"changed": ["menu_open"]}))
+
     def test_number_uses_the_list_the_user_saw_and_checks_it_is_still_there(self):
-        shown = snap([item(1, "Title", "ocr", "text", pressable=False), item(2, "Save")])
-        fake = FakeScreen(self, [item(1, "Title", "ocr", "text", pressable=False), item(2, "Save")], shown)
+        title, save = item(1, "Title", "ocr", "text", pressable=False), item(2, "Save")
+        shown = snap([title, save])
+        fake = FakeScreen(self, [title, save], shown)
         self.assertEqual(self.run_text("click 2", "screen.press", {"number": 2})["state"], "completed")
         v = self.run_text("click 1", "screen.press", {"number": 1})  # OCR text is not a control
         self.assertEqual((v["state"], v["steps"][0]["detail"]), ("failed", "not_a_control"))
-        fake.current = snap([item(1, "Title", "ocr", "text", pressable=False), item(2, "Save", frame=(50, 50, 80, 30))])
-        v = self.run_text("click 2", "screen.press", {"number": 2})  # it moved: never press a guess
-        self.assertEqual((v["state"], v["steps"][0]["detail"]), ("failed", "screen_changed"))
-        fake.current = snap([item(2, "Save")], window="Other")
-        self.assertEqual(self.run_text("click 2", "screen.press", {"number": 2})["steps"][0]["detail"], "screen_changed")
+        stale = {
+            "moved": snap([title, item(2, "Save", frame=(50, 50, 80, 30), ref=save.ref)]),
+            "replaced at the same spot": snap([title, item(2, "Save")]),  # a new element, same role/label/frame
+            "other window, same title": snap([title, save], window="Pad") if False else None,
+            "restarted app, same pid": snap([title, save], started="Thu Sep 24 19:00:00 2026"),
+            "disabled": snap([title, item(2, "Save", ref=save.ref, enabled=False)]),
+        }
+        other = screen.Snapshot(7, "Pad", "com.pad", "Pad", (0, 0, 400, 300), [title, save], window_ref=object(),
+                                started=shown.started)
+        stale["other window, same title"] = other
+        for why, current in stale.items():
+            fake.current = current
+            v = self.run_text("click 2", "screen.press", {"number": 2})
+            self.assertEqual((v["state"], v["steps"][0]["detail"]), ("failed", "screen_changed"), why)
         self.assertEqual(len(fake.presses), 1)
+
+    def test_a_control_swapped_between_confirm_and_press_is_never_pressed(self):
+        save = item(1, "Save")
+        fake = FakeScreen(self, [save])
+        asked = []
+
+        def ask(pending):
+            if pending:
+                asked.append(pending)
+                fake.current = snap([item(1, "Save")])  # replaced while the pop-down is open
+                eng.decide(pending["token"], True)
+        eng = None
+
+        def classify(_):
+            return {}
+        with patch.object(planner, "plan", lambda *a, **k: ("steps", [{"clause": "click Save", "action": "screen.press",
+                                                                        "args": {"label": "Save"}}])):
+            eng = Engine(classify, policy=lambda: dict(actions.DEFAULT_POLICY), ask=ask)
+            v = eng.wait(eng.submit("click Save", "cli")["id"], 10)
+        self.assertEqual((len(asked), v["state"], v["steps"][0]["detail"]), (1, "failed", "target_changed"))
+        self.assertEqual(fake.presses, [])
 
     def test_identical_labels_ask_which(self):
         fake = FakeScreen(self, [item(1, "Buy", frame=(10, 10, 60, 30)), item(2, "Buy", frame=(300, 250, 60, 30))])
@@ -162,14 +217,25 @@ class ScreenActionTests(unittest.TestCase):
         self.assertEqual([c["name"] for c in v["steps"][0]["facts"]["choices"]], ["Buy (top-left)", "Buy (bottom-right)"])
         self.assertEqual(fake.presses, [])
 
-    def test_jev_picks_only_above_the_gate(self):
+    def test_jev_picks_only_above_the_gate_and_only_well_formed_answers(self):
         fake = FakeScreen(self, [item(1, "New Note"), item(2, "Delete Note")])
         self.chosen = (0, 0.5)
         self.assertEqual(self.run_text("click compose", "screen.press", {"label": "compose"})["state"], "failed")
+        for bad in [(0, float("inf")), (-1, 0.99), (True, 0.99), (5, 0.99), (0, True), (0, 1.5), ("0", 0.9), (0,), None]:
+            self.chosen = bad
+            v = self.run_text("click compose", "screen.press", {"label": "compose"})
+            self.assertEqual(v["state"], "needs_clarification", bad)
+        self.assertEqual(fake.presses, [])
         self.chosen = (0, 0.9)
         v = self.run_text("click compose", "screen.press", {"label": "compose"})
         self.assertEqual((v["state"], v["steps"][0]["target"]["label"]), ("completed", "New Note"))
-        self.assertEqual(len(fake.presses), 1)
+
+    def test_chooser_never_sees_field_or_document_values(self):
+        FakeScreen(self, [item(1, "New Note"), item(2, "Dear Sam, the merger", role="AXCell", from_value=True)])
+        seen = []
+        with patch.object(actions, "CHOOSE", lambda spoken, labels: seen.append(labels) or (None, 0.0)):
+            self.run_text("click compose", "screen.press", {"label": "compose"})
+        self.assertEqual(seen, [["New Note"]])
 
     def test_risky_labels_always_ask_even_when_clicks_are_automatic(self):
         fake = FakeScreen(self, [item(1, "Delete everything")])
@@ -190,14 +256,60 @@ class ScreenActionTests(unittest.TestCase):
         self.assertEqual((v["state"], facts["count"], [i["label"] for i in facts["items"]]), ("completed", 2, ["Save", "hello"]))
         self.assertEqual(screen.LAST.app, "Pad")
 
-    def test_screen_text_stays_out_of_the_log(self):
-        FakeScreen(self, [item(1, "Secret plan")])
+    def test_screen_text_stays_out_of_the_log_and_speech(self):
+        import siri
+        FakeScreen(self, [item(1, "Private document title")])
         logged = []
         with patch.object(diagnostics, "record", lambda *a, **k: logged.append(k)):
-            self.run_text("what can I click", "screen.list", {})
-        verify = [k for k in logged if "facts" in k and k["facts"]]
-        self.assertEqual(verify[-1]["facts"]["items"], 1)
-        self.assertNotIn("Secret plan", repr(logged))
+            listed = self.run_text("what can I click", "screen.list", {})
+            self.chosen = (0, 0.9)  # the user said "compose"; Jev picked the control, whose text the user never said
+            pressed = self.run_text("click compose", "screen.press", {"label": "compose"})
+        self.assertEqual(pressed["state"], "completed")
+        self.assertNotIn("Private document", repr(logged))
+        self.assertTrue(any(k.get("facts", {}).get("items") == 1 for k in logged))
+        for v in (listed, pressed):
+            self.assertNotIn("Private", siri.line_for(v))
+
+
+class DeadlineTests(unittest.TestCase):
+    def test_bounded_returns_at_the_deadline_even_when_the_call_hangs(self):
+        import time
+        t = time.monotonic()
+        with self.assertRaises(screen.TimedOut):
+            screen.bounded(lambda: time.sleep(5), t + 0.3)
+        self.assertLess(time.monotonic() - t, 1.0)
+        self.assertEqual(screen.bounded(lambda: 4, time.monotonic() + 1), 4)
+        with self.assertRaises(ZeroDivisionError):  # the call's own error comes back, not a timeout
+            screen.bounded(lambda: 1 / 0, time.monotonic() + 1)
+
+    def test_slow_ocr_keeps_the_controls_and_says_so(self):
+        import time
+        ctl = ax_walk.AxNode("AXButton", "Save", 10, 10, 80, 30, True, object())
+        with patch.object(screen, "trusted", lambda: True), \
+                patch.object(screen, "_app_info", lambda pid: ("Pad", "com.pad")), \
+                patch.object(screen, "process_start", lambda pid, d: "start"), \
+                patch.object(screen, "_read_ax", lambda pid, d: (object(), (0, 0, 400, 300), "Pad", [ctl],
+                                                                 {id(ctl): (True, False)}, False)), \
+                patch.object(screen, "read_text", lambda *a: time.sleep(5)):
+            t = time.monotonic()
+            got = screen.observe(pid=7, deadline=t + 0.5)
+        self.assertLess(time.monotonic() - t, 1.2)
+        self.assertEqual((got.ocr, [i.label for i in got.items]), ("timed_out", ["Save"]))
+
+    def test_a_press_the_app_never_answers_is_unknown_not_failed(self):
+        with patch.object(diagnostics, "record", lambda *a, **k: None):
+            fake = FakeScreen(self, [item(1, "Add one")])
+
+            def hang(ref, deadline):
+                fake.presses.append(ref)
+                raise screen.TimedOut("AXPress")
+            patch.object(screen, "press", hang).start()
+            self.addCleanup(patch.stopall)
+            with patch.object(planner, "plan", lambda *a, **k: ("steps", [{"clause": "c", "action": "screen.press",
+                                                                            "args": {"label": "Add one"}}])):
+                eng = Engine(lambda _: {}, policy=lambda: {**actions.DEFAULT_POLICY, "click": "auto"})
+                v = eng.wait(eng.submit("click Add one", "cli")["id"], 10)
+        self.assertEqual((v["state"], len(fake.presses)), ("unknown", 1))
 
 
 if __name__ == "__main__":

@@ -4,12 +4,17 @@ observe(pid=None, ocr=True, deadline=None) -> Snapshot
     The frontmost app's focused window (or the given pid's). Items are numbered in reading order. Each carries its
     source: "ax" (a control the app declared), "ocr" (text read off the pixels, not proof of a control) or "ax+ocr".
     Screen text is data only: nothing here acts on what it reads.
-press(item) -> None, raising Failed/Uncertain
-    AXPress on a control the app declared. OCR-only text is never clicked in this slice.
-signature(pid) -> a light AX-only fingerprint of the window, for "did anything change?".
+press(ref, deadline) -> AX error code. AXPress on a control the app declared; OCR-only text is never clicked.
+signature(pid, deadline) -> a light AX-only fingerprint of the window, for "did anything change?".
 
-The last snapshot a user was shown is kept in LAST, so "click 12" means the 12 they saw. Its numbers only resolve
-against a fresh observation of the same app and window with the same control still there.
+Identity is the element itself: AX elements compare equal across reads when they are the same element, so each
+gets a local token (e1, e2...) and a replacement at the same spot is a different token. Process identity is pid plus
+start time. The last snapshot a user was shown is kept in LAST, so "click 12" means the 12 they saw, and only that
+exact element, still present, enabled and pressable, in the same window of the same process.
+
+Every native read runs under one caller deadline (bounded()): a hung app or a slow Vision request ends the wait,
+not the app. Labels come from AXTitle/AXDescription; AXValue is used only for non-editable roles, and is marked,
+so document and field contents never become a label sent anywhere.
 """
 import os
 import re
@@ -33,6 +38,66 @@ class Unavailable(Exception):
     """Permission missing, no window, or the screen could not be read. Nothing was done."""
 
 
+class TimedOut(Exception):
+    """The deadline passed with a native call still out."""
+
+
+def bounded(fn, deadline, *args):
+    """Run fn on a daemon thread and wait until the deadline. A call that outlives it is abandoned, never waited on."""
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise TimedOut(getattr(fn, "__name__", "call"))
+    box = {}
+
+    def run():
+        try:
+            box["ok"] = fn(*args)
+        except BaseException as exc:  # handed back to the caller
+            box["err"] = exc
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(left)
+    if t.is_alive():
+        raise TimedOut(getattr(fn, "__name__", "call"))
+    if "err" in box:
+        raise box["err"]
+    return box["ok"]
+
+
+_tokens = []  # [(element, token)]: equality is the AX element's own
+_token_lock = threading.Lock()
+
+
+def token(element):
+    """A stable local id for this exact element. Never leaves the Mac."""
+    with _token_lock:
+        for el, tok in _tokens:
+            if el == element:
+                return tok
+        tok = f"e{len(_tokens) + 1}"
+        _tokens.append((element, tok))
+        del _tokens[:-4000]
+        return tok
+
+
+def element_for(tok):
+    with _token_lock:
+        return next((el for el, t in _tokens if t == tok), None)
+
+
+def process_start(pid, deadline):
+    """Start time of the process, so a recycled pid is a different process."""
+    try:
+        r = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True,
+                           timeout=max(0.05, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired:
+        raise TimedOut("ps")
+    start = r.stdout.strip()
+    if not start:
+        raise Unavailable(f"no process {pid}")
+    return start
+
+
 @dataclass
 class Item:
     n: int
@@ -42,6 +107,12 @@ class Item:
     frame: tuple  # x, y, w, h in screen points, top-left origin
     pressable: bool
     ref: object = field(default=None, repr=False, compare=False)
+    enabled: bool = True
+    from_value: bool = False  # the label is the element's AXValue, not its name
+
+    @property
+    def token(self):
+        return token(self.ref) if self.ref is not None else None
 
     def key(self):
         """Identity across observations: same role, label and (rounded) place."""
@@ -61,8 +132,14 @@ class Snapshot:
     window_frame: tuple
     items: list
     truncated: bool = False
-    ocr: str = "off"  # off | ok | no_permission | failed
+    ocr: str = "off"  # off | ok | no_permission | failed | timed_out
     ms: dict = field(default_factory=dict)
+    window_ref: object = field(default=None, repr=False)
+    started: str = ""  # process start time
+
+    @property
+    def window_token(self):
+        return token(self.window_ref) if self.window_ref is not None else None
 
     def public(self):
         return {"app": self.app, "bundle": self.bundle, "window": self.window, "pid": self.pid,
@@ -83,16 +160,27 @@ def _attr(element, name):
     return value if err == 0 else None
 
 
-def _label(element):
-    """AXTitle on AppKit, AXDescription on web and Electron, a short AXValue as a last resort."""
+EDITABLE = {"AXTextField", "AXTextArea", "AXSearchField", "AXComboBox", "AXSecureTextField"}
+
+
+def _named(element):
+    """(label, came from AXValue). AXTitle on AppKit, AXDescription on web and Electron; a short AXValue only for
+    roles whose value is not something the user typed or a document holds."""
     for name in ("AXTitle", "AXDescription"):
         text = _attr(element, name)
         if isinstance(text, str) and text.strip():
-            return " ".join(text.split())
+            return " ".join(text.split()), False
+    role, sub = str(_attr(element, "AXRole") or ""), str(_attr(element, "AXSubrole") or "")
+    if role in EDITABLE or sub == "AXSecureTextField":
+        return "", False
     value = _attr(element, "AXValue")
     if isinstance(value, str) and 0 < len(value.strip()) <= AX_VALUE_CHARS:
-        return " ".join(value.split())
-    return ""
+        return " ".join(value.split()), True
+    return "", False
+
+
+def _label(element):
+    return _named(element)[0]
 
 
 def _frame(element):
@@ -113,6 +201,10 @@ def _children(element):
 
 def _attrs(element):
     return ax_walk.AxAttrs(str(_attr(element, "AXRole") or ""), _label(element), _frame(element))
+
+
+def enabled(element):
+    return _attr(element, "AXEnabled") is not False
 
 
 def _actions(element):
@@ -273,16 +365,7 @@ def merge(controls, texts, window_frame):
     return items
 
 
-def observe(pid=None, ocr=True, deadline=None):
-    """Read one window. Raises Unavailable when it can't; never acts."""
-    t0 = time.monotonic()
-    deadline = deadline or t0 + 4.0
-    if not trusted():
-        raise Unavailable("accessibility_permission")
-    if pid is None:
-        pid, app, bundle = frontmost()
-    else:
-        app, bundle = _app_info(pid)
+def _read_ax(pid, deadline):
     AS = _AS()
     app_el = AS.AXUIElementCreateApplication(pid)
     AS.AXUIElementSetMessagingTimeout(app_el, AX_MESSAGE_TIMEOUT)
@@ -292,23 +375,45 @@ def observe(pid=None, ocr=True, deadline=None):
     wframe = _frame(win)
     if not wframe:
         raise Unavailable("window has no frame")
-    title = _label(win)
     left = max(0.05, min(ax_walk.AX_TIME_CAP, deadline - time.monotonic()))
     found, _offscreen, truncated = _walk(win, wframe, left)
     menubar = _attr(app_el, "AXMenuBar")
     bar = [ax_walk.AxNode(r, l, *f, True, k) for k in (_children(menubar) if menubar is not None else [])
            for r, l, f in [_attrs(k)] if l and f and r == "AXMenuBarItem" and l != "Apple"]
+    controls = bar + found
+    extra = {id(c): (enabled(c.ref), _named(c.ref)[1]) for c in controls}
+    return win, wframe, _label(win), controls, extra, truncated
+
+
+def observe(pid=None, ocr=True, deadline=None):
+    """Read one window under one deadline. Raises Unavailable or TimedOut; never acts."""
+    t0 = time.monotonic()
+    deadline = deadline or t0 + 4.0
+    if not trusted():
+        raise Unavailable("accessibility_permission")
+    if pid is None:
+        pid, app, bundle = frontmost()
+    else:
+        app, bundle = _app_info(pid)
+    started = process_start(pid, deadline)
+    win, wframe, title, controls, extra, truncated = bounded(_read_ax, deadline, pid, deadline)
     t_ax = time.monotonic()
     texts, ocr_state = [], "off"
     if ocr:
         try:
-            texts, ocr_state = read_text(pid, wframe, deadline), "ok"
+            texts, ocr_state = bounded(read_text, deadline, pid, wframe, deadline), "ok"
+        except TimedOut:
+            ocr_state = "timed_out"  # the controls still stand; text is a bonus
         except Unavailable as exc:
             ocr_state = "no_permission" if str(exc) == "no_permission" else "failed"
-    items = merge(bar + found, texts, wframe)
-    snap = Snapshot(pid, app, bundle, title, wframe, items[:MAX_ITEMS], truncated or len(items) > MAX_ITEMS, ocr_state,
-                    {"ax": round((t_ax - t0) * 1000), "ocr": round((time.monotonic() - t_ax) * 1000)})
-    return snap
+    items = merge(controls, texts, wframe)
+    for i in items:
+        if i.source != "ocr":
+            ref_extra = next((v for c in controls if c.ref is i.ref for v in [extra[id(c)]]), (True, False))
+            i.enabled, i.from_value = ref_extra
+    return Snapshot(pid, app, bundle, title, wframe, items[:MAX_ITEMS], truncated or len(items) > MAX_ITEMS, ocr_state,
+                    {"ax": round((t_ax - t0) * 1000), "ocr": round((time.monotonic() - t_ax) * 1000)},
+                    window_ref=win, started=started)
 
 
 def remember(snap):
@@ -323,36 +428,43 @@ def last():
 
 
 # --------------------------------------------------------------------------- acting and reading back
-def press(ref):
-    """AXPress. Returns the AX error code (0 is delivered)."""
-    try:
-        return int(_AS().AXUIElementPerformAction(ref, "AXPress"))
-    except Exception:
-        return -1
+def press(ref, deadline):
+    """AXPress. Returns the AX error code (0 is delivered). Raises TimedOut when the app never answered: the press
+    may or may not have happened."""
+    return bounded(lambda: int(_AS().AXUIElementPerformAction(ref, "AXPress")), deadline)
 
 
-def element_state(ref):
-    """What a press on this element might flip: value, selection, expansion."""
-    return {k: repr(_attr(ref, k)) for k in ("AXValue", "AXSelected", "AXExpanded", "AXEnabled")}
+def element_state(ref, deadline):
+    """What a press on this element might flip: value, selection, expansion, and whether it still exists."""
+    def read():
+        role = _attr(ref, "AXRole")
+        return {"exists": role is not None, **{k: repr(_attr(ref, k)) for k in ("AXValue", "AXSelected", "AXExpanded")}}
+    return bounded(read, deadline)
 
 
-def signature(pid):
-    """AX-only fingerprint: window title, window count, focused element, open menus, and the control set."""
-    AS = _AS()
-    app_el = AS.AXUIElementCreateApplication(pid)
-    AS.AXUIElementSetMessagingTimeout(app_el, AX_MESSAGE_TIMEOUT)
-    win = _window(app_el)
-    focused = _attr(app_el, "AXFocusedUIElement")
-    sig = {"window": _label(win) if win is not None else None,
-           "windows": len(_attr(app_el, "AXWindows") or []),
-           "focused": (str(_attr(focused, "AXRole") or ""), _label(focused)) if focused is not None else None,
-           "menu_open": any(_attr(k, "AXSelected") for k in _children(_attr(app_el, "AXMenuBar")))
-           if _attr(app_el, "AXMenuBar") is not None else False}
-    if win is not None:
-        found, _, _ = _walk(win, _frame(win) or (0, 0, 0, 0), 0.4)
-        sig["controls"] = sorted((c.role, c.label) for c in found)
-        sig["text"] = _text_digest(win)
-    return sig
+def is_pressable(ref, deadline):
+    return bounded(lambda: enabled(ref) and "AXPress" in _actions(ref), deadline)
+
+
+def signature(pid, deadline):
+    """AX-only fingerprint: window, window count, focused element, open menus, the control set, a text hash."""
+    def read():
+        AS = _AS()
+        app_el = AS.AXUIElementCreateApplication(pid)
+        AS.AXUIElementSetMessagingTimeout(app_el, AX_MESSAGE_TIMEOUT)
+        win = _window(app_el)
+        focused = _attr(app_el, "AXFocusedUIElement")
+        bar = _attr(app_el, "AXMenuBar")
+        sig = {"window": token(win) if win is not None else None,
+               "windows": len(_attr(app_el, "AXWindows") or []),
+               "focused": token(focused) if focused is not None else None,
+               "menu_open": any(_attr(k, "AXSelected") for k in _children(bar)) if bar is not None else False}
+        if win is not None:
+            found, _, _ = _walk(win, _frame(win) or (0, 0, 0, 0), 0.4)
+            sig["controls"] = sorted((c.role, c.label) for c in found)
+            sig["text"] = _text_digest(win)
+        return sig
+    return bounded(read, deadline)
 
 
 def _text_digest(win, node_cap=1500, time_cap=0.3):

@@ -415,7 +415,11 @@ RISKY = re.compile(r"\b(buy|purchase|order|pay|checkout|check out|send|submit|po
                    r"empty|discard|uninstall|format|sign out|log out|transfer|confirm|accept|agree|install|share|reply all)\b",
                    re.I)
 CHOOSE = None  # set by the app: (spoken, [labels]) -> (index or None, confidence). Only control names are sent.
+CHOOSE_GATE = 0.65
+RESOLVE_BUDGET = 3.0  # one deadline over every native read a resolve makes
+SETTLE = 1.5  # how long a press gets to show a relevant change
 AX_GONE = (-25202, -25205, -25206, -25201)  # invalid element, no value, action unsupported, illegal argument
+MENU_ROLES = ("AXMenuBarItem", "AXMenuButton", "AXPopUpButton")
 _listed = {}  # id(target) -> the Snapshot run read, for verify
 _pressed = {}  # id(target) -> (before, dispatched_at, ref)
 
@@ -428,36 +432,50 @@ def _where(item, frame):
 
 
 def _screen_target(snap, item):
-    same = [i for i in snap.items if (i.role, i.label) == (item.role, item.label)]
-    return {"pid": snap.pid, "app": snap.app, "window": snap.window, "role": item.role, "label": item.label,
-            "frame": [round(v) for v in item.frame], "occurrence": same.index(item),
+    """Exact identity: the process (pid + start time), the window element and the control element."""
+    return {"pid": snap.pid, "started": snap.started, "app": snap.app, "window": snap.window_token,
+            "element": item.token, "role": item.role, "label": item.label, "frame": [round(v) for v in item.frame],
             "confirm": bool(RISKY.search(item.label))}
 
 
-def _observe(**kw):
+def _live(item):
+    return item.source != "ocr" and item.pressable and item.enabled
+
+
+def valid_choice(got, n):
+    """The chooser's answer only when it has exactly the expected shape: (int index in range or None, finite 0-1)."""
+    import math
     try:
-        return screen.observe(**kw)
-    except screen.Unavailable as exc:
-        raise Failed(f"can't read the screen: {exc}")
+        idx, conf = got
+    except (TypeError, ValueError):
+        return None
+    if isinstance(conf, bool) or not isinstance(conf, (int, float)) or not math.isfinite(conf) or not 0 <= conf <= 1:
+        return None
+    if idx is None:
+        return (None, float(conf))
+    if isinstance(idx, bool) or not isinstance(idx, int) or not 0 <= idx < n:
+        return None
+    return (idx, float(conf))
 
 
 def resolve_screen_press(args):
-    """A number from the last list the user saw, or a spoken control name, to one control the app declared."""
+    """A number from the last list the user saw, or a spoken control name, to one exact control the app declared."""
+    deadline = time.monotonic() + RESOLVE_BUDGET
     try:
-        snap = screen.observe(ocr=False)
-    except screen.Unavailable as exc:
+        snap = screen.observe(ocr=False, deadline=deadline)
+    except (screen.Unavailable, screen.TimedOut) as exc:
         return ("none", f"can't read the screen: {exc}")
-    controls = [i for i in snap.items if i.source != "ocr" and i.pressable]
+    controls = [i for i in snap.items if _live(i)]
     if args.get("number") is not None:
         shown = screen.last()
         if shown is None or not 1 <= args["number"] <= len(shown.items):
             return ("none", "no such number on the last list")
         seen = shown.items[args["number"] - 1]
-        if (shown.pid, shown.window) != (snap.pid, snap.window):
-            return ("none", "screen_changed")
         if seen.source == "ocr":
             return ("none", "not_a_control")
-        now = next((i for i in controls if i.key() == seen.key()), None)
+        if (shown.pid, shown.started, shown.window_token) != (snap.pid, snap.started, snap.window_token):
+            return ("none", "screen_changed")
+        now = next((i for i in controls if i.token == seen.token and i.key() == seen.key()), None)
         return ("target", _screen_target(snap, now)) if now else ("none", "screen_changed")
     said = screen._norm(args.get("label"))
     if not said:
@@ -465,32 +483,52 @@ def resolve_screen_press(args):
     exact = [i for i in controls if screen._norm(i.label) == said]
     if not exact:
         exact = [i for i in controls if f" {said} " in f" {screen._norm(i.label)} "]
-    if not exact and CHOOSE and controls:
-        names = list(dict.fromkeys(i.label for i in controls))
-        idx, conf = CHOOSE(args.get("label", ""), names)
-        if idx is not None and conf >= 0.65:
-            exact = [i for i in controls if i.label == names[idx]]
+    if not exact and CHOOSE:
+        named = [i for i in controls if not i.from_value]  # a field's or document's value is never sent
+        names = list(dict.fromkeys(i.label for i in named))
+        if names:
+            try:
+                got = valid_choice(CHOOSE(args.get("label", ""), names), len(names))
+            except Exception:
+                got = None
+            if got is None:
+                return ("choices", [])  # a malformed answer asks again; nothing is pressed
+            if got[0] is not None and got[1] >= CHOOSE_GATE:
+                exact = [i for i in named if i.label == names[got[0]]]
     if not exact:
         return ("none", "no control by that name")
-    if len({(i.role, i.label, tuple(i.frame)) for i in exact}) > 1:
+    if len({i.token for i in exact}) > 1:
         return ("choices", [{"name": f"{i.label} ({_where(i, snap.window_frame)})"} for i in exact[:4]])
     return ("target", _screen_target(snap, exact[0]))
 
 
 def _find(t, deadline):
-    snap = _observe(pid=t["pid"], ocr=False, deadline=deadline)
-    same = [i for i in snap.items if (i.role, i.label) == (t["role"], t["label"]) and i.pressable]
-    item = same[t["occurrence"]] if t["occurrence"] < len(same) else None
-    if item is None or [round(v) for v in item.frame] != t["frame"] or snap.window != t["window"]:
+    """The target's own element, still in the same window of the same process, still enabled and pressable."""
+    ref = screen.element_for(t.get("element"))
+    if ref is None:
+        raise Failed("unknown control")
+    try:
+        snap = screen.observe(pid=t["pid"], ocr=False, deadline=deadline)
+    except (screen.Unavailable, screen.TimedOut) as exc:
+        raise Failed(f"can't read the screen: {exc}")
+    item = next((i for i in snap.items if i.token == t["element"]), None)
+    if ((snap.started, snap.window_token) != (t["started"], t["window"]) or item is None or not _live(item)
+            or [round(v) for v in item.frame] != t["frame"] or (item.role, item.label) != (t["role"], t["label"])):
         raise Failed("that control is no longer there")
-    return item
+    return ref
 
 
 def run_screen_press(t, deadline):
-    item = _find(t, deadline)
-    before = (screen.signature(t["pid"]), screen.element_state(item.ref))
-    err = screen.press(item.ref)
-    _pressed[id(t)] = (before, time.monotonic(), item.ref)
+    ref = _find(t, deadline)
+    try:
+        before = (screen.signature(t["pid"], deadline), screen.element_state(ref, deadline))
+    except screen.TimedOut as exc:
+        raise Failed(f"screen read timed out before the press: {exc}")
+    _pressed[id(t)] = (before, time.monotonic(), ref)
+    try:
+        err = screen.press(ref, deadline)
+    except screen.TimedOut:
+        raise Uncertain("the app did not answer the press")
     if err in AX_GONE:
         raise Failed(f"the app refused the press (AX error {err})")
     if err != 0:
@@ -498,31 +536,56 @@ def run_screen_press(t, deadline):
 
 
 def verify_screen_press(t, deadline):
+    """done only on a change of the pressed control itself: its value, selection or expansion, it going away, or a
+    menu opening from a menu control. Anything else that changed is recorded, and the press stays unverified."""
     before, at, ref = _pressed.get(id(t), (None, 0, None))
     if before is None:
         return ("unverified", {"why": "no before-state"})
-    after = (screen.signature(t["pid"]), screen.element_state(ref))
-    changed = sorted({k for k in before[0] if before[0].get(k) != after[0].get(k)} |
-                     {k for k in before[1] if before[1].get(k) != after[1].get(k)})
-    if changed:
+    after = (screen.signature(t["pid"], deadline), screen.element_state(ref, deadline))
+    own = sorted(k for k in before[1] if before[1][k] != after[1][k])
+    if t["role"] in MENU_ROLES and after[0].get("menu_open") and not before[0].get("menu_open"):
+        own.append("menu_open")
+    if own:
         _pressed.pop(id(t), None)
-        return ("done", {"changed": changed})
-    if time.monotonic() - at < 1.5:
+        return ("done", {"changed": own})
+    if time.monotonic() - at < SETTLE:
         return ("wait", {})
     _pressed.pop(id(t), None)
-    return ("unverified", {"why": "pressed, but nothing in the window changed"})
+    other = sorted(k for k in before[0] if before[0].get(k) != after[0].get(k))
+    return ("unverified", {"delivered": True, "observed": other,
+                           "why": "pressed; the control itself did not change"})
 
 
 def run_screen_list(t, deadline):
-    snap = _observe(ocr=True, deadline=deadline)
+    try:
+        snap = screen.observe(ocr=True, deadline=deadline)
+    except (screen.Unavailable, screen.TimedOut) as exc:
+        raise Failed(f"can't read the screen: {exc}")
     screen.remember(snap)
     _listed[id(t)] = snap
 
 
 def verify_screen_list(t, deadline):
     snap = _listed.pop(id(t), None) or screen.last()
-    return ("done", {"app": snap.app, "window": snap.window, "count": len(snap.items), "ocr": snap.ocr,
+    return ("done", {"app": snap.app, "count": len(snap.items), "ocr": snap.ocr,
                      "items": [i.public() for i in snap.items]})
+
+
+def loggable(action, value):
+    """Screen actions log shapes, never screen text: labels become their length, item lists their count."""
+    if not (action or "").startswith("screen.") or not isinstance(value, dict):
+        return value
+    out = {}
+    for k, v in value.items():
+        if k in ("label", "window") and isinstance(v, str):
+            out[k] = f"<{len(v)} chars>"
+        elif k == "items" and isinstance(v, list):
+            out[k] = len(v)
+        elif k == "choices" and isinstance(v, list):
+            out[k] = len(v)
+        else:
+            out[k] = v
+    return out
 
 
 # --------------------------------------------------------------------------- registry

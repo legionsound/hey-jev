@@ -7,7 +7,7 @@ import uuid
 
 import diagnostics
 import planner
-from actions import ACTIONS, DEFAULT_POLICY, Failed, Timeout, describe
+from actions import ACTIONS, DEFAULT_POLICY, Failed, Timeout, describe, loggable
 
 QUEUE_MAX = 8
 QUEUE_TTL = 30.0
@@ -251,10 +251,13 @@ class Engine:
             got = action["resolve"](args)
         except Exception as exc:  # nothing dispatched yet
             got = ("none", f"could not resolve: {exc}")
+        act = step["action"]
+        screen_step = act.startswith("screen.")
         diagnostics.record(rec["id"], "resolve", got[0], (time.monotonic() - t) * 1000, step=step["index"],
-                           action=step["action"], args=args,
-                           target=got[1] if got[0] == "target" else None,
-                           choices=[c.get("path") or c.get("name") for c in got[1]] if got[0] == "choices" else None,
+                           action=act, args=loggable(act, args),
+                           target=loggable(act, got[1]) if got[0] == "target" else None,
+                           choices=(len(got[1]) if screen_step else [c.get("path") or c.get("name") for c in got[1]])
+                           if got[0] == "choices" else None,
                            reason=got[1] if got[0] == "none" else None)
         if got[0] == "choices":
             self._set(step, state="needs_clarification", facts={"choices": got[1]})
@@ -268,7 +271,8 @@ class Engine:
             t = time.monotonic()
             verdict = self._confirm(rec, step, target)
             diagnostics.record(rec["id"], "confirm", verdict, (time.monotonic() - t) * 1000, step=step["index"],
-                               prompt=describe(step["action"], target))
+                               prompt="<screen control>" if step["action"].startswith("screen.")
+                               else describe(step["action"], target))
             if verdict != "confirmed":
                 self._set(step, state="declined" if verdict != "cancelled" else "skipped", detail=verdict)
                 return "declined" if verdict != "cancelled" else "cancelled"
@@ -285,14 +289,13 @@ class Engine:
                 return "cancelled"
             step["state"] = "running"
         self._emit("step", self._view(rec), dict(step))
-        diagnostics.record(rec["id"], "dispatch", "running", step=step["index"], action=step["action"], target=target)
+        diagnostics.record(rec["id"], "dispatch", "running", step=step["index"], action=step["action"],
+                           target=loggable(step["action"], target))
         started = time.monotonic()
         state = self._execute(action, step, target)
-        facts = step.get("facts") or {}
-        if "items" in facts:  # screen text stays out of the log: counts only
-            facts = {**facts, "items": len(facts["items"])}
         diagnostics.record(rec["id"], "verify", state, (time.monotonic() - started) * 1000, step=step["index"],
-                           detail=step.get("detail"), facts=facts, target=target)
+                           detail=step.get("detail"), facts=loggable(step["action"], step.get("facts") or {}),
+                           target=loggable(step["action"], target))
         return state
 
     def _execute(self, action, step, target):

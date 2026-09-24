@@ -70,8 +70,10 @@ def choose_control(spoken, labels):
     """Jev picks which on-screen control the user named. Only the control names and the spoken words are sent."""
     from engine import current_rid
     names = labels[:250]
+    ids = [f"c{i}" for i in range(len(names))]  # opaque keys: control text can never collide with a protocol choice
     q = {"control": {"type": "choice", "instructions": f"Which on-screen control did the user mean by: {spoken}",
-                     "criteria": {**{n: None for n in names}, "__none__": "none of these controls"}}}
+                     "criteria": {**{k: f"the control named “{n}”" for k, n in zip(ids, names)},
+                                  "none": "none of these controls"}}}
     try:
         ans, ms, _ = jev(spoken, q)
     except Exception as exc:
@@ -79,7 +81,7 @@ def choose_control(spoken, labels):
         return None, 0.0
     pick, conf = ans["control"]
     diagnostics.record(current_rid(), "choose_control", "ok", ms, options=len(names), confidence=round(conf, 2))
-    return (names.index(pick) if pick in names else None), conf
+    return (ids.index(pick) if pick in ids else None), conf
 
 
 def classify(clause):
@@ -126,7 +128,7 @@ REPLIES = {
     "timer.check": ["{left} left.", "You've got {left} to go."],
     "screen.list": ["I can see {count} things in {app}. They're numbered on screen.",
                     "{count} things in {app}, numbered on screen. Say click and a number."],
-    "screen.press": ["Clicked {label}.", "[cheerful] Pressed {label}."],
+    "screen.press": ["Clicked it.", "[cheerful] Done, clicked."],
     "timer.cancel": ["Timer cancelled.", "[sighing] Fine, no timer then."],
     "timers_cancel": ["All timers cancelled.", "Cleared them all."],
     "timer_none": ["[chuckling] There's no timer running."],
@@ -172,7 +174,7 @@ def step_line(step):
         line = say_line("screen.list", count=facts.get("count", 0), app=facts.get("app") or "this window")
         return line + (" Allow Screen Recording and I can read the text too." if facts.get("ocr") == "no_permission" else "")
     if action == "screen.press":
-        return say_line("screen.press", label=target.get("label") or "it")
+        return say_line("screen.press")  # never the label: speech goes to a remote voice service
     return say_line(action, app=target.get("name") or target.get("app") or "it", level=target.get("level") or "that")
 
 
@@ -191,6 +193,10 @@ def line_for(result):
         return step_line(steps[0]) if len(steps) == 1 else say_line("compound_done")
     if state == "needs_clarification":
         bad = next((s for s in steps if s["state"] == "needs_clarification"), None)
+        if bad and bad["action"] == "screen.press":  # control text is never spoken: speech goes to a remote service
+            if bad["facts"].get("choices"):
+                return "[clear throat] There's more than one of those. Ask what you can click, then say a number."
+            return say_line("clarify")
         if bad and bad["facts"].get("choices"):
             names = [c["name"] + (f" in {os.path.basename(os.path.dirname(c['path']))}" if c.get("path") else "")
                      for c in bad["facts"]["choices"][:4]]

@@ -78,6 +78,7 @@ Each action has an `effect` category: `open`, `navigate`, `media`, `volume`, `di
 - After a Confirm wins, the engine re-resolves the target before dispatch; if any field differs or it vanished the step fails with `target_changed`.
 - The popover text names the exact effect: volume level and percent, timer duration or reminder text, the pinned timer(s) to cancel, and for apps the install's folder. Timer cancel pins timer ids at resolve; run cancels only those. Quit terminates only processes whose bundle path equals the resolved path, never by bundle id.
 - No request field can confirm, skip policy or supply a target handle.
+- Outstanding effects: if an earlier step's native effect (a screen press) outlived its deadline and may still land, every later dispatch, of any action family and including queued requests, waits up to 10 s for it to settle, then fails with `an earlier action hasn't finished` without dispatching. The earlier step stays `unknown`.
 - `click` (on-screen controls) defaults to Ask first. A control whose label matches the risky list (buy, send, delete, pay, submit, post, share, install, sign out and similar) always asks, whatever the setting. That list only adds confirmation; it never proves any other click harmless. `look` (reading the screen) has no effect and never asks.
 
 ## Ledger and replay

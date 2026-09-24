@@ -7,7 +7,7 @@ import uuid
 
 import diagnostics
 import planner
-from actions import ACTIONS, DEFAULT_POLICY, Failed, Timeout, describe, loggable
+from actions import ACTIONS, DEFAULT_POLICY, Failed, Timeout, describe, effect_pending, loggable
 
 QUEUE_MAX = 8
 QUEUE_TTL = 30.0
@@ -15,6 +15,7 @@ RESULT_TTL = 600.0
 LEDGER_MAX = 10_000
 CONFIRM_TTL = 60.0
 POLL = 0.2
+PENDING_WAIT = 10.0  # how long a new dispatch waits for an earlier, still-outstanding effect before refusing
 _local = threading.local()
 
 
@@ -37,12 +38,14 @@ def _same_target(a, b):
 
 
 class Engine:
-    def __init__(self, classify, policy=lambda: DEFAULT_POLICY, ask=None, answer=None, on_event=None, actions=ACTIONS):
+    def __init__(self, classify, policy=lambda: DEFAULT_POLICY, ask=None, answer=None, on_event=None, actions=ACTIONS,
+                 pending=effect_pending):
         """classify(clause) -> Jev answers. ask(pending) shows the pop-down (None: no UI, Ask-first steps decline).
         answer(text) -> spoken answer, or None when deeper answers are off. on_event(kind, record, step)."""
         self.classify, self.policy, self.ask, self.answer = classify, policy, ask, answer
         self.on_event = on_event or (lambda *a: None)
         self.actions = actions
+        self.effect_pending = pending  # an earlier effect that may still land holds every later dispatch
         self.instance = uuid.uuid4().hex[:12]
         self.lock = threading.Condition()
         self.ledger = {}  # id -> record
@@ -283,6 +286,9 @@ class Engine:
             if again[0] != "target" or not _same_target(again[1], target):
                 self._set(step, state="failed", detail="target_changed")
                 return "failed"
+        if not self._settled(rec):  # an earlier step's effect is still out: nothing overtakes it
+            self._set(step, state="failed", detail="an earlier action hasn't finished")
+            return "failed"
         with self.lock:  # dispatch boundary: a cancel that lands before this line stops the step, after it cannot
             if rec["cancel"]:
                 step["state"] = "skipped"
@@ -297,6 +303,15 @@ class Engine:
                            detail=step.get("detail"), facts=loggable(step["action"], step.get("facts") or {}),
                            target=loggable(step["action"], target))
         return state
+
+    def _settled(self, rec):
+        """Wait up to PENDING_WAIT for any outstanding effect to land. False: still out, so this step must not run."""
+        end = time.monotonic() + PENDING_WAIT
+        while self.effect_pending():
+            if time.monotonic() >= end or rec["cancel"]:
+                return False
+            time.sleep(POLL)
+        return True
 
     def _execute(self, action, step, target):
         deadline = time.monotonic() + action["timeout"]

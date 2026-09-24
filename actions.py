@@ -576,6 +576,11 @@ def verify_screen_list(t, deadline):
                      "items": [i.public() for i in snap.items]})
 
 
+def effect_pending():
+    """Any native effect from an earlier step that may still land. Checked by the engine before every dispatch."""
+    return screen.effect_pending()
+
+
 def loggable(action, value):
     """Screen actions log shapes, never screen text: labels become their length, item lists their count."""
     if not (action or "").startswith("screen.") or not isinstance(value, dict):

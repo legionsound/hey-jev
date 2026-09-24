@@ -313,6 +313,8 @@ class DeadlineTests(unittest.TestCase):
 
 
 class BoundaryTests(unittest.TestCase):
+    real_press = staticmethod(screen.press)
+
     def test_tokens_are_never_reused_and_evicted_ones_go_stale(self):
         with patch.object(screen, "_tokens", []), patch.object(screen, "_next_token", [0]), \
                 patch.object(screen, "TOKEN_CAP", 50):
@@ -363,7 +365,8 @@ class BoundaryTests(unittest.TestCase):
         with patch.object(diagnostics, "record", lambda *a, **k: None):
             fake = FakeScreen(self, [item(1, "Add one")])
             for p in (patch.object(screen, "press", real_press), patch.object(screen, "_AS", lambda: FakeAS()),
-                      patch.object(screen, "EFFECT_SETTLE", 0.2), patch.object(screen, "_abandoned", [])):
+                      patch.object(screen, "EFFECT_SETTLE", 0.2), patch.object(screen, "_abandoned", []),
+                      patch("engine.PENDING_WAIT", 0.5)):
                 p.start()
                 self.addCleanup(p.stop)
             entry = dict(actions.ACTIONS["screen.press"], timeout=0.3)
@@ -377,9 +380,47 @@ class BoundaryTests(unittest.TestCase):
                 release.set()
                 time.sleep(0.1)
         self.assertEqual(first["state"], "unknown")  # a press that may have landed is never failed or done
-        self.assertEqual(second["state"], "failed")  # the queued command could not start a native call
-        self.assertIn("has not finished", second["steps"][0]["detail"])
+        self.assertEqual(second["state"], "failed")  # the queued command could not dispatch
+        self.assertEqual(second["steps"][0]["detail"], "an earlier action hasn't finished")
         self.assertEqual(len(calls), 1)  # the late completion was the first press, and nothing else was pressed
+
+    def test_no_action_family_overtakes_a_pending_press(self):
+        import threading
+        import time
+        release, order = threading.Event(), []
+
+        class FakeAS:
+            def AXUIElementPerformAction(self, ref, action):
+                release.wait(5)
+                order.append("late press")
+                return 0
+
+        def run_volume(t, deadline):
+            order.append("volume")
+        vol = actions.entry("volume", actions.plain, run_volume, None, "nothing", 2)
+        with patch.object(diagnostics, "record", lambda *a, **k: None):
+            FakeScreen(self, [item(1, "Add one")])
+            real_press = BoundaryTests.real_press
+            for p in (patch.object(screen, "press", real_press), patch.object(screen, "_AS", lambda: FakeAS()),
+                      patch.object(screen, "EFFECT_SETTLE", 0.2), patch.object(screen, "_abandoned", []),
+                      patch("engine.PENDING_WAIT", 0.5)):
+                p.start()
+                self.addCleanup(p.stop)
+            plans = {"click Add one": ("screen.press", {"label": "Add one"}), "turn it up": ("volume.up", {})}
+            table = {**actions.ACTIONS, "screen.press": dict(actions.ACTIONS["screen.press"], timeout=0.3),
+                     "volume.up": vol}
+            with patch.object(planner, "plan", lambda text, *a, **k: ("steps", [{"clause": text, "action": plans[text][0],
+                                                                                 "args": plans[text][1]}])):
+                eng = Engine(lambda _: {}, policy=lambda: {**actions.DEFAULT_POLICY, "click": "auto"}, actions=table)
+                first = eng.wait(eng.submit("click Add one", "cli")["id"], 10)
+                second = eng.wait(eng.submit("turn it up", "cli")["id"], 10)  # a different family entirely
+                release.set()
+                time.sleep(0.2)
+                third = eng.wait(eng.submit("turn it up", "cli", rid="again")["id"], 10)
+        self.assertEqual(first["state"], "unknown")
+        self.assertEqual((second["state"], second["steps"][0]["detail"]), ("failed", "an earlier action hasn't finished"))
+        self.assertEqual(third["state"], "unverified")  # settled: work resumes
+        self.assertEqual(order, ["late press", "volume"])  # the volume never ran before the late press landed
 
     def test_a_press_that_lands_during_settle_is_still_late(self):
         import time

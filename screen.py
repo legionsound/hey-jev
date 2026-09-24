@@ -58,6 +58,12 @@ def _outstanding():
         return [e for _, e in _abandoned]
 
 
+def effect_pending():
+    """True while an abandoned effect (a press, an insert) may still land. The engine holds every action family's
+    dispatch on this, not just screen calls."""
+    return any(_outstanding())
+
+
 def bounded(fn, deadline, *args, effect=False):
     """Run fn on a daemon thread and wait until the deadline.
 

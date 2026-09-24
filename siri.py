@@ -318,7 +318,7 @@ def make_engine(notify=None, ask=None):
         elif kind == "step":
             emit(notify, "Doing it", step["clause"])
             if view["source"] == "voice" and (step["action"] in SPEAK_FIRST or
-                                              step["action"] == "volume.set" and (step.get("target") or {}).get("level") == "silent"):
+                                              step["action"] == "volume.set" and (step.get("target") or {}).get("value") == 0):
                 spoke_first.add(view["id"])
                 key = "volume.mute" if step["action"] == "volume.set" else step["action"]  # "about to", not "done"
                 line = say_line(key) if key in REPLIES else "Okay."

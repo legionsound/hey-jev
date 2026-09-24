@@ -19,6 +19,11 @@ import url_adapter
 LEVELS = {"silent": 0, "quiet": 25, "medium": 50, "loud": 75, "max": 100}
 
 
+def level_value(a):
+    """Exact percent when one was spoken, else the named level."""
+    return a["percent"] if isinstance(a.get("percent"), int) else LEVELS.get(a.get("level"), 50)
+
+
 class Failed(Exception):
     """The native call reported an error: the effect did not happen."""
 
@@ -419,13 +424,13 @@ ACTIONS = {
     "app.quit": entry("quit", resolve_app, run_app_quit, verify_app_quit, "no running app at the resolved path"),
     "volume.up": entry("volume", plain, volume_step(20), verify_volume, "output volume reads back the new level", 5),
     "volume.down": entry("volume", plain, volume_step(-20), verify_volume, "output volume reads back the new level", 5),
-    "volume.set": entry("volume", lambda a: ("target", {**a, "value": LEVELS.get(a.get("level"), 50)}),
+    "volume.set": entry("volume", lambda a: ("target", {**a, "value": level_value(a)}),
                         set_volume, verify_volume, "output volume reads back the level", 5),
     "volume.mute": entry("volume", plain, run_mute(True), verify_mute(True), "output reads muted", 5),
     "volume.unmute": entry("volume", plain, run_mute(False), verify_mute(False), "output reads unmuted", 5),
     "spotify_volume.up": entry("volume", resolve_spotify, spotify_step(20), verify_spotify_volume, "Spotify volume reads back", 5),
     "spotify_volume.down": entry("volume", resolve_spotify, spotify_step(-20), verify_spotify_volume, "Spotify volume reads back", 5),
-    "spotify_volume.set": entry("volume", resolve_spotify, spotify_fixed(lambda t: LEVELS.get(t.get("level"), 50)),
+    "spotify_volume.set": entry("volume", resolve_spotify, spotify_fixed(level_value),
                                 verify_spotify_volume, "Spotify volume reads back", 5),
     "spotify_volume.mute": entry("volume", resolve_spotify, spotify_fixed(lambda t: 0), verify_spotify_volume, "Spotify volume reads 0", 5),
     "spotify_volume.unmute": entry("volume", resolve_spotify, spotify_fixed(lambda t: 50), verify_spotify_volume, "Spotify volume reads 50", 5),
@@ -462,7 +467,7 @@ def describe(action, target):
     if t.get("path"):
         name += f" (in {os.path.basename(os.path.dirname(t['path'])) or '/'})"
     level = t.get("level")
-    level = f"{level} ({LEVELS[level]}%)" if level in LEVELS else "that level"
+    level = f"{level} ({LEVELS[level]}%)" if level in LEVELS else f"{t['percent']}%" if "percent" in t else "that level"
     if action == "timer.set":
         d = timers.say_duration(t.get("secs", 0))
         return f"Remind you in {d} to {t['label']}" if t.get("label") else f"Start a {d} timer"

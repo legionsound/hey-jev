@@ -69,6 +69,30 @@ def app_name(clause):
     return m[1].strip(" .,!?") if m else ""
 
 
+NUM_WORDS = {w: i for i, w in enumerate("zero one two three four five six seven eight nine ten eleven twelve thirteen "
+                                         "fourteen fifteen sixteen seventeen eighteen nineteen".split())}
+NUM_WORDS.update({w: 10 * i for i, w in enumerate("twenty thirty forty fifty sixty seventy eighty ninety".split(), 2)})
+PERCENT = re.compile(r"\b((?:\d{1,3})|(?:(?:a |one )?hundred)|(?:[a-z]+(?:[\s-][a-z]+)?))\s*(?:%|percent\b|per cent\b)", re.I)
+
+
+def percent(clause):
+    """ "40%", "40 percent", "forty five percent" -> 0..100. None when absent, out of range, or a change "by" an amount."""
+    m = PERCENT.search(clause)
+    if not m or re.search(r"\bby\s*$", clause[:m.start()], re.I):
+        return None
+    words = m[1].lower().replace("-", " ").split()
+    if words[0].isdigit():
+        n = int(words[0])
+    elif words[-1] == "hundred":
+        n = 100
+    else:
+        words = words[-2:] if len(words) == 2 and words[0] in NUM_WORDS and words[0].endswith("ty") else words[-1:]
+        if any(w not in NUM_WORDS for w in words):
+            return None
+        n = sum(NUM_WORDS[w] for w in words)
+    return n if 0 <= n <= 100 else None
+
+
 def step_for(ans, target, clause):
     """One (confidence, action, args) for this target, or None when Jev is not sure."""
     if target == "app":
@@ -88,6 +112,9 @@ def step_for(ans, target, clause):
     if target == "volume":
         scope, scope_conf = ans["volume_scope"]
         spotify = scope == "spotify" and (scope_conf >= 0.5 or re.search(r"\bspotify\b", clause, re.I))
+        pct = percent(clause) if act in ("set", "up", "down") else None
+        if pct is not None:  # an exact number beats Jev's five-word scale: "turn it up to 60%" is a set
+            return (conf, f"{'spotify_volume' if spotify else 'volume'}.set", {"level": f"{pct}%", "percent": pct})
         return (conf, f"{'spotify_volume' if spotify else 'volume'}.{act}", {"level": ans["volume_level"][0]})
     return (conf, f"{target}.{act}", {})
 

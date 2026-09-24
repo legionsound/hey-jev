@@ -378,3 +378,28 @@ class BridgeResilienceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PercentVolumeTests(unittest.TestCase):
+    def plan(self, text, **over):
+        return planner.plan(text, lambda c: answers(**{"volume_action": ("set", 0.9), **over}))
+
+    def test_spoken_percent_sets_exact_value(self):
+        for text, n in [("set volume to 40 percent", 40), ("set the volume to 40%", 40), ("volume to seventy-five percent", 75),
+                        ("set volume to a hundred percent", 100), ("set volume to 0%", 0)]:
+            kind, steps = self.plan(text)
+            self.assertEqual((kind, steps[0]["action"], steps[0]["args"]), ("steps", "volume.set", {"level": f"{n}%", "percent": n}), text)
+            self.assertEqual(actions.level_value(steps[0]["args"]), n)
+
+    def test_up_to_a_percent_is_a_set_but_up_by_is_not(self):
+        self.assertEqual(self.plan("turn it up to 60%", volume_action=("up", 0.9))[1][0]["action"], "volume.set")
+        self.assertEqual(self.plan("turn it up by 10 percent", volume_action=("up", 0.9))[1][0]["action"], "volume.up")
+
+    def test_out_of_range_and_named_levels_fall_back(self):
+        self.assertEqual(self.plan("set volume to 150 percent")[1][0]["args"], {"level": "medium"})
+        self.assertEqual(actions.level_value({"level": "quiet"}), 25)
+
+    def test_spotify_percent_and_describe(self):
+        step = self.plan("set spotify to 30 percent", volume_scope=("spotify", 0.9))[1][0]
+        self.assertEqual((step["action"], actions.level_value(step["args"])), ("spotify_volume.set", 30))
+        self.assertEqual(actions.describe("volume.set", {"level": "30%", "percent": 30, "value": 30}), "Set the volume to 30%")

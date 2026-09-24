@@ -586,6 +586,14 @@ class TypeTests(unittest.TestCase):
             v = self.run_type({"text": "x"})
         self.assertEqual((v["state"], self.inserts), ("unknown", []))
 
+    def test_an_ambiguous_focus_error_is_unknown_and_nothing_is_typed(self):
+        with patch.object(screen, "focus", lambda ref, d: -25204):  # cannot complete: it may still have focused
+            v = self.run_type({"text": "x"})
+        self.assertEqual((v["state"], self.inserts), ("unknown", []))
+        with patch.object(screen, "focus", lambda ref, d: -25202):  # the element is gone: a definite refusal
+            v = self.run_type({"text": "x"})
+        self.assertEqual((v["state"], self.inserts), ("failed", []))
+
     def test_focused_field_when_none_is_named(self):
         self.assertEqual(self.run_type({"text": "x"})["state"], "completed")
 

@@ -658,8 +658,10 @@ def run_screen_type(t, deadline):
         raise Failed(str(exc))  # refused before sending
     except screen.TimedOut as exc:
         raise Uncertain(f"the app did not answer the focus in time ({exc}); nothing was typed")
+    if focused in AX_GONE:
+        raise Failed(f"the field refused focus (AX error {focused})")  # gone or unsupported: definitely not focused
     if focused != 0:
-        raise Failed(f"the field wouldn't take focus (AX error {focused})")
+        raise Uncertain(f"AX error {focused} after focusing; nothing was typed")  # e.g. -25204: may have landed
     try:
         before = screen.field_value(ref, deadline)
         rng = screen.selected_range(ref, deadline) if isinstance(before, str) else None

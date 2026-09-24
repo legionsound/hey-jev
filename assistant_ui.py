@@ -542,7 +542,13 @@ class AppDelegate(NSObject):
                 state, reason = speech_apple.status("en-US")
             except ImportError:
                 state, reason = "missing_bindings", "Apple Speech support isn't installed in this build."
-            status = "Apple on-device: ready." if state == "ready" else f"Apple on-device: not ready. {reason}"
+            status = "Apple on-device: " + {
+                "ready": "ready.", "not_determined": "needs your permission.", "denied": "permission is off.",
+                "restricted": "not allowed on this Mac.", "unsupported_locale": "not available for English (US).",
+                "no_on_device": "this Mac can't do it on-device, so it stays off.",
+                "unavailable": "temporarily unavailable. Try again shortly.",
+                "missing_bindings": "not installed in this build.",
+            }.get(state, f"not ready ({reason}).")
             nxt = {"not_determined": "Click Allow Apple dictation, then approve the macOS prompt.",
                    "denied": "Turn on Hey Jev in System Settings, Privacy & Security, Speech Recognition.",
                    "restricted": "Speech recognition is restricted on this Mac.",

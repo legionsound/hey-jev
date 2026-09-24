@@ -286,7 +286,11 @@ class Engine:
             if again[0] != "target" or not _same_target(again[1], target):
                 self._set(step, state="failed", detail="target_changed")
                 return "failed"
-        if not self._settled(rec):  # an earlier step's effect is still out: nothing overtakes it
+        settled = self._settled(rec)
+        if settled == "cancelled":
+            self._set(step, state="skipped")
+            return "cancelled"
+        if not settled:  # an earlier step's effect is still out: nothing overtakes it
             self._set(step, state="failed", detail="an earlier action hasn't finished")
             return "failed"
         with self.lock:  # dispatch boundary: a cancel that lands before this line stops the step, after it cannot
@@ -305,10 +309,13 @@ class Engine:
         return state
 
     def _settled(self, rec):
-        """Wait up to PENDING_WAIT for any outstanding effect to land. False: still out, so this step must not run."""
+        """Wait up to PENDING_WAIT for any outstanding effect to land. True: clear. False: still out, so this step must
+        not run. "cancelled": the request was cancelled while waiting."""
         end = time.monotonic() + PENDING_WAIT
         while self.effect_pending():
-            if time.monotonic() >= end or rec["cancel"]:
+            if rec["cancel"]:
+                return "cancelled"
+            if time.monotonic() >= end:
                 return False
             time.sleep(POLL)
         return True

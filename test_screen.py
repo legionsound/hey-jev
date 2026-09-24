@@ -422,6 +422,20 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual(third["state"], "unverified")  # settled: work resumes
         self.assertEqual(order, ["late press", "volume"])  # the volume never ran before the late press landed
 
+    def test_cancel_while_waiting_on_a_pending_effect_is_cancelled_not_failed(self):
+        import time
+        runs = []
+        app = actions.entry("open", actions.plain, lambda t, d: runs.append(t), None, "nothing", 2)
+        with patch.object(diagnostics, "record", lambda *a, **k: None), \
+                patch.object(planner, "plan", lambda *a, **k: ("steps", [{"clause": "open Notes", "action": "app.open",
+                                                                          "args": {}}])):
+            eng = Engine(lambda _: {}, actions={"app.open": app}, pending=lambda: True)
+            rid = eng.submit("open Notes", "cli")["id"]
+            time.sleep(0.3)  # the step is waiting on the pending effect
+            eng.cancel(rid)
+            v = eng.wait(rid, 5)
+        self.assertEqual((v["state"], v["steps"][0]["state"], runs), ("cancelled", "skipped", []))
+
     def test_a_press_that_lands_during_settle_is_still_late(self):
         import time
 

@@ -434,21 +434,28 @@ def is_stop(text):
     return " ".join(re.findall(r"[a-z]+", text.lower())) in STOP_WORDS
 
 
-def turn(eng, text, notify, hold=contextlib.nullcontext, stt_ms=None):
+def turn(eng, text, notify, hold=contextlib.nullcontext, stt_ms=None, admit=None, stop_queued=lambda drop=False: 0):
     """One voice turn: submit, wait, speak from the result. A result that outlives the wait is spoken when it lands,
-    inside hold() so it does not talk over the microphone."""
+    inside hold() so it does not talk over the microphone.
+    admit(): context manager yielding whether this turn may still be submitted, held across the submit.
+    stop_queued(drop): how many heard-but-unsubmitted turns there are; drop=True discards them."""
+    admit = admit or (lambda: contextlib.nullcontext(True))
     print(f"\n> heard: {text!r}")
     if not text.strip():
         emit(notify, "Ready", "Didn't catch anything")
         return
-    if is_stop(text) and eng.active():  # out of band: never queued behind the work it stops
+    if is_stop(text) and (eng.active() or stop_queued()):  # out of band: never queued behind the work it stops
+        dropped = stop_queued(drop=True)
         stopped = [eng.cancel(rid) for rid in eng.active()]
-        diagnostics.record(None, "stop", "cancelled", ids=[v["id"] for v in stopped])
+        diagnostics.record(None, "stop", "cancelled", ids=[v["id"] for v in stopped], dropped_turns=dropped)
         with hold():
             say(say_line("cancelled"), notify)
         emit(notify, "Ready", "Stopped")
         return
-    first = eng.submit(text, "voice")
+    with admit() as ok:  # a stop or a mode change between hearing and here drops this turn, atomically
+        if not ok:
+            return
+        first = eng.submit(text, "voice")
     diagnostics.record(first.get("id"), "recognize", first["state"], text=text, stt_ms=stt_ms)
     if first["state"] in ("busy", "id_conflict"):  # never queued: nothing to wait for
         line = say_line("busy")
@@ -822,29 +829,55 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
                "command": rest})
 
     turns = queue.Queue()  # ordinary turns, one at a time and in the order they were heard
+    gate = threading.Lock()  # a stop and a submission never interleave
+    stop_gen = [0]  # bumped by every stop: turns heard before it never submit
+
+    def stop_queued(drop=False):
+        with gate:
+            waiting = turns.qsize() + (1 if current[0] is not None else 0)
+            if drop:
+                stop_gen[0] += 1
+                drain(turns)
+            return waiting
+
+    current = [None]  # the turn the worker has taken but not yet submitted
+
+    def admit_for(gen, epoch):
+        @contextlib.contextmanager
+        def admit():
+            with gate:
+                ok = gen == stop_gen[0] and rec.enabled and epoch == rec.epoch
+                current[0] = None
+                yield ok
+        return admit
 
     def turn_worker():
         while True:
-            text, stt_ms = turns.get()
+            text, stt_ms, epoch, gen = turns.get()
+            current[0] = text
             try:
                 print(f"  (stt {stt_ms}ms)")
-                turn(ENGINE, text, notify, hold=hold, stt_ms=stt_ms)
+                turn(ENGINE, text, notify, hold=hold, stt_ms=stt_ms, admit=admit_for(gen, epoch),
+                     stop_queued=stop_queued)
             except Exception as exc:
                 print(f"\n  turn failed: {exc}")
                 emit(notify, "Something went wrong", str(exc))
                 time.sleep(2)
                 emit(notify, "Ready", ready_text(rec.wake))
+            finally:
+                current[0] = None
     threading.Thread(target=turn_worker, daemon=True).start()
 
     def run_turn(text, stt_ms, epoch):
         """Ordinary turns wait on the turn worker, which takes the floor only to speak, so the listener stays free.
-        "Stop" skips the line: it is handled here at once and cancels what is running or queued."""
+        "Stop" skips the line: handled here at once, it drops every heard-but-unsubmitted turn and cancels what the
+        engine is running or has queued. Each queued turn keeps its epoch and is re-checked just before submitting."""
         if not rec.enabled or epoch != rec.epoch:
             return
-        if is_stop(text) and ENGINE.active():
-            turn(ENGINE, text, notify, hold=hold, stt_ms=stt_ms)
+        if is_stop(text) and (ENGINE.active() or stop_queued()):
+            turn(ENGINE, text, notify, hold=hold, stt_ms=stt_ms, stop_queued=stop_queued)
             return
-        turns.put((text, stt_ms))
+        turns.put((text, stt_ms, epoch, stop_gen[0]))
 
     def ptt_turn(audio, epoch):
         emit(notify, "Transcribing", "Working out what you said…")

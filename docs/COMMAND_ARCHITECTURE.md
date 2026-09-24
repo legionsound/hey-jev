@@ -210,3 +210,7 @@ Small acceptance check: default phrase, one custom phrase, punctuation/case, no 
 ## Capability and effort map
 
 See [CAPABILITY_EFFORT_MAP.md](CAPABILITY_EFFORT_MAP.md) for reusable atomic controls, current/proposed status, prototype versus robust effort tiers, permissions, reliability ceilings, Johnny's trials and an optional two-builder/integrator work split. It keeps the Jev-classifier/Python-harness boundary and does not authorize implementation to resume.
+
+## Buzz handoff
+
+Johnny assigned future implementation to Buzz agents and retained Astra for spec/design. Read [BUZZ_HANDOFF.md](BUZZ_HANDOFF.md) before coding. The central machine-derived catalog design is in [CAPABILITY_EFFORT_MAP.md](CAPABILITY_EFFORT_MAP.md#central-product-design-discover-this-mac-then-offer-bounded-choices). Existing incomplete code is preserved remotely as WIP `6b9fe89`; no expanded-control implementation exists.

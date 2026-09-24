@@ -134,3 +134,11 @@ Add a **user-configurable wake phrase** to Settings. Preserve “Hey Jev” and 
 These are proposed requirements, not implemented behavior. Discussion pause remains in effect; no major coding resumes until Johnny has reviewed the design.
 
 The discussion also includes [CAPABILITY_EFFORT_MAP.md](CAPABILITY_EFFORT_MAP.md): a proposed control vocabulary, qualitative effort estimates, native permissions and limits, human trials and optional parallel workstreams. Implementation remains paused; no Buzz channel or parallel workers were created.
+
+## Implementation handoff and machine discovery
+
+Johnny has selected **Astra for spec/design only** and agents in a Buzz project on his Claude subscription for implementation. No feature coding resumes in this task. See [BUZZ_HANDOFF.md](BUZZ_HANDOFF.md) for preserved WIP code, branches, exact evidence and practical assignments.
+
+The central product goal is a machine-derived local catalog: discover apps/declared interfaces/device metadata, refresh it, resolve targets locally and send Jev only relevant bounded choices. Do not hardcode app names or confuse metadata discovery with permission, a usable adapter or verified completion. Live menus/fields/DOM targets require on-demand observation and revalidation. The [catalog design](CAPABILITY_EFFORT_MAP.md#central-product-design-discover-this-mac-then-offer-bounded-choices) specifies sources, opt-ins, privacy, refresh/rebuild, candidate size and evidence states.
+
+For recoverable cross-runtime handoff, the four pre-existing incomplete source edits were preserved and pushed as `6b9fe89` on `wip/native-controls-incomplete`. The active spec branch and local working edits were left intact. This is an explicitly incomplete snapshot, not a finished build. Further commits on the spec branch remain documentation only; no upstream PR was opened.

@@ -97,3 +97,57 @@ Only one worker should perform live GUI/audio trials at a time. Other workers ca
 Not inspected yet: completeness of Johnny's local app inventory, duplicate names, Safari Automation/JavaScript permission for the chosen app identity, accessible controls in target apps, preferred recipe, multi-display behavior and actual bridge latency. No live expanded-control trial has occurred. Resolve these through small read-only discovery and Johnny-led trials after approval to resume.
 
 Only documentation is committed/pushed at this checkpoint. Existing UI/model/playback source edits remain uncommitted; compilation and the three existing provider tests passed, but native UI/audio behavior remains unverified. No expanded-control/bridge implementation, agents, Buzz channel or upstream PR was created for this map.
+
+## Central product design: discover this Mac, then offer bounded choices
+
+This is the proposed product foundation, not an implemented catalog. It should work from the current user's machine instead of Johnny-specific app names. Keep Jev as the classifier and Python as the harness. No generative command planner is required.
+
+### What to discover, and when
+
+| Source/target | Install/first-run metadata discovery | Runtime observation and limits |
+| --- | --- | --- |
+| Application bundles | Scan standard app roots and app-containing folders without descending into bundles; supplement with Spotlight and running apps. Read names/localizations, bundle ID, version and URL/path. User can add an unusual application folder. | Resolve duplicates/stale paths before launch. Observe process/launch completion. Metadata alone cannot prove an app launches on this OS or has a ready window. |
+| Native app scripting | Inspect bundle scripting declarations/dictionaries where available, including `NSAppleScriptEnabled`, `OSAScriptingDefinition`/SDEF resources and older dictionaries when supported. Record evidence of declared commands/properties. | Dictionary presence advertises a surface; it does not grant Automation permission, guarantee correctness or supply a ready-to-use safe adapter. Test selected operations through trusted adapters. Absence of these hints is “unknown,” not proof of no scripting support. |
+| URL schemes/document types | Read bundle-declared `CFBundleURLTypes` and document types; use Launch Services for registered-handler resolution. | A scheme identifies a handler, not the valid path/query grammar or safety of every URL. Approved adapters/templates still define supported operations. Do not probe schemes by opening guessed URLs. |
+| CLI/Shortcuts | Record explicitly supported tools and user-opted-in shortcuts; inspect known metadata/availability without running arbitrary discovered executables. | Listing an executable or shortcut does not reveal all effects. Bind reviewed adapters/recipes and validate each invocation. Do not turn every executable on PATH into an action. |
+| Windows, menus, buttons, fields | At most record that a trusted Accessibility adapter exists for a target app. There is no complete useful install-time index of future windows/controls. | After permission, inspect the relevant app/window on demand; bound traversal and cache briefly. Resolve unique role/name/identifier; revalidate before acting. References expire as views change. |
+| Browser tabs and DOM targets | Record browser installation, supported adapter and opt-in state. Static site recipes may declare selectors/search templates. | Observe current tabs via supported browser APIs; DOM fields/buttons need the actual page/frame state and relevant permissions. Login/consent/navigation invalidates targets. Do not crawl browsing history or every open page to build the catalog. |
+| Files/folders and documents | Offer explicit user-chosen folders/aliases and standard locations; avoid indexing personal document contents by default. | Resolve paths/selected items within scope and check existence, permissions and collision behavior at invocation. “The file I mean” is not deterministically discoverable without an explicit reference. |
+| Displays/audio devices | Enumerate current devices through native APIs and record available identifiers/advertised properties. | Refresh on topology/default-device change and before a relevant operation. Advertised hardware does not imply every gain/brightness operation is supported. |
+
+Normal first-run app-bundle discovery should not request broad Accessibility, Automation or Full Disk Access just to count apps. Ask for microphone access when enabling voice input, Accessibility when a selected control requires it, and app-specific Automation when invoking that adapter. Safari JavaScript from Apple Events is a distinct user-controlled opt-in for DOM interaction. Check/report permissions through public APIs where possible; do not manipulate TCC databases or automatically approve dialogs. Prompt timing/details must be verified under the real signed/bundled app identity.
+
+### Catalog shape and evidence
+
+A small local JSON cache is enough initially. An embedded database is an implementation option if scale warrants it, not a prerequisite. Keep these concepts separate, even if stored together:
+
+- **Entity inventory:** app/device/folder identity, display names/aliases, discovered path, source, version and last-seen timestamp.
+- **Capability definitions:** trusted action types and argument schemas supplied by our code/adapters, effect classification and verification hooks. Bundle text never becomes executable authority.
+- **Availability:** entity present, adapter present, permission unknown/granted/denied, required live target missing/present. These are separate facts, not one “safe=true” flag.
+- **Observation/verification receipt:** action, concrete target, app/adapter version, time and observed outcome. “Verified once on this target/version” is honest; “all future operations work” is not.
+
+Keep runtime targets (Accessibility elements, DOM nodes, focused windows) separate from durable bundle metadata. Re-resolve them for each execution. A stale receipt does not bypass current checks. App names, scripting descriptions, page labels and recipe labels are untrusted data; enforce parser limits and never treat their text as instructions or executable code.
+
+The local catalog should contain only necessary metadata. Do not persist secure-field values, full DOM/page content, clipboard contents, document text or secrets as discovery data. Jev calls are remote under the current providers; explain that only the command and relevant minimal labels/choices go to the selected provider. Do not upload a user's full installed-app inventory, file paths or screen contents on every turn. Opaque candidate IDs can remain tied to richer local records.
+
+### Refresh without a indexing framework
+
+Load the last metadata snapshot for fast startup, then do a bounded background refresh. Refresh lazily on a failed/stale match, explicitly through “Refresh apps,” and after relevant launch/termination/volume-mount events. A simple rescan on demand is sufficient initially; add filesystem watchers only if observed staleness warrants them. Compare bundle path/version/mtime to invalidate cached metadata and prior adapter receipts. Mark missing entities unavailable; retain intentional user aliases with a visible unresolved state rather than retargeting them silently.
+
+Provide “Rebuild discovered catalog” that replaces derived metadata without deleting user recipes/aliases. No scheduled cloud indexing, vector store or autonomous probing of app commands is needed. A cache is not a manually maintained database: it is rebuilt from the machine, while small user aliases/preferences are deliberate input.
+
+### Small Jev payload, local target resolution
+
+1. Resolve explicit entity spans locally where possible; “open Blender” can match the discovered app without sending all applications to Jev.
+2. Classify a small bounded action/domain schema. Include only relevant target candidates if classification truly needs them; exact local matches need no target enumeration in the request.
+3. Apply deterministic domain/name/alias/keyword filtering before any candidate choice. Cap candidate count and include none/unclear. If a broad request still yields many targets, ask a concise clarification rather than truncating silently or forcing a choice.
+4. Resolve returned opaque IDs against that request's candidate snapshot. Reject IDs not offered, recheck target presence and validate arguments/effects before execution. The model's selection/confidence is not permission.
+5. Introduce hierarchical fixed questions only when measured size/latency/accuracy justifies an extra call. Keep arbitrary entities out of permanently hardcoded question dictionaries.
+
+A catalog can discover “this app exists,” “it declares scripting,” or “this window now exposes a button.” It cannot infer that an unfamiliar command sends a message safely or that a novel website workflow is complete. Trusted adapters plus bounded live verification bridge that gap. This is the main boundary between machine discovery and proving a capability works.
+
+### Implementation ownership
+
+Johnny selected Astra for spec/design only and Buzz agents on his Claude subscription for coding. See [BUZZ_HANDOFF.md](BUZZ_HANDOFF.md) for exact branches, preserved incomplete source, test evidence and assignments. The earlier proposed workstream split remains optional, subject to his Buzz organization. No coding resumes in this Astra task.
+
+Sources for metadata/permission design: [Apple bundle keys](https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html), [Cocoa scripting declarations](https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CocoaKeys.html), [Accessibility trust check](https://developer.apple.com/documentation/applicationservices/1459186-axisprocesstrustedwithoptions), [NSWorkspace](https://developer.apple.com/documentation/appkit/nsworkspace). These establish API/metadata surfaces; the proposed catalog and effort estimates are design judgments, not Apple guarantees.

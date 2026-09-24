@@ -393,6 +393,77 @@ class VoiceStopLoopTests(LoopHarness):
             self.wait(lambda: self.engine.status(first)["state"] == "cancelled")
         self.assertEqual(self.runs, [])  # the confirmed-never step did nothing
 
+    def say_and_wait(self, heard):
+        import numpy as np
+        self.heard = heard
+        self.rec.segments.put(np.ones(16000, dtype="float32"))
+
+    def submitted_texts(self):
+        return [r["text"] for r in self.engine.ledger.values()]
+
+    def test_stop_also_drops_turns_heard_but_not_yet_submitted(self):
+        import time
+        self.controls.put(("mode", "wake"))
+        self.wait(lambda: self.rec.wake)
+        with patch.object(siri, "say", lambda *a: None):
+            self.say_and_wait("Hey Jev quit Notes")
+            self.wait(lambda: any(self.shown))  # the worker now waits on this request
+            self.engine_first = self.engine.active()[0]
+            self.say_and_wait("Hey Jev quit Safari")  # heard, queued behind it, not yet submitted
+            time.sleep(0.3)
+            self.say_and_wait("Hey Jev stop")
+            self.wait(lambda: self.engine.status(self.engine_first)["state"] == "cancelled")
+            time.sleep(1.5)  # a surviving turn would submit here, once the worker is free
+        self.assertEqual(self.submitted_texts(), ["quit Notes"])
+        self.assertEqual(self.runs, [])
+
+    def test_a_queued_turn_from_before_a_mode_change_never_submits(self):
+        import time
+        self.controls.put(("mode", "wake"))
+        self.wait(lambda: self.rec.wake)
+        with patch.object(siri, "say", lambda *a: None):
+            self.say_and_wait("Hey Jev quit Notes")
+            self.wait(lambda: any(self.shown))
+            self.say_and_wait("Hey Jev quit Safari")
+            time.sleep(0.3)
+            self.controls.put(("mode", "ptt"))  # new epoch: speech from before it is stale
+            self.wait(lambda: not self.rec.wake)
+            self.engine.cancel(self.engine.active()[0])  # let the worker move on to the queued turn
+            time.sleep(1.5)
+        self.assertEqual(self.submitted_texts(), ["quit Notes"])
+
+    def test_stop_with_nothing_running_is_one_ordinary_command(self):
+        import time
+        self.controls.put(("mode", "wake"))
+        self.wait(lambda: self.rec.wake)
+        with patch.object(siri, "say", lambda *a: None):
+            self.say_and_wait("Hey Jev stop")  # nothing in flight: plans like any command (pause music)
+            self.wait(lambda: self.submitted_texts())
+            time.sleep(0.3)
+        self.assertEqual(self.submitted_texts(), ["stop"])
+        stops = [k for a, k in self.logged if a[1:2] == ("stop",)]
+        self.assertEqual(stops, [])
+
+    def test_stop_in_the_gap_before_the_first_submission(self):
+        import threading
+        import time
+        gap, real_turn = threading.Event(), siri.turn
+
+        def slow_turn(eng, text, *a, **k):
+            if not siri.is_stop(text):
+                gap.wait(5)  # the worker has taken the turn but not submitted it yet
+            return real_turn(eng, text, *a, **k)
+        self.controls.put(("mode", "wake"))
+        self.wait(lambda: self.rec.wake)
+        with patch.object(siri, "say", lambda *a: None), patch.object(siri, "turn", slow_turn):
+            self.say_and_wait("Hey Jev quit Notes")
+            time.sleep(0.3)
+            self.say_and_wait("Hey Jev stop")
+            time.sleep(0.3)
+            gap.set()
+            time.sleep(0.5)
+        self.assertEqual(self.submitted_texts(), [])
+
 
 class RecorderIsolationTests(unittest.TestCase):
     def test_stop_clears_wake_leftovers_before_the_floor_frees(self):

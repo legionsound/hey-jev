@@ -109,7 +109,7 @@ Socket `~/Library/Application Support/Hey Jev/run/jev.sock`; directory mode 0700
 
 ## Speech
 
-`siri.py` speaks from the final result, naming the failed step when there is one. Exception: mute, lock and sleep speak a short "about to" line before running, because speech cannot follow them. That line never claims completion. `unverified` is spoken as "sent, couldn't check", never "done". A voice request refused as `busy` is spoken at once; a result that outlives the voice wait is spoken when it lands.
+Voice stop: ordinary turns wait on one FIFO turn worker that holds the microphone floor only while speaking, so the listener hears speech while work runs. "Stop", "stop that", "cancel", "never mind" and similar exact phrases, with work in flight, are handled at once on the listener. Under one lock with submission, they drop every heard-but-unsubmitted turn (a stop generation counter) and cancel every running and queued engine request. With nothing in flight, "stop" is an ordinary command. Each queued turn is re-checked for stop generation, listening and epoch just before it submits. Limits: stop can prevent only what hasn't been dispatched, and an effect already sent is reported as sent. Capture is off while Hey Jev is speaking, so speech can't be interrupted by voice yet. `siri.py` speaks from the final result, naming the failed step when there is one. Exception: mute, lock and sleep speak a short "about to" line before running, because speech cannot follow them. That line never claims completion. `unverified` is spoken as "sent, couldn't check", never "done". A voice request refused as `busy` is spoken at once; a result that outlives the voice wait is spoken when it lands.
 
 ## Screen control (stage 1)
 

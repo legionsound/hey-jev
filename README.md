@@ -87,9 +87,22 @@ Useful for seeing the Jev trace (every question, answer and confidence per turn)
 ```bash
 .venv/bin/python siri.py               # hold right Option mode, trace prints to the terminal
 .venv/bin/python siri.py --wake        # Hey Jev mode, always listening
-.venv/bin/python siri.py --text "open spotify and turn it down"   # one turn, no mic
+.venv/bin/python siri.py --text "open spotify, then turn it down"   # one turn in a fresh process, no mic
 .venv/bin/python siri.py --ui          # same as the app, but shows as "Python" in the Dock
 ```
+
+### Sending commands to the running app
+
+`jevctl` sends text into the app that is already running, through the same classifier, queue and confirmation rules as your voice. It prints a JSON result naming each step and whether it was actually checked.
+
+```bash
+./jevctl command --text "open Safari, then go to google.com"
+./jevctl command --text-file request.txt --id my-id-1 --wait 60
+./jevctl status my-id-1
+./jevctl cancel my-id-1
+```
+
+Only `completed` means the app saw the result. `unverified` means it did the thing but could not check it; `unknown` means it may or may not have happened. `jevctl` never retries: re-sending the same id returns the stored result. The socket lives in `~/Library/Application Support/Hey Jev/run/` and only accepts your user account. Settings > Confirmations chooses which kinds of action pop up from the menu bar for approval first.
 
 Keys can also go in a `.env` file in this folder: `FISH_AUDIO_API_KEY` for voice, `JEV_OPENROUTER_API_KEY` or `TYPESAFE_API_KEY` for Jev, and `OPENROUTER_API_KEY` for optional deeper answers. Set `JEV_PROVIDER=openrouter|typesafe` and `ANSWER_PROVIDER=disabled|openrouter` to choose routes from the terminal. A `.env` value takes priority over Keychain. By default, Jev uses TypeSafe if a direct TypeSafe key already exists, otherwise OpenRouter; deeper answers default to enabled only if their OpenRouter key already exists.
 
@@ -97,12 +110,12 @@ Keys can also go in a `.env` file in this folder: `FISH_AUDIO_API_KEY` for voice
 
 1. Audio is recorded while you hold right Option. In Hey Jev mode the mic stays open, and each phrase is transcribed locally and only acted on if it starts with "Hey Jev".
 2. faster-whisper transcribes it locally for free, about 0.8s.
-3. One Jev call asks every question at once (category, is it compound, target, which app, which action, volume level, and so on). The code ignores the answers that don't apply. This is the speculative fan-out pattern from the TypeSafe docs.
-4. If Jev says the request is two things, a second Jev call asks the same questions twice, scoped to "the first action" and "the second action". No LLM needed to split.
-5. The action runs as a one line `osascript` or shell command.
-6. A scripted reply with emotion tags is picked at random and played. All scripted lines are pre-rendered into `cache/tts/` on first launch, so replies are instant. Only LLM answers are generated live.
+3. The text is split into steps on "then", "after that" and ", and". Each step gets one Jev call that picks the kind of action (open, quit, volume, website, timer and so on). Jev never writes code or picks targets.
+4. Python pulls the target out of the words: the app name is matched against the apps actually installed on this Mac (`app_catalog.py`), a web address is checked before use. Two matching apps means it asks which one.
+5. One engine (`engine.py`) runs steps one at a time for voice and `jevctl` alike, asks first where Settings say so, runs each action with a time limit, then reads the result back. It stops at the first step that did not verifiably work.
+6. The reply is chosen from what actually happened, then played. Fixed lines are pre-rendered into `cache/tts/`, so replies are instant.
 
-Below 0.65 confidence it asks you to say it again, twice in a row and it gives up.
+Below 0.65 confidence it asks you to say it again, twice in a row and it gives up. The full rules are in `docs/ENGINE_CONTRACT.md`.
 
 ## What it costs
 
@@ -120,7 +133,12 @@ Below 0.65 confidence it asks you to say it again, twice in a row and it gives u
 
 ## Files
 
-- `siri.py` all the logic: questions, actions, replies, Whisper, Fish, LLM fallback
+- `siri.py` microphone, Whisper, speech, replies and the voice loop
+- `engine.py` the shared queue, confirmation gate, step runner and results
+- `planner.py` the Jev questions, step splitting and argument extraction
+- `actions.py` every action: resolve the target, run it, read it back
+- `app_catalog.py`, `url_adapter.py`, `timers.py` installed apps, websites, timers
+- `bridge.py` and `jevctl` the command socket and its client
 - `assistant_ui.py` the status window, mode switch and Keys panel
 - `secrets_store.py` Keychain read / write
 - `app.py` and `setup.py` the app bundle entry point and the py2app config, output lands in `dist/`

@@ -132,3 +132,17 @@ def fetch_models(key):
     except OSError:
         pass  # Catalog use does not depend on a writable cache.
     return models
+
+
+def confirm_policy():
+    """Effect category -> "ask" | "auto". Unknown or missing categories fall back to the defaults."""
+    from actions import DEFAULT_POLICY
+    try:
+        saved = json.loads(PREFS.stringForKey_("confirm_policy") or "{}")
+    except ValueError:
+        saved = {}
+    return {k: saved.get(k) if saved.get(k) in ("ask", "auto") else v for k, v in DEFAULT_POLICY.items()}
+
+
+def save_confirm_policy(policy):
+    PREFS.setObject_forKey_(json.dumps({k: v for k, v in policy.items() if v in ("ask", "auto")}), "confirm_policy")

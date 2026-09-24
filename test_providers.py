@@ -2,6 +2,7 @@
 import unittest
 from unittest.mock import patch
 
+import planner
 import secrets_store
 import siri
 
@@ -39,11 +40,9 @@ class ProviderTests(unittest.TestCase):
                     self.assertEqual(kwargs["headers"]["Authorization"], f"Bearer {key}")
 
     def test_disabled_answers_use_scripted_reply(self):
-        with patch.object(siri, "ANSWER_PROVIDER", "disabled"):
-            result = siri.decide({"category": ("information_request", 0.9),
-                                  "target": ("app", 0), "compound": (False, 0.9)})
-            self.assertEqual(result, ("reply", "info"))
-
+        ans = {"category": ("information_request", 0.9), "target": ("app", 0), "compound": (False, 0.9)}
+        self.assertEqual(planner.plan("what is the capital of France", lambda _: ans, can_answer=False), ("reply", "info"))
+        self.assertEqual(planner.plan("what is the capital of France", lambda _: ans, can_answer=True), ("answer", None))
 
 if __name__ == "__main__":
     unittest.main()

@@ -35,8 +35,11 @@ from AppKit import (
     NSWindowStyleMaskFullSizeContentView,
     NSWindowStyleMaskTitled,
 )
+from AppKit import NSPopover, NSViewController
 from Foundation import NSObject, NSTimer, NSUserDefaults
-from model_settings import PREFS, PARAMETERS, answer_settings, cached_models, fetch_models, save_answer_settings, validate_parameters
+from actions import EFFECT_LABELS, EFFECTS
+from model_settings import (PREFS, PARAMETERS, answer_settings, cached_models, confirm_policy, fetch_models,
+                            save_answer_settings, save_confirm_policy, validate_parameters)
 import voice_output
 from secrets_store import KEY_NAMES, get_secret, get_setting, missing_secrets, save_secret
 
@@ -192,7 +195,7 @@ class AppDelegate(NSObject):
     def _run_assistant(self):
         from siri import run_voice_assistant
         try:
-            run_voice_assistant(self.notify, self.controls, self.mode, self.listening)
+            run_voice_assistant(self.notify, self.controls, self.mode, self.listening, ask=self.ask_confirm)
         except Exception as exc:
             self.notify("Something went wrong", str(exc))
 
@@ -349,8 +352,8 @@ class AppDelegate(NSObject):
         content = sheet.contentView()
         tabs = NSTabView.alloc().initWithFrame_(NSMakeRect(18, 80, 644, 520))
         content.addSubview_(tabs)
-        providers, answers = (NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 610, 480)) for _ in range(2))
-        for title, view in (("Providers & keys", providers), ("Deeper answers", answers)):
+        providers, answers, confirms = (NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 610, 480)) for _ in range(3))
+        for title, view in (("Providers & keys", providers), ("Deeper answers", answers), ("Confirmations", confirms)):
             item = NSTabViewItem.alloc().initWithIdentifier_(title)
             item.setLabel_(title)
             item.setView_(view)
@@ -410,6 +413,18 @@ class AppDelegate(NSObject):
                                   NSMakeRect(24, 46, 575, 20), 11, NSColor.secondaryLabelColor()))
         answers.addSubview_(label("Reasoning models may need more tokens. Unsupported controls are disabled.",
                                   NSMakeRect(24, 23, 580, 20), 11, NSColor.secondaryLabelColor()))
+        confirms.addSubview_(label("Ask before doing", NSMakeRect(24, 429, 560, 30), 22))
+        confirms.addSubview_(label("Applies to voice and typed commands alike. Ask first shows a pop-down from the menu bar.",
+                                   NSMakeRect(24, 400, 575, 22), 12, NSColor.secondaryLabelColor()))
+        policy = confirm_policy()
+        self.policy_popups = {}
+        for i, effect in enumerate(EFFECTS):
+            y = 350 - i * 36
+            confirms.addSubview_(label(EFFECT_LABELS[effect], NSMakeRect(24, y + 2, 250, 24), 13))
+            popup = self._popup(confirms, ["Ask first", "Automatic"], NSMakeRect(300, y, 200, 28))
+            popup.selectItemAtIndex_(0 if policy[effect] == "ask" else 1)
+            popup.setAccessibilityLabel_(f"{EFFECT_LABELS[effect]} confirmation")
+            self.policy_popups[effect] = popup
         self.settings_message = label("", NSMakeRect(25, 48, 630, 24), 12, NSColor.systemRedColor())
         content.addSubview_(self.settings_message)
         for title, action, x in (("Cancel", "closeSettings:", 457), ("Save", "saveSettings:", 556)):
@@ -464,6 +479,7 @@ class AppDelegate(NSObject):
             save_secret("JEV_PROVIDER", jev_provider)
             save_secret("ANSWER_PROVIDER", answer_provider)
             save_answer_settings(self.selected_model, values, self.selected_metadata)
+            save_confirm_policy({e: ("ask", "auto")[p.indexOfSelectedItem()] for e, p in self.policy_popups.items()})
             from siri import reload_keys
             reload_keys()
             self.closeSettings_(None)
@@ -544,6 +560,50 @@ class AppDelegate(NSObject):
         self.model_info.setStringValue_(f"Selected: {self.selected_model}" + (f" · {context:,} context tokens" if context else ""))
 
     @objc.python_method
+    def ask_confirm(self, pending):
+        """Engine worker thread: show (dict) or close (None) the confirmation pop-down."""
+        self.performSelectorOnMainThread_withObject_waitUntilDone_("showConfirm:", pending or {}, False)
+
+    def showConfirm_(self, pending):
+        if getattr(self, "confirm_popover", None):
+            self.confirm_popover.close()
+            self.confirm_popover = None
+        if not pending:
+            return
+        self.confirm_token = pending["token"]
+        view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 320, 118))
+        view.addSubview_(label(pending["text"] + "?", NSMakeRect(16, 72, 290, 30), 16))
+        who = "Typed command (jevctl)" if pending.get("source") == "cli" else "Voice command"
+        view.addSubview_(label(who + " · cancels itself in 60 s", NSMakeRect(16, 50, 290, 20), 11,
+                               NSColor.secondaryLabelColor()))
+        for title, action, x, key in (("Cancel", "confirmCancel:", 112, "\x1b"), ("Confirm", "confirmYes:", 212, "\r")):
+            button = NSButton.buttonWithTitle_target_action_(title, self, action)
+            button.setFrame_(NSMakeRect(x, 10, 94, 32))
+            button.setKeyEquivalent_(key)
+            view.addSubview_(button)
+        controller = NSViewController.alloc().init()
+        controller.setView_(view)
+        popover = NSPopover.alloc().init()
+        popover.setContentViewController_(controller)
+        popover.setBehavior_(0)  # application defined: stays until a button or the engine closes it
+        NSApp.activateIgnoringOtherApps_(True)
+        popover.showRelativeToRect_ofView_preferredEdge_(self.status_item.button().bounds(), self.status_item.button(), 1)
+        self.confirm_popover = popover
+
+    def confirmYes_(self, _sender):
+        self._decide(True)
+
+    def confirmCancel_(self, _sender):
+        self._decide(False)
+
+    @objc.python_method
+    def _decide(self, yes):
+        siri = sys.modules.get("siri")
+        if siri and siri.ENGINE:
+            siri.ENGINE.decide(getattr(self, "confirm_token", None), yes)  # a late click is a no-op
+        self.showConfirm_({})
+
+    @objc.python_method
     def notify(self, state, detail=""):
         self.performSelectorOnMainThread_withObject_waitUntilDone_(
             "updateStatus:", {"state": state, "detail": detail}, False
@@ -596,6 +656,11 @@ class AppDelegate(NSObject):
         return False  # keep listening with the window closed, the Dock icon reopens it
 
     def applicationWillTerminate_(self, _notification):
+        siri = sys.modules.get("siri")
+        if siri and siri.ENGINE:
+            siri.ENGINE.shutdown()
+        if siri and siri.BRIDGE:
+            siri.BRIDGE.stop()
         voice_output.configure(mute=None)
         if getattr(self, "global_monitor", None):
             NSEvent.removeMonitor_(self.global_monitor)

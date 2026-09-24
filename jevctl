@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""Send text to the running Hey Jev app. Same path as voice. Never resubmits.
+
+  jevctl command --text "open Safari" [--id ID] [--wait 60]
+  jevctl command --text-file cmd.txt     (use - for stdin)
+  jevctl status ID [--wait 30]
+  jevctl cancel ID
+
+Exit: 0 completed/answered, 1 other final state, 2 still pending (query status with the same id), 3 app unavailable.
+"""
+import argparse
+import json
+import os
+import socket
+import stat
+import sys
+import uuid
+
+SOCK = os.environ.get("HEYJEV_SOCK") or os.path.expanduser("~/Library/Application Support/Hey Jev/run/jev.sock")
+FINAL = {"completed", "partial", "failed", "unverified", "unknown", "unsupported", "needs_clarification",
+         "declined", "cancelled", "expired", "answered", "busy", "rejected", "id_conflict", "unknown_outcome"}
+
+
+def call(req, wait):
+    try:
+        st = os.lstat(SOCK)
+        if not stat.S_ISSOCK(st.st_mode) or st.st_uid != os.getuid():
+            print(json.dumps({"state": "unavailable", "detail": "socket is not ours"}))
+            sys.exit(3)
+    except FileNotFoundError:
+        print(json.dumps({"state": "unavailable", "detail": "Hey Jev is not running"}))
+        sys.exit(3)
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(wait + 10)
+    try:
+        s.connect(SOCK)
+        s.sendall(json.dumps(req, ensure_ascii=False).encode() + b"\n")
+        buf = b""
+        while b"\n" not in buf:
+            chunk = s.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+    except (OSError, socket.timeout) as exc:
+        print(json.dumps({"id": req.get("id"), "state": "pending_unknown",
+                          "detail": f"no reply ({exc}); check with: jevctl status {req.get('id')}"}))
+        sys.exit(2)
+    finally:
+        s.close()
+    return json.loads(buf.split(b"\n", 1)[0] or b"{}")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="op", required=True)
+    c = sub.add_parser("command")
+    g = c.add_mutually_exclusive_group(required=True)
+    g.add_argument("--text")
+    g.add_argument("--text-file")
+    c.add_argument("--id")
+    c.add_argument("--wait", type=float, default=60)
+    st = sub.add_parser("status")
+    st.add_argument("id")
+    st.add_argument("--wait", type=float, default=0)
+    ca = sub.add_parser("cancel")
+    ca.add_argument("id")
+    a = ap.parse_args()
+    if a.op == "command":
+        if a.text_file:
+            text = sys.stdin.read() if a.text_file == "-" else open(a.text_file, encoding="utf-8").read()
+        else:
+            text = a.text
+        req = {"v": 1, "op": "command", "id": a.id or uuid.uuid4().hex, "text": text, "wait": a.wait}
+    elif a.op == "status":
+        req = {"v": 1, "op": "status", "id": a.id, "wait": a.wait}
+    else:
+        req = {"v": 1, "op": "cancel", "id": a.id}
+    res = call(req, req.get("wait", 0))
+    print(json.dumps(res, ensure_ascii=False, indent=2))
+    state = res.get("state")
+    sys.exit(0 if state in ("completed", "answered") else 1 if state in FINAL else 2)
+
+
+if __name__ == "__main__":
+    main()

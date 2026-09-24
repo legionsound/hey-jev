@@ -24,7 +24,7 @@ One engine inside the running app. Voice and `jevctl` both hand it text; it plan
     "effect": "open",          # policy category, see Confirmation
     "resolve": resolve_app,    # args -> ("target", {...}) | ("choices", [...]) | ("none", reason). Deterministic.
     "run": run_app_open,       # (target, deadline) -> None. Raises on definite failure.
-    "verify": verify_app_open, # (target, deadline) -> ("done" | "wait" | "failed", facts). Polled until deadline.
+    "verify": verify_app_open, # (target, deadline) -> ("done" | "wait" | "failed" | "unverified", facts). Polled until deadline.
     "proves": "a running app with the resolved bundle id and path",
     "timeout": 10,
 }
@@ -37,7 +37,7 @@ One engine inside the running app. Voice and `jevctl` both hand it text; it plan
 | State | Meaning |
 | --- | --- |
 | `completed` | `verify` returned `done`. The only success. |
-| `unverified` | `run` returned; no `verify` exists for this action. Not success. |
+| `unverified` | `run` returned, and either no `verify` exists or `verify` returned `unverified` (a readback that cannot prove the effect, such as a redirect). Not success. |
 | `unknown` | Deadline hit or process died after dispatch. May or may not have happened. |
 | `failed` | `run` raised a definite error, or `verify` returned `failed`. Carries `error` code and facts. |
 | `unsupported` | No action fits the clause. |
@@ -45,11 +45,11 @@ One engine inside the running app. Voice and `jevctl` both hand it text; it plan
 | `declined` | Ask-first action cancelled or not confirmed within 60 s. |
 | `skipped` | An earlier step did not complete. |
 
-Every step carries `action`, `state`, `target`, `facts`, `detail`. The worker stops at the first step that is not `completed`, including `unverified`; the rest are `skipped`.
+Every step carries `index`, `clause`, `action`, `state`, `target`, `facts`, `detail`. While a request runs, steps may show `not_started`, `running` or `awaiting_confirmation`; none of these is terminal. The worker stops at the first step that is not `completed`, including `unverified`; the rest are `skipped`.
 
 ## Request outcome
 
-`queued`, `running` (in progress, not success), then one terminal state: `completed`, `partial`, `failed`, `unverified`, `unknown`, `unsupported`, `needs_clarification`, `declined`, `cancelled`, `expired` (queued over 30 s), `busy` (queue or ledger full, never queued).
+`queued`, `running` (in progress, not success), then one terminal state: `completed`, `answered` (no action: a scripted reply or a spoken answer, carried in `reply` or `say`), `partial`, `failed`, `unverified`, `unknown`, `unsupported`, `needs_clarification`, `declined`, `cancelled`, `expired` (queued over 30 s), `busy` (queue or ledger full, never queued).
 
 - `partial`: at least one step `completed`, then a stop. `stopped_state` carries the exact state of the stopping step.
 - Single-step or first-step stops use that step's state as the request state.
@@ -87,9 +87,9 @@ Each action has an `effect` category: `open`, `navigate`, `media`, `volume`, `di
 
 ## Verification per adapter
 
-- `app.open`: `open -b <bundle id>` (path when duplicates exist), then poll running apps for that bundle id and path.
-- `url.open` (Safari, Chrome), after milestone 1: open a new tab via AppleScript and remember that tab. Poll that tab's URL. `done` only when the observed URL equals the requested URL after exactly two normalizations: host lowercased, and an empty path treated as `/`. Scheme, host (including `www.`), path, query (order and repeats kept) and fragment must otherwise match. A user who says a bare domain gets `https://` added before the request is made, so the requested URL is always explicit. Any difference, including redirects, ends `unverified` with the observed URL. Page content and load state are not checked.
-- `url.open` (other browsers): `open -b <browser> <url>`, `unverified` with `{"opened_with": bundle_id}`.
+- `app.open`: `open -a <path>` (bundle id when no path), then poll `lsappinfo` for a running process with that bundle id at that path. No Apple Events needed.
+- `url.open`: the browser is the system handler for the URL (NSWorkspace, bounded helper); lookup failure stops before any effect. Chrome: open a new tab and keep its unique tab id; `done` only when that tab shows the exact URL, `unverified` if the tab closed or shows anything else. Safari exposes no tab id, so it opens a new tab and reports `unverified`. Other browsers: `open -b <browser> <url>`, `unverified`. Comparison rule below.
+- URL comparison: `done` only when the observed URL equals the requested URL after exactly two normalizations: host lowercased, and an empty path treated as `/`. Scheme, host (including `www.`), path, query (order and repeats kept) and fragment must otherwise match. A user who says a bare domain gets `https://` added before the request is made, so the requested URL is always explicit. Any difference, including redirects, ends `unverified` with the observed URL. Page content and load state are not checked.
 - Volume, Spotify volume, dark mode, media: read the value back after setting it.
 - `app.quit`: poll until the bundle id is no longer running.
 - Lock, sleep: `unverified`.
@@ -103,5 +103,8 @@ Socket `~/Library/Application Support/Hey Jev/run/jev.sock`; directory mode 0700
 `siri.py` speaks from the final result, naming the failed step when there is one. Exception: mute, lock and sleep speak a short "about to" line before running, because speech cannot follow them. That line never claims completion.
 
 ## Milestone 1
+
+Implemented 2026-09-24. `url.open` is registered too.
+
 
 Engine, planner, bridge, `jevctl`, and `app.open` resolved through the current eight-app table mapped to bundle ids. All other current actions move to the registry with their readbacks. The confirmation popover and the per-category setting ship in milestone 1 too, so voice lock, sleep and quit keep working under the default policy. Tests: offline engine and ledger checks, including a false-success case, plus existing provider tests. Johnny runs the live trial.

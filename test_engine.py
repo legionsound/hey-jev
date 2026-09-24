@@ -1,0 +1,300 @@
+"""Offline engine, planner, bridge and speech checks. No audio device, network or real native effects."""
+import json
+import os
+import socket
+import tempfile
+import threading
+import time
+import unittest
+from unittest.mock import patch
+
+import bridge
+import engine
+import planner
+from actions import Failed, Timeout
+
+
+def fake_plan(text, classify, can_answer=False):
+    """'a; b' -> two steps running fake actions a and b."""
+    return ("steps", [{"clause": c.strip(), "action": c.strip(), "args": {"n": i}} for i, c in enumerate(text.split(";"))])
+
+
+class Calls:
+    def __init__(self):
+        self.runs = []
+
+
+def act(calls, name, verify="done", run_exc=None, resolve=None, effect="open", timeout=1):
+    def run(t, deadline):
+        calls.runs.append(name)
+        if run_exc:
+            raise run_exc
+    def ver(t, deadline):
+        return verify if isinstance(verify, tuple) else (verify, {"seen": name})
+    return {"effect": effect, "resolve": resolve or (lambda a: ("target", {"app": name})), "run": run,
+            "verify": None if verify is None else ver, "proves": "test", "timeout": timeout}
+
+
+def make(actions, policy=None, ask=None):
+    return engine.Engine(classify=None, policy=lambda: policy or {"open": "auto", "quit": "ask"}, ask=ask, actions=actions)
+
+
+@patch.object(engine.planner, "plan", fake_plan)
+class EngineTests(unittest.TestCase):
+    def run_one(self, eng, text, rid=None):
+        return eng.wait(eng.submit(text, "cli", rid)["id"], 5)
+
+    def test_completed_only_with_readback(self):
+        c = Calls()
+        r = self.run_one(make({"ok": act(c, "ok")}), "ok")
+        self.assertEqual(r["state"], "completed")
+        self.assertEqual(r["steps"][0]["facts"], {"seen": "ok"})
+
+    def test_dispatch_without_readback_is_not_success(self):
+        c = Calls()
+        eng = make({"slow": act(c, "slow", verify="wait", timeout=0.5), "bad": act(c, "bad", verify="failed"),
+                    "blind": act(c, "blind", verify=None)})
+        self.assertEqual(self.run_one(eng, "slow")["state"], "unknown")
+        self.assertEqual(self.run_one(eng, "bad")["state"], "failed")
+        self.assertEqual(self.run_one(eng, "blind")["state"], "unverified")
+
+    def test_unverified_and_unknown_stop_the_sequence(self):
+        c = Calls()
+        eng = make({"blind": act(c, "blind", verify=None), "ok": act(c, "ok"), "hang": act(c, "hang", run_exc=Timeout("x"))})
+        r = self.run_one(eng, "ok; blind; ok")
+        self.assertEqual((r["state"], r["stopped_state"]), ("partial", "unverified"))
+        self.assertEqual(r["uncertain_step"], {"index": 1, "state": "unverified"})
+        self.assertEqual(r["not_started"], ["ok"])
+        self.assertEqual([s["state"] for s in r["steps"]], ["completed", "unverified", "skipped"])
+        r = self.run_one(eng, "hang; ok")
+        self.assertEqual((r["state"], r["uncertain_step"]["state"]), ("unknown", "unknown"))
+        self.assertEqual(c.runs, ["ok", "blind", "hang"])
+
+    def test_order_and_duplicates_kept(self):
+        c = Calls()
+        self.run_one(make({"a": act(c, "a"), "b": act(c, "b")}), "a; b; a")
+        self.assertEqual(c.runs, ["a", "b", "a"])
+
+    def test_definite_failure_and_partial(self):
+        c = Calls()
+        eng = make({"ok": act(c, "ok"), "boom": act(c, "boom", run_exc=Failed("no"))})
+        r = self.run_one(eng, "ok; boom; ok")
+        self.assertEqual((r["state"], r["stopped_state"]), ("partial", "failed"))
+        self.assertNotIn("uncertain_step", r)
+
+    def test_repeated_id_never_reruns(self):
+        c = Calls()
+        eng = make({"ok": act(c, "ok")})
+        self.run_one(eng, "ok", "same")
+        again = self.run_one(eng, "ok", "same")
+        self.assertEqual((again["state"], c.runs), ("completed", ["ok"]))
+        self.assertEqual(eng.submit("other", "cli", "same")["state"], "id_conflict")
+        self.assertEqual(eng.status("never-seen")["state"], "unknown_outcome")
+
+    def test_expired_results_keep_replay_protection(self):
+        c = Calls()
+        eng = make({"ok": act(c, "ok")})
+        self.run_one(eng, "ok", "old")
+        eng.ledger["old"]["done_at"] -= engine.RESULT_TTL + 1
+        eng._forget_results()
+        self.assertEqual(eng.submit("ok", "cli", "old")["state"], "completed")
+        self.assertEqual(c.runs, ["ok"])
+
+    def test_ledger_full_rejects_new_ids(self):
+        c = Calls()
+        eng = make({"ok": act(c, "ok")})
+        with patch.object(engine, "LEDGER_MAX", 1):
+            self.run_one(eng, "ok", "one")
+            self.assertEqual(eng.submit("ok", "cli", "two")["detail"], "ledger_full")
+            self.assertEqual(eng.submit("ok", "cli", "one")["state"], "completed")
+
+    def test_queue_full_is_busy(self):
+        gate = threading.Event()
+        eng = make({"block": act(Calls(), "block", resolve=lambda a: gate.wait(5) and ("target", {}))})
+        eng.submit("block", "cli", "first")
+        time.sleep(0.1)
+        for i in range(engine.QUEUE_MAX):
+            eng.submit("block", "cli", f"q{i}")
+        self.assertEqual(eng.submit("block", "cli", "over")["detail"], "queue_full")
+        self.assertEqual(eng.cancel("q0")["state"], "cancelled")
+        gate.set()
+
+    def test_ambiguous_target_runs_nothing(self):
+        c = Calls()
+        eng = make({"two": act(c, "two", resolve=lambda a: ("choices", [{"name": "A"}, {"name": "B"}])), "ok": act(c, "ok")})
+        r = self.run_one(eng, "ok; two; ok")
+        self.assertEqual((r["state"], r["stopped_state"]), ("partial", "needs_clarification"))
+        self.assertEqual(r["not_started"], ["ok"])
+        self.assertEqual(c.runs, ["ok"])
+
+
+@patch.object(engine.planner, "plan", fake_plan)
+class ConfirmTests(unittest.TestCase):
+    def setUp(self):
+        self.shown = []
+        self.c = Calls()
+
+    def ask(self, pending):
+        self.shown.append(pending)
+
+    def eng(self, resolve=None):
+        return make({"q": act(self.c, "q", effect="quit", resolve=resolve)}, ask=self.ask)
+
+    def wait_for_popover(self):
+        for _ in range(100):
+            if self.shown and self.shown[-1]:
+                return self.shown[-1]
+            time.sleep(0.02)
+        self.fail("no pop-down")
+
+    def test_confirm_runs(self):
+        eng = self.eng()
+        rid = eng.submit("q", "cli")["id"]
+        self.assertTrue(eng.decide(self.wait_for_popover()["token"], True))
+        self.assertEqual(eng.wait(rid, 5)["state"], "completed")
+        self.assertEqual(self.c.runs, ["q"])
+
+    def test_cancel_beats_late_confirm(self):
+        eng = self.eng()
+        rid = eng.submit("q", "cli")["id"]
+        token = self.wait_for_popover()["token"]
+        eng.cancel(rid)
+        self.assertFalse(eng.decide(token, True))
+        self.assertEqual(eng.wait(rid, 5)["state"], "cancelled")
+        self.assertEqual(self.c.runs, [])
+        self.assertIsNone(self.shown[-1])  # pop-down closed
+
+    def test_decline_and_timeout(self):
+        eng = self.eng()
+        rid = eng.submit("q", "cli")["id"]
+        eng.decide(self.wait_for_popover()["token"], False)
+        self.assertEqual(eng.wait(rid, 5)["state"], "declined")
+        with patch.object(engine, "CONFIRM_TTL", 0.1):
+            rid = eng.submit("q", "cli")["id"]
+            r = eng.wait(rid, 5)
+        self.assertEqual((r["state"], r["steps"][0]["detail"]), ("declined", "timed_out"))
+        self.assertEqual(self.c.runs, [])
+
+    def test_target_revalidated_after_confirm(self):
+        names = iter(["first", "second"])
+        eng = self.eng(resolve=lambda a: ("target", {"app": next(names)}))
+        rid = eng.submit("q", "cli")["id"]
+        eng.decide(self.wait_for_popover()["token"], True)
+        r = eng.wait(rid, 5)
+        self.assertEqual((r["state"], r["steps"][0]["detail"]), ("failed", "target_changed"))
+        self.assertEqual(self.c.runs, [])
+
+    def test_no_ui_declines(self):
+        eng = make({"q": act(self.c, "q", effect="quit")})
+        r = eng.wait(eng.submit("q", "cli")["id"], 5)
+        self.assertEqual((r["state"], r["steps"][0]["detail"]), ("declined", "no_confirmation_ui"))
+
+    def test_source_does_not_change_policy(self):
+        eng = self.eng()
+        rid = eng.submit("q", "voice")["id"]
+        self.wait_for_popover()
+        eng.cancel(rid)
+        self.assertEqual(eng.wait(rid, 5)["state"], "cancelled")
+        self.assertEqual(self.c.runs, [])
+
+
+class PlannerTests(unittest.TestCase):
+    def test_split_keeps_order_quotes_and_urls(self):
+        self.assertEqual(planner.split_clauses("open Safari, then go to https://a.com/x?y=1, and pause"),
+                         ["open Safari", "go to https://a.com/x?y=1", "pause"])
+        self.assertEqual(planner.split_clauses("play rock and roll"), ["play rock and roll"])
+        self.assertEqual(planner.split_clauses('open "this then that"'), ['open "this then that"'])
+        self.assertEqual(planner.split_clauses("open Notes then open Notes"), ["open Notes", "open Notes"])
+
+    def test_compound_that_does_not_split_asks(self):
+        ans = {"category": ("mac_command", 0.9), "target": ("app", 0.9), "compound": (True, 0.9),
+               "app_action": ("open", 0.9)}
+        self.assertEqual(planner.plan("open Safari and Notes", lambda _: ans), ("clarify", "compound_unsplit"))
+
+    def test_app_and_url_spans(self):
+        self.assertEqual(planner.app_name("please open up the DaVinci Resolve app"), "DaVinci Resolve")
+        self.assertEqual(planner.url_span("go to google.com."), "google.com")
+        self.assertEqual(planner.plan("a then b then c then d then e then f", lambda _: {}), ("clarify", "too_many_steps"))
+
+
+class SpeechTests(unittest.TestCase):
+    def setUp(self):
+        import siri
+        self.siri = siri
+
+    def step(self, state, action="app.open", **kw):
+        return {"index": 0, "clause": "x", "action": action, "state": state, "target": {"name": "Safari"},
+                "facts": kw.get("facts", {}), "detail": None}
+
+    def test_only_completed_sounds_like_success(self):
+        ok = set(self.siri.REPLIES["app.open"]) | set(self.siri.REPLIES["compound_done"])
+        for state in ("unknown", "unverified", "failed", "declined"):
+            line = self.siri.line_for({"state": state, "steps": [self.step(state)]})
+            self.assertNotIn(line, {l.format(app="Safari") for l in ok}, state)
+        self.assertIn("Safari", self.siri.line_for({"state": "completed", "steps": [self.step("completed")]}))
+
+    def test_partial_names_the_stop(self):
+        r = {"state": "partial", "steps": [self.step("completed"), dict(self.step("failed"), index=1)]}
+        self.assertTrue(self.siri.line_for(r).startswith("Did the first part"))
+
+    def test_choices_are_read_out(self):
+        s = self.step("needs_clarification", facts={"choices": [{"name": "Live", "path": "/Applications/Live.app"},
+                                                                 {"name": "Live", "path": "/Applications/Old/Live.app"}]})
+        self.assertIn("Which one", self.siri.line_for({"state": "needs_clarification", "steps": [s]}))
+
+
+class BridgeTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.eng = unittest.mock.Mock()
+        self.eng.submit.return_value = {"state": "queued"}
+        self.eng.wait.return_value = {"state": "completed"}
+        self.eng.status.return_value = {"state": "running"}
+        self.b = bridge.Bridge(self.eng, run_dir=os.path.join(self.tmp, "run"))
+
+    def tearDown(self):
+        self.b.stop()
+
+    def test_validation(self):
+        h = lambda obj: self.b.handle(json.dumps(obj).encode())
+        self.assertEqual(h({"v": 2, "op": "command", "id": "a", "text": "x"})["detail"], "bad_version")
+        self.assertEqual(h({"v": 1, "op": "command", "id": "a", "text": "x", "confirmed": True})["detail"], "bad_op_or_field")
+        self.assertEqual(h({"v": 1, "op": "command", "id": "a", "text": "x", "source": "voice"})["detail"], "bad_op_or_field")
+        self.assertEqual(h({"v": 1, "op": "run", "id": "a"})["detail"], "bad_op_or_field")
+        self.assertEqual(h({"v": 1, "op": "command", "id": "", "text": "x"})["detail"], "bad_id")
+        self.assertEqual(self.b.handle(b"\xff")["detail"], "not_json")
+        self.assertEqual(h({"v": 1, "op": "command", "id": "a", "text": "open x", "wait": 3})["state"], "completed")
+        self.eng.submit.assert_called_with("open x", "cli", "a")
+
+    def test_socket_permissions_lock_and_roundtrip(self):
+        self.b.start()
+        self.assertEqual(os.stat(self.b.run_dir).st_mode & 0o777, 0o700)
+        self.assertEqual(os.stat(self.b.sock_path).st_mode & 0o777, 0o600)
+        with self.assertRaises(RuntimeError):
+            bridge.Bridge(self.eng, run_dir=self.b.run_dir).start()  # second instance refused
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.connect(self.b.sock_path)
+        self.assertEqual(bridge.peer_uid(s), os.getuid())
+        s.sendall(json.dumps({"v": 1, "op": "status", "id": "a"}).encode() + b"\n")
+        self.assertEqual(json.loads(s.recv(65536))["state"], "running")
+        s.close()
+
+    def test_oversized_request_rejected(self):
+        self.b.start()
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.connect(self.b.sock_path)
+        s.sendall(b"x" * (bridge.MAX_REQUEST + 10))
+        self.assertEqual(json.loads(s.recv(65536))["detail"], "request_too_large")
+        s.close()
+
+    def test_stale_socket_replaced_only_under_lock(self):
+        os.makedirs(self.b.run_dir, mode=0o700)
+        stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        stale.bind(self.b.sock_path)
+        stale.close()
+        self.b.start()  # lock held, stale socket replaced
+        self.assertTrue(os.path.exists(self.b.sock_path))
+
+
+if __name__ == "__main__":
+    unittest.main()

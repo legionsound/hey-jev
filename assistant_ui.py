@@ -1,4 +1,5 @@
 """Native status, menu bar controls and separate provider/model settings."""
+import os
 import queue
 import sys
 import threading
@@ -469,6 +470,7 @@ class AppDelegate(NSObject):
             NSMakeRect(0, 0, PANE_W, PANE_H + FOOTER_H),
             NSWindowStyleMaskTitled | NSWindowStyleMaskClosable, NSBackingStoreBuffered, False)
         sheet.setReleasedWhenClosed_(False)
+        sheet.setDelegate_(self)  # the close button discards like Cancel, see windowWillClose_
         sheet.setToolbarStyle_(2)  # NSWindowToolbarStylePreference: icon tabs, like System Settings panes
         content = sheet.contentView()
         tabs = NSTabView.alloc().initWithFrame_(NSMakeRect(0, FOOTER_H, PANE_W, PANE_H))
@@ -511,7 +513,9 @@ class AppDelegate(NSObject):
         y = form_group(p, y, "Deeper answers", [("Provider", self.answer_provider),
                                                 ("OpenRouter key", key_field("OPENROUTER_API_KEY"))])
         y = form_group(p, y, "Voice", [("Fish Audio key", key_field("FISH_AUDIO_API_KEY"))])
-        footnote(p, y, "Keys are stored in your Keychain. Leave a field empty to keep the saved key.")
+        from_env = [k for k in KEY_NAMES if os.getenv(k)]
+        footnote(p, y, "Keys are stored in your Keychain. Leave a field empty to keep the saved key."
+                 + (" A .env file is overriding: " + ", ".join(from_env) + "." if from_env else ""))
         self._sync_key_rows()
 
         # Deeper answers: model, then the advanced request controls.
@@ -525,7 +529,7 @@ class AppDelegate(NSObject):
         self.model_search.setDelegate_(self)
         self.model_popup = self._popup(None, [], NSMakeRect(0, 0, CONTROL_W, 24), "modelChanged:")
         self.refresh_button = NSButton.buttonWithTitle_target_action_("Refresh", self, "refreshModels:")
-        self.catalog_message = text("Saved model works offline. Refresh to load the catalog.", NSMakeRect(0, 0, CONTROL_W, 16),
+        self.catalog_message = text("Saved model selection available without refreshing.", NSMakeRect(0, 0, CONTROL_W, 16),
                                     11, NSColor.secondaryLabelColor())
         self.model_info = text("", NSMakeRect(0, 0, CONTROL_W, 16), 11, NSColor.secondaryLabelColor())
         y = form_group(a, 20, "Model", [("Search", self.model_search), ("Model", self.model_popup),
@@ -544,7 +548,8 @@ class AppDelegate(NSObject):
             self.parameter_fields[key] = field
             rows.append((title, field))
         y = form_group(a, y + 28, "Advanced", rows, row_h=32)
-        footnote(a, y, "Empty fields use the provider's defaults. Reasoning models may need a higher token limit.")
+        footnote(a, y, "Empty fields use Hey Jev's defaults (80 tokens for answers, 120 for reminders, minimal "
+                       "reasoning where supported) and the provider's for the rest.")
 
         # Confirmations: one row per kind of action.
         c = panes["confirm"]
@@ -728,11 +733,21 @@ class AppDelegate(NSObject):
             parent.addSubview_(popup)
         return popup
 
+    def windowWillClose_(self, notification):
+        if notification.object() is getattr(self, "settings_sheet", None):
+            self._discard_settings()
+
+    @objc.python_method
+    def _discard_settings(self):
+        """Unsaved edits are dropped and any model fetch in flight is ignored when it lands."""
+        self.fetch_generation += 1
+        self.settings_sheet = None
+
     def closeSettings_(self, _sender):
-        if getattr(self, "settings_sheet", None):
-            self.fetch_generation += 1
-            self.settings_sheet.orderOut_(None)
-            self.settings_sheet = None
+        sheet = getattr(self, "settings_sheet", None)
+        if sheet:
+            self._discard_settings()
+            sheet.orderOut_(None)  # hides without windowWillClose_, so no second discard
 
     @objc.python_method
     def _parameter_values(self):
@@ -772,7 +787,7 @@ class AppDelegate(NSObject):
     def refreshModels_(self, _sender):
         key = self.key_fields["OPENROUTER_API_KEY"].stringValue().strip() or get_secret("OPENROUTER_API_KEY")
         if not key:
-            self.catalog_message.setStringValue_("Enter an answer key in Providers & keys, then refresh.")
+            self.catalog_message.setStringValue_("Enter an OpenRouter key in Providers, then refresh.")
             return
         self.fetch_generation += 1
         generation = self.fetch_generation

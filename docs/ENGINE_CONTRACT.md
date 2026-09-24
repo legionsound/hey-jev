@@ -88,7 +88,7 @@ Each action has an `effect` category: `open`, `navigate`, `media`, `volume`, `di
 ## Verification per adapter
 
 - `app.open`: `open -b <bundle id>` (path when duplicates exist), then poll running apps for that bundle id and path.
-- `url.open` (Safari, Chrome), after milestone 1: open a new tab via AppleScript and remember that tab. Poll that tab's URL. `done` only on an exact match after normalizing: lowercase host with one leading `www.` ignored, http and https treated alike, one trailing slash ignored, same path, same query parameters as a set, fragment ignored. Anything else, including redirects, ends `unverified` with the observed URL. Page content and load state are not checked.
+- `url.open` (Safari, Chrome), after milestone 1: open a new tab via AppleScript and remember that tab. Poll that tab's URL. `done` only when the observed URL equals the requested URL after exactly two normalizations: host lowercased, and an empty path treated as `/`. Scheme, host (including `www.`), path, query (order and repeats kept) and fragment must otherwise match. A user who says a bare domain gets `https://` added before the request is made, so the requested URL is always explicit. Any difference, including redirects, ends `unverified` with the observed URL. Page content and load state are not checked.
 - `url.open` (other browsers): `open -b <browser> <url>`, `unverified` with `{"opened_with": bundle_id}`.
 - Volume, Spotify volume, dark mode, media: read the value back after setting it.
 - `app.quit`: poll until the bundle id is no longer running.

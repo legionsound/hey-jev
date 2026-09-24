@@ -180,3 +180,20 @@ def save_wake_settings(phrase, aliases):
     phrase, aliases = wake.validate(phrase), [wake.validate(a) for a in aliases]
     PREFS.setObject_forKey_(json.dumps({"phrase": phrase, "aliases": aliases}), "wake_phrase")
     return phrase, aliases
+
+
+TIEBREAK_DEFAULT, TIEBREAK_MIN, TIEBREAK_MAX = 85, 50, 100
+
+
+def tiebreak_threshold():
+    """Jev score (50-100) needed to pick between duplicate apps on its own. 100 means always ask."""
+    try:
+        v = int(PREFS.integerForKey_("tiebreak_threshold")) if PREFS.objectForKey_("tiebreak_threshold") is not None \
+            else TIEBREAK_DEFAULT
+    except (TypeError, ValueError):
+        v = TIEBREAK_DEFAULT
+    return max(TIEBREAK_MIN, min(TIEBREAK_MAX, v))
+
+
+def save_tiebreak_threshold(value):
+    PREFS.setInteger_forKey_(max(TIEBREAK_MIN, min(TIEBREAK_MAX, int(round(value)))), "tiebreak_threshold")

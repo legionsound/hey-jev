@@ -47,10 +47,10 @@ from AppKit import (
 from AppKit import NSPopover, NSViewController
 from Foundation import NSObject, NSTimer, NSUserDefaults
 from actions import EFFECT_LABELS, EFFECTS
-from model_settings import (PREFS, PARAMETERS, answer_settings, cached_models, confirm_policy, fetch_models,
-                            save_answer_settings, save_confirm_policy, save_transcription_backend,
-                            transcription_backend, validate_parameters, BACKENDS, save_wake_settings,
-                            wake_settings)
+from model_settings import (PREFS, PARAMETERS, TIEBREAK_MAX, TIEBREAK_MIN, answer_settings, cached_models, confirm_policy,
+                            fetch_models, save_answer_settings, save_confirm_policy, save_tiebreak_threshold,
+                            save_transcription_backend, tiebreak_threshold, transcription_backend, validate_parameters,
+                            BACKENDS, save_wake_settings, wake_settings)
 import voice_output
 from secrets_store import KEY_NAMES, get_secret, get_setting, missing_secrets, save_secret
 
@@ -570,6 +570,22 @@ class AppDelegate(NSObject):
             rows.append((EFFECT_LABELS[effect], popup))
         y = form_group(c, 20, "Ask before doing", rows, row_h=34)
         footnote(c, y, "Applies to voice and typed commands. Ask first shows a pop-down from the menu bar.")
+        tie_cell = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, CONTROL_W, 24))
+        slider = NSSlider.alloc().initWithFrame_(NSMakeRect(0, 0, CONTROL_W - 90, 24))
+        slider.setMinValue_(TIEBREAK_MIN)
+        slider.setMaxValue_(TIEBREAK_MAX)
+        slider.setDoubleValue_(tiebreak_threshold())
+        slider.setTarget_(self)
+        slider.setAction_("tiebreakChanged:")
+        slider.setAccessibilityLabel_("Jev score needed to pick between duplicate apps")
+        self.tiebreak_slider = slider
+        self.tiebreak_value = text("", NSMakeRect(CONTROL_W - 84, 4, 84, 17), 13, NSColor.secondaryLabelColor())
+        self.tiebreak_value.setAlignment_(2)
+        for view in (slider, self.tiebreak_value):
+            tie_cell.addSubview_(view)
+        self.tiebreakChanged_(slider)
+        y = form_group(c, y + 28, "Duplicate apps", [("Pick on its own at", tie_cell)], row_h=34)
+        footnote(c, y, "A Jev score, not a guarantee. Below it, Jev asks which one. Quitting always asks.")
 
         # Transcription: backend and its state, then the transcript-only microphone test.
         h = panes["transcription"]
@@ -745,6 +761,10 @@ class AppDelegate(NSObject):
             self.test_result.setStringValue_(line)
         self.test_result.setToolTip_(self.test_result.stringValue())  # long results and errors stay readable
 
+    def tiebreakChanged_(self, sender):
+        v = int(round(sender.doubleValue()))
+        self.tiebreak_value.setStringValue_("Always ask" if v >= TIEBREAK_MAX else f"{v}")
+
     @objc.python_method
     def _popup(self, parent, titles, frame, action=None):
         popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(frame, False)
@@ -806,6 +826,7 @@ class AppDelegate(NSObject):
             from siri import STT
             if self.worker_started and (STT["backend"] != backend or STT["blocked"]):
                 self.controls.put(("transcription", backend))  # live switch through the control queue
+            save_tiebreak_threshold(self.tiebreak_slider.doubleValue())
             from siri import reload_keys
             reload_keys()
             warn = wake.short_warning(phrase)

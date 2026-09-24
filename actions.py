@@ -89,6 +89,28 @@ def running_paths(bundle_id, deadline):
     return [p for p, _ in running(bundle_id, deadline)]
 
 
+def last_opened(path, deadline):
+    """Spotlight's last-used date for an app bundle, or None."""
+    try:
+        out = sh(["mdls", "-raw", "-name", "kMDItemLastUsedDate", path], deadline)
+    except (Failed, Timeout):
+        return None
+    return None if not out or out == "(null)" else out[:10]
+
+
+def app_hints(choices, deadline):
+    """Facts Jev can use to break a tie: where each copy lives, whether it runs now, when it was last opened."""
+    hints = []
+    for c in choices:
+        try:
+            running_now = c.get("path") in running_paths(c["bundle_id"], deadline)
+        except (Failed, Timeout):
+            running_now = None
+        hints.append({"name": c.get("name"), "folder": os.path.dirname(c.get("path") or ""),
+                      "running": running_now, "last_opened": last_opened(c.get("path") or "", deadline)})
+    return hints
+
+
 def run_app_open(t, deadline):
     sh(["open", "-a", t["path"]] if t.get("path") else ["open", "-b", t["bundle_id"]], deadline, effect=True)
 

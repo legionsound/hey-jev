@@ -37,10 +37,14 @@ def _same_target(a, b):
 
 
 class Engine:
-    def __init__(self, classify, policy=lambda: DEFAULT_POLICY, ask=None, answer=None, on_event=None, actions=ACTIONS):
+    def __init__(self, classify, policy=lambda: DEFAULT_POLICY, ask=None, answer=None, on_event=None, actions=ACTIONS,
+                 tiebreak=None, threshold=lambda: 0.85):
         """classify(clause) -> Jev answers. ask(pending) shows the pop-down (None: no UI, Ask-first steps decline).
-        answer(text) -> spoken answer, or None when deeper answers are off. on_event(kind, record, step)."""
+        answer(text) -> spoken answer, or None when deeper answers are off. on_event(kind, record, step).
+        tiebreak(clause, choices) -> (index, score 0..1) or None: Jev's pick among duplicate targets, used only when
+        the score reaches threshold(). It is a model score, not a correctness guarantee; quitting a pick always asks."""
         self.classify, self.policy, self.ask, self.answer = classify, policy, ask, answer
+        self.tiebreak, self.threshold = tiebreak, threshold
         self.on_event = on_event or (lambda *a: None)
         self.actions = actions
         self.instance = uuid.uuid4().hex[:12]
@@ -256,19 +260,28 @@ class Engine:
                            target=got[1] if got[0] == "target" else None,
                            choices=[c.get("path") or c.get("name") for c in got[1]] if got[0] == "choices" else None,
                            reason=got[1] if got[0] == "none" else None)
+        picked = None
         if got[0] == "choices":
-            self._set(step, state="needs_clarification", facts={"choices": got[1]})
-            return "needs_clarification"
+            t = time.monotonic()
+            picked, facts = self._break_tie(step, got[1])
+            diagnostics.record(rec["id"], "tiebreak", "picked" if picked else "asked", (time.monotonic() - t) * 1000,
+                               step=step["index"], picked=picked.get("path") if picked else None, **facts)
+            if picked is None:
+                self._set(step, state="needs_clarification", facts={"choices": got[1], **facts})
+                return "needs_clarification"
+            got = ("target", picked)
+            self._set(step, facts=facts)
         if got[0] == "none":
             self._set(step, state="failed", detail=got[1], facts={"error": "not_found"})
             return "failed"
         target = got[1]
         self._set(step, target=target)
-        if self.policy().get(action["effect"], "ask") == "ask":
+        forced = picked is not None and action["effect"] == "quit"  # a guessed quit target always asks
+        if forced or self.policy().get(action["effect"], "ask") == "ask":
             t = time.monotonic()
             verdict = self._confirm(rec, step, target)
             diagnostics.record(rec["id"], "confirm", verdict, (time.monotonic() - t) * 1000, step=step["index"],
-                               prompt=describe(step["action"], target))
+                               prompt=describe(step["action"], target), forced=forced)
             if verdict != "confirmed":
                 self._set(step, state="declined" if verdict != "cancelled" else "skipped", detail=verdict)
                 return "declined" if verdict != "cancelled" else "cancelled"
@@ -276,7 +289,9 @@ class Engine:
                 again = action["resolve"](args)
             except Exception:
                 again = ("none", None)
-            if again[0] != "target" or not _same_target(again[1], target):
+            still = again[0] == "target" and _same_target(again[1], target) or \
+                picked is not None and again[0] == "choices" and any(_same_target(c, target) for c in again[1])
+            if not still:
                 self._set(step, state="failed", detail="target_changed")
                 return "failed"
         with self.lock:  # dispatch boundary: a cancel that lands before this line stops the step, after it cannot
@@ -322,6 +337,27 @@ class Engine:
                 self._set(step, state="unknown", facts=facts, detail="no readback before deadline")
                 return "unknown"
             time.sleep(POLL)
+
+    def _break_tie(self, step, choices):
+        """-> (chosen target, facts) or (None, facts). Anything malformed or failing keeps the choices explicit."""
+        if not self.tiebreak:
+            return None, {}
+        try:
+            need = float(self.threshold())
+            if not 0 <= need <= 1:  # Always ask (inf) or a bad setting: never consult the model
+                return None, {"tiebreak": {"skipped": "always_ask"}}
+            got = self.tiebreak(step["clause"], choices)
+            if not isinstance(got, tuple) or len(got) != 2:
+                raise ValueError(f"malformed pick {got!r}")
+            i, score = got
+            if isinstance(i, bool) or not isinstance(i, int) or not 0 <= i < len(choices):
+                raise ValueError(f"bad index {i!r}")
+            if isinstance(score, bool) or not isinstance(score, (int, float)) or not 0 <= score <= 1:
+                raise ValueError(f"bad score {score!r}")  # NaN and infinity fail the range check too
+        except Exception as exc:
+            return None, {"tiebreak": {"error": str(exc) or type(exc).__name__}}
+        facts = {"tiebreak": {"score": round(float(score), 3), "threshold": need}}
+        return (dict(choices[i]) if score >= need else None), facts
 
     def _confirm(self, rec, step, target):
         if not self.ask:

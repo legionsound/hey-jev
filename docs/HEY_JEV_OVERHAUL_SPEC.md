@@ -117,3 +117,7 @@ Pending. Record built, tested and unverified outcomes separately before handoff.
 SwiftUI is easier to maintain for a larger native utility, not a technical prerequisite for a BetterDisplay-style experience. A full Swift engine rewrite is not recommended without evidence that Python startup, distribution or runtime costs dominate. The proposed local bridge is useful now and can inform a future engine boundary, but must not grow into a speculative framework in this overhaul.
 
 Apple references: https://developer.apple.com/documentation/appkit/nsstatusitem ; https://developer.apple.com/documentation/appkit/nspopover ; https://developer.apple.com/documentation/swiftui/menubarextra ; https://developer.apple.com/documentation/swiftui/settings .
+
+## Discussion checkpoint: implementation paused
+
+Johnny requested an architecture/capability rundown before further major coding. See [COMMAND_ARCHITECTURE.md](COMMAND_ARCHITECTURE.md) for the exact speech-to-action path, command mechanisms, current failure behavior, theoretical reach, recipe/registry proposal and human-testing sequence. Expanded Safari/typing/bridge implementation has not started. Original-scope UI/model/playback edits are uncommitted and only compile/provider checks have run; they are not yet a verified usable build. Continue only after Johnny has discussed the rundown. Prefer small increments with Johnny as the primary end-to-end tester and minimal necessary automated checks.

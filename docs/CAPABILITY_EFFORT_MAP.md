@@ -1,6 +1,6 @@
 # Deterministic Mac control: capability and effort map
 
-Discussion draft, 2026-09-24. **Implementation remains paused.** This is a design/effort estimate, not a claim that these controls are built. See [COMMAND_ARCHITECTURE.md](COMMAND_ARCHITECTURE.md) for current code paths and [HEY_JEV_OVERHAUL_SPEC.md](HEY_JEV_OVERHAUL_SPEC.md) for the complete brief.
+Discussion draft, 2026-09-24; implementation has since resumed. This is a design/effort estimate, not a claim that these controls are built: see the checkpoint in COMMAND_ARCHITECTURE.md and ENGINE_CONTRACT.md for what exists. See [COMMAND_ARCHITECTURE.md](COMMAND_ARCHITECTURE.md) for current code paths and [HEY_JEV_OVERHAUL_SPEC.md](HEY_JEV_OVERHAUL_SPEC.md) for the complete brief.
 
 ## Recommendation
 

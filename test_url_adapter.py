@@ -73,11 +73,17 @@ class TestCompare(unittest.TestCase):
         ok, _ = ua.urls_equal("https://example.com/", "http://example.com/")
         self.assertFalse(ok)
 
-    def test_www_ignored_either_direction(self):
+    def test_www_only_for_canonical_hosts(self):
+        ok, _ = ua.urls_equal("https://www.youtube.com/", "https://youtube.com/")
+        self.assertTrue(ok)
+        ok, _ = ua.urls_equal("https://google.com/", "https://www.google.com/")
+        self.assertTrue(ok)
+
+    def test_www_not_equal_for_other_hosts(self):
         ok, _ = ua.urls_equal("https://example.com/", "https://www.example.com/")
-        self.assertTrue(ok)
-        ok, _ = ua.urls_equal("https://www.example.com/", "https://example.com/")
-        self.assertTrue(ok)
+        self.assertFalse(ok)
+        ok, _ = ua.urls_equal("https://example.test/", "https://www.example.test/")
+        self.assertFalse(ok)
 
     def test_youtube_www_redirect_now_matches(self):
         ok, _ = ua.urls_equal("https://youtube.com/", "https://www.youtube.com/")
@@ -185,6 +191,19 @@ class TestRunVerify(unittest.TestCase):
             st, facts = ua.verify_url_open(t, time.time() + 5, _run=run)
             self.assertEqual(st, "wait", observed)
             self.assertIn("not loaded", facts["reason"])
+            self.assertEqual(facts["requested"], "https://www.google.com/")
+
+    def test_chrome_strange_url_unverified_not_wait(self):
+        for observed in ("OK:chrome://settings/\n", "OK:not a url at all\n",
+                         "OK:ftp://example.test/f\n"):
+            run = Mock(return_value=_ok(observed))
+            t = {"url": "https://www.google.com/",
+                 "opened_with": "com.google.Chrome",
+                 "tab": "com.google.Chrome#ABC123"}
+            st, facts = ua.verify_url_open(t, time.time() + 5, _run=run)
+            self.assertEqual(st, "unverified", observed)
+            self.assertEqual(facts["requested"], "https://www.google.com/")
+            self.assertIn("observed", facts)
 
     def test_chrome_www_redirect_now_done(self):
         run = Mock(return_value=_ok("OK:https://www.youtube.com/\n"))

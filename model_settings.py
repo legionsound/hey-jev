@@ -197,3 +197,33 @@ def tiebreak_threshold():
 
 def save_tiebreak_threshold(value):
     PREFS.setInteger_forKey_(max(TIEBREAK_MIN, min(TIEBREAK_MAX, int(round(value)))), "tiebreak_threshold")
+
+
+def advanced_open():
+    """Whether Settings shows the Advanced answer parameters expanded. Collapsed by default."""
+    return bool(PREFS.boolForKey_("settings_advanced_open"))
+
+
+def save_advanced_open(value):
+    PREFS.setBool_forKey_(bool(value), "settings_advanced_open")
+
+
+DEFAULT_VOICE = {"id": "9a9cf47702da476aa4629e2506d4a857", "title": "Hey Jev voice"}
+VOICE_ID_RE = re.compile(r"[A-Za-z0-9_-]{8,64}")
+
+
+def voice():
+    """-> {"id", "title"} of the Fish Audio voice Jev speaks with. Invalid storage falls back to the default."""
+    try:
+        saved = json.loads(PREFS.stringForKey_("fish_voice") or "{}")
+        if VOICE_ID_RE.fullmatch(saved["id"]) and isinstance(saved.get("title"), str):
+            return {"id": saved["id"], "title": saved["title"][:80] or saved["id"]}
+    except (ValueError, KeyError, TypeError):
+        pass
+    return dict(DEFAULT_VOICE)
+
+
+def save_voice(voice_id, title):
+    if not isinstance(voice_id, str) or not VOICE_ID_RE.fullmatch(voice_id):
+        raise ValueError("That voice ID isn't valid.")
+    PREFS.setObject_forKey_(json.dumps({"id": voice_id, "title": str(title)[:80]}), "fish_voice")

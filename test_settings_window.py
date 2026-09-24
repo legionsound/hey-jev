@@ -56,6 +56,8 @@ class SettingsShortPhraseTests(unittest.TestCase):
                  patch.object(assistant_ui, "save_answer_settings"), \
                  patch.object(assistant_ui, "save_confirm_policy"), \
                  patch.object(assistant_ui, "save_transcription_backend"), \
+                 patch.object(assistant_ui, "save_tiebreak_threshold"), \
+                 patch.object(assistant_ui, "save_voice"), \
                  patch.object(assistant_ui, "wake_settings", return_value=("Hey Jev", [])), \
                  patch.object(siri, "reload_keys"), \
                  patch.object(assistant_ui.AppDelegate, "_start_worker") as start:

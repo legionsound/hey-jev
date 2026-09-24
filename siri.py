@@ -10,6 +10,7 @@ import wake
 from model_settings import (answer_payload, answer_settings, confirm_policy, tiebreak_threshold, transcription_backend,
                             wake_settings)
 import diagnostics
+import model_settings
 import planner
 import timers
 import voice_output
@@ -22,7 +23,6 @@ FISH_KEY = get_secret("FISH_AUDIO_API_KEY")
 OR_KEY = get_secret("OPENROUTER_API_KEY")
 JEV_PROVIDER = get_setting("JEV_PROVIDER")
 ANSWER_PROVIDER = get_setting("ANSWER_PROVIDER")
-VOICE_ID = "9a9cf47702da476aa4629e2506d4a857"
 SAMPLE_RATE = 16000
 WHISPER_MODEL = "small.en"
 COMMAND_PROMPT = "Open Spotify. Set a timer for five minutes. Play. Pause. Next track. Turn Spotify down. Turn the Mac volume down. Mute. Dark mode on. Lock the screen."
@@ -45,14 +45,20 @@ def reload_keys():
 
 
 # --------------------------------------------------------------------------- Jev
-def jev(text, questions=None):
+def jev_route(provider):
+    """-> (url, model) for a Jev source."""
+    if provider == "openrouter":
+        return "https://openrouter.ai/api/alpha/decisions", "typesafe/jev-1.13"
+    return "https://api.typesafe.ai/v1/systemone", "jev-latest"
+
+
+def jev(text, questions=None, *, provider=None, key=None, timeout=30):
     t = time.time()
-    if JEV_PROVIDER == "openrouter":
-        url, model, key = "https://openrouter.ai/api/alpha/decisions", "typesafe/jev-1.13", JEV_OR_KEY
-    else:
-        url, model, key = "https://api.typesafe.ai/v1/systemone", "jev-latest", TS_KEY
+    provider = provider or JEV_PROVIDER
+    url, model = jev_route(provider)
+    key = key or (JEV_OR_KEY if provider == "openrouter" else TS_KEY)
     r = requests.post(url, json={"model": model, "state": text, "questions": questions or planner.QUESTIONS},
-                      headers={"Authorization": f"Bearer {key}"}, timeout=30, allow_redirects=False)
+                      headers={"Authorization": f"Bearer {key}"}, timeout=timeout, allow_redirects=False)
     r.raise_for_status()
     j = r.json()
     ans = {}
@@ -65,6 +71,32 @@ def jev(text, questions=None):
             ans[k] = (a["choice"], a.get("confidence", 0))
     cost = j.get("usage", {}).get("input_tokens", 0) * 0.042 / 1e6
     return ans, int((time.time() - t) * 1000), cost
+
+
+CHECK_QUESTION = {"greeting": {"type": "noul", "instructions": "Is this a greeting?"}}
+
+
+def check_jev(provider, key):
+    """Settings' deliberate connection check: one tiny classify call. -> ms. Raises ValueError in plain words;
+    the message never contains the key or the response body."""
+    if not key:
+        raise ValueError("No key entered for this source.")
+    host = jev_route(provider)[0].split("/")[2]
+    try:
+        ans, ms, _cost = jev("hello", CHECK_QUESTION, provider=provider, key=key, timeout=10)
+    except requests.HTTPError as exc:
+        code = exc.response.status_code if exc.response is not None else 0
+        raise ValueError({401: "The key was rejected.", 403: "The key isn't allowed to use Jev.",
+                          429: "Rate limited. Try again in a minute."}.get(code, f"{host} answered HTTP {code}.")) from None
+    except requests.Timeout:
+        raise ValueError(f"No answer from {host} within 10 seconds.") from None
+    except requests.ConnectionError:
+        raise ValueError(f"Can't reach {host}. Check the connection.") from None
+    except (ValueError, KeyError, TypeError):
+        raise ValueError(f"{host} answered, but not in Jev's format.") from None
+    if "greeting" not in ans:
+        raise ValueError(f"{host} answered, but not in Jev's format.")
+    return ms
 
 
 TIEBREAK_MAX_CHOICES = 6
@@ -333,18 +365,54 @@ def ask_llm(text):
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache", "tts")
 
 
-def fetch_tts(text):
-    """Return a wav path for this line, generating it once and caching on disk. Returns (path, ms, cached)."""
+def fetch_tts(text, key=None, voice_id=None):
+    """Return a wav path for this line, generating it once and caching on disk. Returns (path, ms, cached).
+    The voice is the saved one from Settings unless a sample asks for another."""
+    voice_id = voice_id or model_settings.voice()["id"]
     os.makedirs(CACHE_DIR, exist_ok=True)
-    path = os.path.join(CACHE_DIR, hashlib.sha1(f"{VOICE_ID}|{text}".encode()).hexdigest() + ".wav")
+    path = os.path.join(CACHE_DIR, hashlib.sha1(f"{voice_id}|{text}".encode()).hexdigest() + ".wav")
     if os.path.exists(path):
         return path, 0, True
     t = time.time()
-    r = requests.post("https://api.fish.audio/v1/tts", headers={"Authorization": f"Bearer {FISH_KEY}", "model": "s2.1-pro-free"},
-                      json={"text": text, "reference_id": VOICE_ID, "format": "wav"}, timeout=60, allow_redirects=False)
+    r = requests.post("https://api.fish.audio/v1/tts", headers={"Authorization": f"Bearer {key or FISH_KEY}", "model": "s2.1-pro-free"},
+                      json={"text": text, "reference_id": voice_id, "format": "wav"}, timeout=60, allow_redirects=False)
     r.raise_for_status()
     open(path, "wb").write(r.content)
     return path, int((time.time() - t) * 1000), False
+
+
+FISH_API = "https://api.fish.audio"
+
+
+def fish_voices(key, query=""):
+    """Voices for Settings' picker: the user's own when the query is empty, else public voices whose title
+    matches. -> [{"id", "title", "author"}]. Raises ValueError in plain words, never echoing the key."""
+    if not key:
+        raise ValueError("Enter a Fish Audio key first.")
+    params = {"page_size": 30, "sort_by": "score"}
+    if query.strip():
+        params["title"] = query.strip()[:60]
+    else:
+        params["self"] = "true"
+    try:
+        r = requests.get(f"{FISH_API}/model", params=params, headers={"Authorization": f"Bearer {key}"},
+                         timeout=10, allow_redirects=False)
+    except requests.Timeout:
+        raise ValueError("Fish Audio didn't answer within 10 seconds.") from None
+    except requests.ConnectionError:
+        raise ValueError("Can't reach Fish Audio. Check the connection.") from None
+    if r.status_code in (401, 403):
+        raise ValueError("Fish Audio rejected the key.")
+    if r.status_code != 200:
+        raise ValueError(f"Fish Audio answered HTTP {r.status_code}.")
+    try:
+        items = r.json()["items"]
+        return [{"id": m["_id"], "title": str(m.get("title") or m["_id"])[:80],
+                 "author": str((m.get("author") or {}).get("nickname") or "")[:40]}
+                for m in items if isinstance(m, dict) and m.get("type", "tts") == "tts"
+                and m.get("state", "trained") == "trained" and model_settings.VOICE_ID_RE.fullmatch(str(m.get("_id")))]
+    except (ValueError, KeyError, TypeError):
+        raise ValueError("Fish Audio answered, but not with a voice list.") from None
 
 
 def speak(text):

@@ -30,6 +30,13 @@ def configure(*, gain=None, mute=None):
                 _sound.stop()
 
 
+def stop():
+    """Stop whatever is playing now; play() then returns."""
+    with _lock:
+        if _sound:
+            _sound.stop()
+
+
 def play(path):
     global _sound
     with _play_lock:

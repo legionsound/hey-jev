@@ -2,7 +2,7 @@
 
 Voice and `jevctl` both submit text to one engine (engine.py); this file owns the microphone, transcription and speech.
 """
-import os, re, sys, json, time, queue, random, argparse, subprocess, threading, hashlib, collections, contextlib
+import datetime, os, re, sys, json, time, queue, random, argparse, subprocess, threading, hashlib, collections, contextlib
 import requests
 from dotenv import load_dotenv
 from secrets_store import get_secret, get_setting, missing_secrets
@@ -300,12 +300,19 @@ def timer_done_line(t):
 
 
 # --------------------------------------------------------------------------- LLM answers (questions only)
+def now_line():
+    """The Mac's local date and time, so "what time is it" has an answer. Read fresh for every question."""
+    now = datetime.datetime.now().astimezone()
+    return f"It is now {now.strftime('%A, %B %-d, %Y, %-I:%M %p')} ({now.tzname()}) on the user's Mac."
+
+
 def ask_llm(text):
     t = time.time()
     r = requests.post("https://openrouter.ai/api/v1/chat/completions",
                       headers={"Authorization": f"Bearer {OR_KEY}"},
                       json=answer_payload([{"role": "system", "content": "You are a voice assistant. Answer in one short spoken sentence, no markdown. "
-                                          "You may start with exactly one tag from: [chuckling] [laughing] [sighing] [cheerful], or none."},
+                                          "You may start with exactly one tag from: [chuckling] [laughing] [sighing] [cheerful], or none. "
+                                          + now_line()},
                                          {"role": "user", "content": text}]), timeout=30, allow_redirects=False)
     r.raise_for_status()
     j = r.json()

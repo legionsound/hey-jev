@@ -1,6 +1,6 @@
 # Hey Jev: what it controls, and how to grow it
 
-Status: discussion checkpoint, 2026-09-24. Major implementation is paused at Johnny's request. This document describes the actual source, then proposals. It does not claim the proposed capabilities exist.
+Status: updated 2026-09-24 (evening). Written as a discussion checkpoint while implementation was paused; implementation has since resumed and most of the core is built. [ENGINE_CONTRACT.md](ENGINE_CONTRACT.md) is the authoritative description of what exists; sections below marked *proposed* may now be implemented differently. See "Current implementation checkpoint" for the up-to-date list.
 
 ## The short answer
 
@@ -149,7 +149,7 @@ Serialize commands through one dispatcher, coordinating existing timer/state loc
 
 Use a small Python standard-library Unix domain stream socket server **inside the existing app process**, plus a tiny `jevctl` CLI. This is the selected architecture. A loopback HTTP service adds port/token lifecycle without helping the first local caller; an MCP adapter may later wrap this exact client if needed, but is not part of the first slice. Do not introduce another daemon or model runtime.
 
-The CLI accepts a `command` subcommand with `--text` or `--text-file` (UTF-8, `-` for stdin), plus `--request-id` and a bounded wait option. Codex can use its current `exec_command` tool to run the installed client by absolute path, passing a text-file path when quoting arbitrary text would be awkward. Pass subprocess arguments as arrays when calling from Python. Never construct executable shell/AppleScript from the request text. ChatGPT needs an equivalent authorized local execution tool; the socket is not accessible from a cloud-only chat by itself.
+The CLI accepts a `command` subcommand with `--text` or `--text-file` (UTF-8, `-` for stdin), plus `--id` and a bounded `--wait` option. Codex can use its current `exec_command` tool to run the installed client by absolute path, passing a text-file path when quoting arbitrary text would be awkward. Pass subprocess arguments as arrays when calling from Python. Never construct executable shell/AppleScript from the request text. ChatGPT needs an equivalent authorized local execution tool; the socket is not accessible from a cloud-only chat by itself.
 
 Use one UTF-8 JSON object followed by newline per request/response, protocol version `1`, no streaming protocol in the first slice. Proposed request:
 
@@ -205,17 +205,17 @@ Decision for this discussion: is Safari navigation plus a Google-search recipe t
 
 ## Current implementation checkpoint
 
-- Committed spec: `HEY_JEV_OVERHAUL_SPEC.md`, with native-versus-SwiftUI architecture comparison. Documentation commits: `7a7e7ee`, `09f530c`.
-- Uncommitted original-scope edits: `assistant_ui.py`, `siri.py`, new `model_settings.py`, new `voice_output.py`. These cover native controls, model catalog/settings, shared answer payloads and listening/playback handling.
-- Checks completed: Python compilation for edited modules; three existing provider tests passed; live read-only OpenRouter catalog and single-model requests returned HTTP 200.
-- Not yet checked: actual new UI launch/pixels, live voice gain/mute, new parameter/recording behavior. These edits are **not ready for user acceptance** and have not replaced the running process.
-- Expanded Safari, typing, registry and local bridge implementations: **not started**.
-- No keys changed, no upstream PR opened. Major implementation paused for Johnny's discussion.
+Updated 2026-09-24 (evening). The earlier checkpoint here (uncommitted edits, bridge not started, implementation paused) is superseded.
+
+- Built: one serial engine for voice and CLI (`engine.py`), the local socket bridge and `jevctl` (`bridge.py`, `jevctl`), the action registry with a readback for every action (`actions.py`), the Jev planner (`planner.py`), app discovery (`app_catalog.py`), Chrome/Safari URL opening (`url_adapter.py`), timers and reminders, confirmation pop-down and per-category setting, Settings panes (Providers, Answers, Confirmations, Transcription), Apple on-device dictation, a custom wake phrase, and diagnostics (`~/Library/Logs/Hey Jev/requests.jsonl`).
+- In review: explicit browser intent ("in Safari"), short wake phrases, duplicate-app slider, screen control stage 1 (list and press on-screen controls, see ENGINE_CONTRACT.md), Settings closure items, discovery sources.
+- Not built yet: typing text, browser tabs, Shortcuts, files/windows, named recipes, Safari readback.
+- `jevctl` flags as built: `command --text | --text-file [--id ID] [--wait S]`, `status ID [--wait S]`, `cancel ID`. The request id flag is `--id`, not `--request-id`.
 
 
 ## Proposed core: fixed Jev questions, dynamic arguments
 
-This section supersedes any earlier suggestion of generative command planning for the current scope. Johnny wants broad deterministic Mac voice control through **Jev classification plus a Python harness**. Arbitrary cursor movement and visual clicking are outside the core. The design below is proposed, not implemented.
+This section supersedes any earlier suggestion of generative command planning for the current scope. Johnny wants broad deterministic Mac voice control through **Jev classification plus a Python harness**. Arbitrary cursor movement and visual clicking were outside the core here; Johnny amended that on 2026-09-24 (see the amendment at the top of HEY_JEV_OVERHAUL_SPEC.md). The design below was proposed before implementation.
 
 ### Open any installed app without a list of app choices in Jev
 

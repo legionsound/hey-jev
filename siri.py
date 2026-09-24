@@ -51,7 +51,7 @@ def jev(text, questions=None):
     else:
         url, model, key = "https://api.typesafe.ai/v1/systemone", "jev-latest", TS_KEY
     r = requests.post(url, json={"model": model, "state": text, "questions": questions or planner.QUESTIONS},
-                      headers={"Authorization": f"Bearer {key}"}, timeout=30)
+                      headers={"Authorization": f"Bearer {key}"}, timeout=30, allow_redirects=False)
     r.raise_for_status()
     j = r.json()
     ans = {}
@@ -267,7 +267,7 @@ def fetch_tts(text):
         return path, 0, True
     t = time.time()
     r = requests.post("https://api.fish.audio/v1/tts", headers={"Authorization": f"Bearer {FISH_KEY}", "model": "s2.1-pro-free"},
-                      json={"text": text, "reference_id": VOICE_ID, "format": "wav"}, timeout=60)
+                      json={"text": text, "reference_id": VOICE_ID, "format": "wav"}, timeout=60, allow_redirects=False)
     r.raise_for_status()
     open(path, "wb").write(r.content)
     return path, int((time.time() - t) * 1000), False

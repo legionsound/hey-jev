@@ -42,5 +42,29 @@ class SettingsCloseTests(unittest.TestCase):
             d.closeSettings_(None)
 
 
+class SettingsShortPhraseTests(unittest.TestCase):
+    def test_short_phrase_first_setup_warns_and_starts_worker(self):
+        import siri
+        with patch.object(assistant_ui.AppDelegate, "refreshModels_", lambda self, s: None):
+            d = assistant_ui.AppDelegate.alloc().init()
+            d.catalog, d.fetch_generation, d.worker_started, d.controls = [], 0, False, None
+            d._show_settings()
+            d.wake_field.setStringValue_("Hi")
+            with patch.object(assistant_ui, "get_secret", return_value="stored"), \
+                 patch.object(assistant_ui, "save_secret"), \
+                 patch.object(assistant_ui, "save_wake_settings"), \
+                 patch.object(assistant_ui, "save_answer_settings"), \
+                 patch.object(assistant_ui, "save_confirm_policy"), \
+                 patch.object(assistant_ui, "save_transcription_backend"), \
+                 patch.object(assistant_ui, "wake_settings", return_value=("Hey Jev", [])), \
+                 patch.object(siri, "reload_keys"), \
+                 patch.object(assistant_ui.AppDelegate, "_start_worker") as start:
+                d.saveSettings_(None)
+            self.assertEqual(start.call_count, 1)
+            self.assertEqual(d.settings_message.stringValue(),
+                             "Short phrases can wake Hey Jev by accident.")
+            d.closeSettings_(None)
+
+
 if __name__ == "__main__":
     unittest.main()

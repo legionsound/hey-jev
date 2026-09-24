@@ -255,6 +255,27 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(planner.plan("go to google.com in Firefox", lambda _: ans_for()),
                          ("clarify", "unsupported_browser"))
 
+    def test_browser_qualifier_shape_not_blacklist(self):
+        def ans_for(target="website"):
+            return {"category": ("mac_command", 0.9), "target": (target, 0.9),
+                    "compound": (False, 0.9), "app_action": ("open", 0.9)}
+        safari = "com.apple.Safari"
+        chrome = "org.google.Chrome"
+        # unlisted browser names clarify too, with zero navigation
+        self.assertEqual(planner.plan("go to example.com in DuckDuckGo", lambda _: ans_for()),
+                         ("clarify", "unsupported_browser"))
+        # URL paths and prose stay safe
+        kind, got = planner.plan("go to example.com/in-depth", lambda _: ans_for())
+        self.assertEqual((kind, got[0]["args"].get("url")), ("steps", "example.com/in-depth"))
+        self.assertNotIn("browser", got[0]["args"])
+        self.assertEqual(planner.browser_qualifier("search in page"), ("search in page", None, None))
+        # two-word name and grammar guard
+        kind, got = planner.plan("go to google.com in Google Chrome", lambda _: ans_for())
+        self.assertEqual(got[0]["args"].get("browser"), chrome)
+        kind, got = planner.plan("log in to google.com", lambda _: ans_for())
+        self.assertEqual(kind, "steps")
+        self.assertNotIn("browser", got[0]["args"])
+
 
 class SpeechTests(unittest.TestCase):
     def setUp(self):

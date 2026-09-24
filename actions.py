@@ -409,7 +409,15 @@ def verify_url(t, deadline):
 
 
 def resolve_url(args):
-    return url_adapter.resolve_url(args.get("url", ""))
+    kind, got = url_adapter.resolve_url(args.get("url", ""))
+    if kind != "target":
+        return kind, got
+    browser = args.get("browser")
+    if browser is None:
+        return kind, got
+    if browser in url_adapter.SUPPORTED_BROWSERS:
+        return ("target", {**got, "browser": browser})
+    return ("none", "unsupported browser")
 
 
 # --------------------------------------------------------------------------- registry

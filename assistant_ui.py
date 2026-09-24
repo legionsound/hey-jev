@@ -809,11 +809,10 @@ class AppDelegate(NSObject):
             from siri import reload_keys
             reload_keys()
             warn = wake.short_warning(phrase)
-            if warn:
-                self.settings_message.setStringValue_(warn)  # saved and live; stays open so the warning is seen
-                return
             self.closeSettings_(None)
             self._start_worker()
+            if warn:
+                self.settings_message.setStringValue_(warn)  # startup done; warning kept for the next open
         except Exception as exc:
             self.settings_message.setStringValue_(str(exc))
 

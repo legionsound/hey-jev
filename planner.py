@@ -58,25 +58,43 @@ def split_clauses(text):
 
 URL_SPAN = re.compile(r"\b(?:https?://\S+|(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?(?:[/?#]\S*)?)", re.I)
 
-# Explicit browser choice. Supported names map to bundle ids; named but
-# unsupported browsers clarify with zero navigation; anything else is prose.
-BROWSERS = {"safari": "com.apple.Safari", "chrome": "org.google.Chrome"}
-BROWSER_QUAL = re.compile(r"\bin\s+(safari|chrome|firefox|edge|brave|arc|opera|vivaldi|chromium)\b", re.I)
+# Explicit browser choice. Supported names map to bundle ids; any other
+# trailing "in <Word>" after a URL or site name clarifies with zero
+# navigation, so there is no blacklist to maintain. Anything else is prose.
+BROWSERS = {"safari": "com.apple.Safari", "chrome": "org.google.Chrome",
+            "google chrome": "org.google.Chrome"}
+BROWSER_QUAL = re.compile(r"\bin\s+([A-Za-z][A-Za-z0-9]*)(?:\s+([A-Za-z][A-Za-z0-9]*))?", re.I)
+# Grammar, never a browser name: "log in to google.com" must not clarify.
+QUAL_STOPWORDS = frozenset({"to", "the", "a", "an", "my", "your", "this", "that", "its"})
 
 
 def browser_qualifier(clause):
     """-> (clause without the qualifier, bundle id or None, unsupported name or None).
 
     Only the recognized qualifier is removed, so the URL's path, query
-    and fragment survive untouched."""
+    and fragment survive untouched. A trailing "in <Word>" only counts as
+    a browser choice when the rest still names a URL or site ("search in
+    page", "example.com/in-depth" stay prose)."""
     m = BROWSER_QUAL.search(clause)
     if not m:
         return clause, None, None
-    name = m.group(1).lower()
-    rest = re.sub(r"\s+", " ", (clause[:m.start()] + " " + clause[m.end():])).strip(" ,.")
-    if name in BROWSERS:
-        return rest, BROWSERS[name], None
-    return clause, None, name
+    w1, w2 = m.group(1).lower(), (m.group(2) or "").lower()
+    if w1 in QUAL_STOPWORDS:
+        return clause, None, None
+    if w2 and f"{w1} {w2}" in BROWSERS:
+        name, end = f"{w1} {w2}", m.end()
+    elif w1 in BROWSERS:
+        name, end = w1, m.end(1)
+    else:
+        name, end = (f"{w1} {w2}" if w2 else w1), m.end()
+        rest = re.sub(r"\s+", " ", (clause[:m.start()] + " " + clause[end:])).strip(" ,.")
+        if url_span(rest) or site_url(rest):
+            return clause, None, name
+        return clause, None, None
+    rest = re.sub(r"\s+", " ", (clause[:m.start()] + " " + clause[end:])).strip(" ,.")
+    if not (url_span(rest) or site_url(rest)):
+        return clause, None, None
+    return rest, BROWSERS[name], None
 
 
 def app_browser(name):

@@ -91,6 +91,33 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(planner.url_span("go to example.com?mode=edit#section"), "example.com?mode=edit#section")
         self.assertEqual(planner.url_span("go to example.com/a?b=1."), "example.com/a?b=1")
 
+    def test_explicit_browser_reaches_execution(self):
+        """Real planner -> real resolve_url -> real run_url; only dispatch is mocked."""
+        seen = {}
+
+        def fake_open(target, deadline, _run=None, _default_browser_fn=None):
+            seen.update(target)
+            return None
+
+        def boom(*a, **k):
+            raise AssertionError("default lookup must not run with explicit intent")
+
+        eng = engine.Engine(classify=lambda c: answers(target=("website", 0.9)),
+                            policy=lambda: {"navigate": "auto"},
+                            actions={"url.open": actions.ACTIONS["url.open"]})
+        with patch.object(actions.url_adapter, "run_url_open", side_effect=fake_open), \
+             patch.object(actions.url_adapter, "default_browser_for_url", side_effect=boom):
+            r = eng.wait(eng.submit("go to google.com in Safari", "cli")["id"], 5)
+        self.assertEqual(seen.get("browser"), "com.apple.Safari")
+        self.assertEqual(seen.get("url"), "https://google.com")
+        self.assertEqual(r["steps"][0]["action"], "url.open")
+
+    def test_resolve_url_validates_browser(self):
+        kind, got = actions.resolve_url({"url": "google.com", "browser": "com.apple.Safari"})
+        self.assertEqual((kind, got["browser"]), ("target", "com.apple.Safari"))
+        self.assertEqual(actions.resolve_url({"url": "google.com", "browser": "org.mozilla.firefox"}),
+                         ("none", "unsupported browser"))
+
 
 class EffectUncertaintyTests(unittest.TestCase):
     def test_native_effect_error_is_uncertain_read_error_is_failed(self):

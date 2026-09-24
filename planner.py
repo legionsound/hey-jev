@@ -136,9 +136,6 @@ def site_url(clause):
     return url_adapter.site_for_name(m[1].strip(" .,!?")) or "" if m else ""
 
 
-    return {"label": said} if said else None
-
-
 PRESS_SPAN = re.compile(r"\b(?:click|press|tap|hit|choose|select|pick)\s+(?:on\s+)?(?:the\s+)?(.+?)"
                         r"(?:\s+(?:button|menu|link|tab|item|checkbox|option|icon|toggle))?(?:\s+(?:please|for me|now))*[\s.!?]*$",
                         re.I)
@@ -165,36 +162,33 @@ def press_args(clause):
 # is data: it is never re-parsed as a URL, site or command, and "search for
 # rock and roll" keeps the whole phrase (bare "and" never splits).
 SEARCH_SPAN = re.compile(r"^\s*(?:search\s+google\s+for|search\s+for|google)\s+(.+?)\s*$", re.I)
-# Trailing browser intent, mirroring browser_qualifier's doctrine: any
-# trailing "in <Word>" (optionally "my/the/your", a second word like
-# "Google Chrome", "browser(s)", and a polite tail) names a browser, so
-# there is no blacklist to maintain. Quoted words stay query text.
+# Trailing browser intent, mirroring browser_qualifier's doctrine: a trailing
+# "in <name>" names a browser, so there is no blacklist to maintain. The
+# complete name is validated: recognized filler ("my/the/your", a trailing
+# "browser(s)") and a polite tail are stripped, but an unrecognized suffix
+# is never silently dropped into the query — it clarifies. Quoted words
+# stay query text.
 SEARCH_TRAIL = re.compile(
-    r"\s+in\s+(?:(?:my|the|your)\s+)?([A-Za-z][A-Za-z0-9]*)(?:\s+([A-Za-z][A-Za-z0-9]*))?"
-    r"(?:\s+browsers?)?(?:\s+(?:please|for me|now))*\s*$", re.I)
+    r"\s+in\s+(?:(?:my|the|your)\s+)?(.+?)(?:\s+(?:please|for me|now))*\s*$", re.I)
+SEARCH_BROWSER_FILLER = re.compile(r"\s+browsers?\s*$", re.I)
 
 
 def search_query(clause):
     """-> (query, browser bid or None, unsupported name or None), or None when not a search.
 
     Once the query starts its text is literal: no politeness or punctuation
-    is stripped. A trailing unquoted "in <Word>" names a browser (known or
+    is stripped. A trailing unquoted "in <name>" names a browser (known or
     not); quoted browser words stay data."""
     bid, unsupported, rest = None, None, clause
     for m in reversed(list(SEARCH_TRAIL.finditer(clause))):
         if clause[:m.start()].count('"') % 2:
             continue  # inside quoted query text: literal
-        w1, w2 = m.group(1).lower(), (m.group(2) or "").lower()
-        if w1 in QUAL_STOPWORDS:
+        name = SEARCH_BROWSER_FILLER.sub("", m[1]).strip()
+        if not name or name.split()[0].lower() in QUAL_STOPWORDS:
             continue
-        if w2 in ("browser", "browsers"):
-            w2 = ""
-        if w2 and f"{w1} {w2}" in BROWSERS:
-            name = f"{w1} {w2}"
-        else:
-            name = w1
-        bid = BROWSERS.get(name)
-        unsupported = None if bid else name
+        key = re.sub(r"\s+", " ", name).lower()
+        bid = BROWSERS.get(key)
+        unsupported = None if bid else key
         rest = clause[:m.start()]
         break
     m = SEARCH_SPAN.match(rest)

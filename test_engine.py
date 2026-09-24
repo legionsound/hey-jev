@@ -333,6 +333,15 @@ class PlannerTests(unittest.TestCase):
                          ("clarify", "unsupported_browser"))
         self.assertEqual(planner.plan("search google for cats in Firefox", lambda _: ans_for()),
                          ("clarify", "unsupported_browser"))
+        # the complete trailing name is validated: no silent suffix drop
+        self.assertEqual(planner.plan("google cats in Chrome Canary", lambda _: ans_for()),
+                         ("clarify", "unsupported_browser"))
+        self.assertEqual(planner.plan("google cats in Safari Technology Preview", lambda _: ans_for()),
+                         ("clarify", "unsupported_browser"))
+        # multi-word supported name still works, with filler and polite tail
+        kind, got = planner.plan("search google for cats in Google Chrome please", lambda _: ans_for())
+        self.assertEqual(got[0]["args"]["url"], "https://www.google.com/search?q=cats")
+        self.assertEqual(got[0]["args"].get("browser"), "org.google.Chrome")
         self.assertEqual(planner.plan("google", lambda _: ans_for()),
                          ("clarify", "no_action"))
         self.assertEqual(planner.search_query("search google for"), None)

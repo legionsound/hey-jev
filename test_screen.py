@@ -476,5 +476,27 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual((verdict, facts["unread"]), ("unverified", ["AXExpanded", "AXSelected", "AXValue", "exists"]))
 
 
+class PermissionTests(unittest.TestCase):
+    def test_missing_accessibility_prompts_once_per_run_and_says_where(self):
+        import siri
+        prompts = []
+
+        class NoAX:
+            kAXTrustedCheckOptionPrompt = "prompt"
+
+            def AXIsProcessTrusted(self):
+                return False
+
+            def AXIsProcessTrustedWithOptions(self, opts):
+                prompts.append(opts)
+        with patch.object(screen, "_AS", lambda: NoAX()), patch.object(screen, "_asked", set()):
+            self.assertFalse(screen.trusted())
+            self.assertFalse(screen.trusted())
+        self.assertEqual(prompts, [{"prompt": True}])
+        v = {"state": "failed", "steps": [{"action": "screen.list", "state": "failed", "facts": {}, "clause": "c",
+                                           "detail": "can't read the screen: accessibility_permission"}]}
+        self.assertIn("Accessibility", siri.line_for(v))
+
+
 if __name__ == "__main__":
     unittest.main()

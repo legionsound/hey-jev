@@ -276,8 +276,18 @@ def _actions(element):
 
 
 
+_asked = set()  # permissions whose macOS prompt was already shown this run
+
+
 def trusted():
-    return bool(_AS().AXIsProcessTrusted())
+    """Accessibility permission. The first time it's missing in a run, macOS shows its own prompt, once."""
+    AS = _AS()
+    if AS.AXIsProcessTrusted():
+        return True
+    if "ax" not in _asked:
+        _asked.add("ax")
+        AS.AXIsProcessTrustedWithOptions({AS.kAXTrustedCheckOptionPrompt: True})
+    return False
 
 
 def frontmost():
@@ -353,6 +363,9 @@ def read_text(pid, frame, deadline):
     """[(text, confidence, (x, y, w, h) screen points)] for one window. Raises Unavailable."""
     import Quartz
     if not Quartz.CGPreflightScreenCaptureAccess():
+        if "screen" not in _asked:
+            _asked.add("screen")
+            Quartz.CGRequestScreenCaptureAccess()  # macOS's own prompt, once per run; text reading waits for it
         raise Unavailable("no_permission")
     wid = _cg_window_id(pid, frame)
     if wid is None:

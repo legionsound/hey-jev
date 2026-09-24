@@ -256,6 +256,8 @@ def line_for(result):
         line = say_line(why)
     else:
         line = say_line("failed")
+    if stop and "accessibility_permission" in (stop.get("detail") or ""):
+        line = "I need Accessibility access for that. Turn on Hey Jev in System Settings, Privacy and Security, Accessibility."
     if done:
         line = f"Did the first {'part' if len(done) == 1 else f'{len(done)} parts'}, then: {line}"
     return line

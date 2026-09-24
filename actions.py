@@ -650,8 +650,17 @@ def run_screen_type(t, deadline):
         if (facts["secure"] or not facts["enabled"] or not facts["insertable"] or facts["role"] != t["role"]
                 or facts["frame"] != t["frame"] or facts["window"] != t["window"]):
             raise Failed("that field is no longer there")
-        if screen.focus(ref, deadline) != 0:
-            raise Failed("the field wouldn't take focus")
+    except (screen.Unavailable, screen.TimedOut, screen.Wedged) as exc:
+        raise Failed(f"screen read failed before typing: {exc}")
+    try:  # focusing is itself an effect: once sent, a timeout means it may still land
+        focused = screen.focus(ref, deadline)
+    except screen.Wedged as exc:
+        raise Failed(str(exc))  # refused before sending
+    except screen.TimedOut as exc:
+        raise Uncertain(f"the app did not answer the focus in time ({exc}); nothing was typed")
+    if focused != 0:
+        raise Failed(f"the field wouldn't take focus (AX error {focused})")
+    try:
         before = screen.field_value(ref, deadline)
         rng = screen.selected_range(ref, deadline) if isinstance(before, str) else None
     except (screen.Unavailable, screen.TimedOut, screen.Wedged) as exc:
@@ -747,23 +756,23 @@ def verify_screen_submit(t, deadline):
         return ("unverified", {"why": "no before-state"})
     value, focus, exists = before
     now_exists = screen.element_state(ref, deadline)["exists"]
-    changed = []
+    changed, observed = [], []
     if exists == "yes" and now_exists == "no":
         changed.append("field_gone")
     elif now_exists == "yes":
-        now_focus = screen.focused_field(t["pid"], deadline)
-        if focus is not None and now_focus is not None and now_focus != focus:
-            changed.append("focus_moved")
         now_value = screen.field_value(ref, deadline)
         if isinstance(value, str) and isinstance(now_value, str) and now_value != value:
-            changed.append("text_changed")
+            changed.append("field_text_changed")
+        now_focus = screen.focused_field(t["pid"], deadline)
+        if focus is not None and now_focus is not None and now_focus != focus:
+            observed.append("focus_moved")  # a click elsewhere does this too: recorded, never proof
     if changed:
         _typed.pop(id(t), None)
-        return ("done", {"changed": changed})
+        return ("done", {"changed": changed, "means": "the field changed after Return; not that anything was accepted"})
     if time.monotonic() - at < SETTLE:
         return ("wait", {})
     _typed.pop(id(t), None)
-    return ("unverified", {"delivered": True, "why": "submitted; the field itself did not change"})
+    return ("unverified", {"delivered": True, "observed": observed, "why": "Return was sent; the field itself did not change"})
 
 
 def run_screen_list(t, deadline):
@@ -844,7 +853,7 @@ ACTIONS = {
     "screen.press": entry("click", resolve_screen_press, run_screen_press, verify_screen_press,
                           "the window changed after the press; not that the intended result happened", 6),
     "screen.submit": entry("submit", resolve_screen_submit, run_screen_submit, verify_screen_submit,
-                           "the field went away, lost focus or changed; not that anything was sent", 6),
+                           "the field went away or its text changed; not that anything was sent or accepted", 6),
     "screen.type": entry("type", resolve_screen_type, run_screen_type, verify_screen_type,
                          "the field holds its old text plus exactly the typed text; nothing is submitted", 6),
     "timer.cancel": entry("timer", resolve_timer_cancel, run_timer_cancel, verify_timer_cancel, "the timer left the running list", 2),

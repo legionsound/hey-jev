@@ -156,7 +156,7 @@ REPLIES = {
                     "{count} things in {app}, numbered on screen. Say click and a number."],
     "screen.press": ["Clicked it.", "[cheerful] Done, clicked."],
     "screen.type": ["Typed it.", "[cheerful] Typed."],
-    "screen.submit": ["Submitted.", "Pressed return."],
+    "screen.submit": ["Pressed return.", "Return pressed."],
     "timer.cancel": ["Timer cancelled.", "[sighing] Fine, no timer then."],
     "timers_cancel": ["All timers cancelled.", "Cleared them all."],
     "timer_none": ["[chuckling] There's no timer running."],

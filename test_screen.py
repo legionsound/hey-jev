@@ -579,6 +579,13 @@ class TypeTests(unittest.TestCase):
         v = self.run_type({"text": "there"})
         self.assertEqual((v["state"], self.value["v"]), ("unverified", "Hi there"))
 
+    def test_a_focus_that_times_out_is_unknown_and_nothing_is_typed(self):
+        def late(ref, d):
+            raise screen.TimedOut("focus")
+        with patch.object(screen, "focus", late):
+            v = self.run_type({"text": "x"})
+        self.assertEqual((v["state"], self.inserts), ("unknown", []))
+
     def test_focused_field_when_none_is_named(self):
         self.assertEqual(self.run_type({"text": "x"})["state"], "completed")
 
@@ -656,17 +663,22 @@ class SubmitTests(TypeTests):
             self.assertFalse(planner.SUBMIT_WORDS.match(said), said)
 
     def test_done_only_on_a_change_of_the_field(self):
-        for effect, want in [({"exists": "no"}, ["field_gone"]), ({"focus": object()}, ["focus_moved"])]:
-            self.after, self.effect_after = {}, effect
-            v = self.submit()
-            self.assertEqual((v["state"], v["steps"][0]["facts"]), ("completed", {"changed": want}), effect)
+        self.after, self.effect_after = {}, {"exists": "no"}
+        v = self.submit()
+        self.assertEqual((v["state"], v["steps"][0]["facts"]["changed"]), ("completed", ["field_gone"]))
+        self.assertIn("not that anything was accepted", v["steps"][0]["facts"]["means"])
+
+    def test_focus_moving_alone_proves_nothing(self):
+        self.after, self.effect_after = {}, {"focus": object()}  # the user clicked elsewhere
+        v = self.submit()
+        self.assertEqual((v["state"], v["steps"][0]["facts"]["observed"]), ("unverified", ["focus_moved"]))
         self.after, self.effect_after = {}, {}
         self.value["v"] = "sent text"
         orig = self.do_confirm
         self.do_confirm = lambda ref, d: (orig(ref, d), self.value.update(v=""))[0]
         patch.object(screen, "confirm", self.do_confirm).start()
         v = self.submit()
-        self.assertEqual(v["steps"][0]["facts"], {"changed": ["text_changed"]})
+        self.assertEqual(v["steps"][0]["facts"]["changed"], ["field_text_changed"])
 
     def test_no_field_change_is_unverified(self):
         self.after, self.effect_after = {}, {}

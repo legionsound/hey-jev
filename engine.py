@@ -5,6 +5,7 @@ import threading
 import time
 import uuid
 
+import diagnostics
 import planner
 from actions import ACTIONS, DEFAULT_POLICY, Failed, Timeout, describe
 
@@ -14,6 +15,14 @@ RESULT_TTL = 600.0
 LEDGER_MAX = 10_000
 CONFIRM_TTL = 60.0
 POLL = 0.2
+_local = threading.local()
+
+
+def current_rid():
+    """The request id the calling worker thread is running, for the classifier's diagnostic records."""
+    return getattr(_local, "rid", None)
+
+
 TERMINAL = {"completed", "partial", "failed", "unverified", "unknown", "unsupported", "needs_clarification",
             "declined", "cancelled", "expired", "answered"}
 
@@ -57,6 +66,7 @@ class Engine:
                 return self._error(rid, "busy", "ledger_full")
             if len(self.queue) >= QUEUE_MAX:
                 return self._error(rid, "busy", "queue_full")
+            diagnostics.record(rid, "submit", "queued", source=source, text=text, queue_depth=len(self.queue))
             rec = {"id": rid, "sha": _sha(text), "text": text, "source": source, "state": "queued",
                    "queued_at": time.monotonic(), "done_at": None, "steps": [], "cancel": False}
             self.ledger[rid] = rec
@@ -154,6 +164,7 @@ class Engine:
                 rec["state"] = "running"
                 self.running = rec
                 self._forget_results()
+            _local.rid, started = rec["id"], time.monotonic()
             try:
                 self._run(rec)
             except Exception as exc:  # planner or classifier failure before any step ran
@@ -163,11 +174,20 @@ class Engine:
             finally:
                 with self.lock:
                     self.running = None
-                self._emit("done", self._view(rec), None)
+                v = self._view(rec)
+                diagnostics.record(rec["id"], "done", v["state"], (time.monotonic() - started) * 1000,
+                                   **{k: v[k] for k in ("stopped_state", "uncertain_step", "not_started", "error", "detail")
+                                      if k in v})
+                _local.rid = None
+                self._emit("done", v, None)
 
     def _run(self, rec):
         self._emit("start", self._view(rec), None)
+        t = time.monotonic()
         kind, payload = planner.plan(rec["text"], self.classify, can_answer=self.answer is not None)
+        diagnostics.record(rec["id"], "plan", kind, (time.monotonic() - t) * 1000,
+                           steps=[s["action"] for s in payload] if kind == "steps" else None,
+                           detail=payload if kind != "steps" else None)
         with self.lock:
             if kind == "reply":
                 return self._finish(rec, "answered", reply=payload)
@@ -226,10 +246,16 @@ class Engine:
         if not action:
             self._set(step, state="unsupported")
             return "unsupported"
+        t = time.monotonic()
         try:
             got = action["resolve"](args)
         except Exception as exc:  # nothing dispatched yet
             got = ("none", f"could not resolve: {exc}")
+        diagnostics.record(rec["id"], "resolve", got[0], (time.monotonic() - t) * 1000, step=step["index"],
+                           action=step["action"], args=args,
+                           target=got[1] if got[0] == "target" else None,
+                           choices=[c.get("path") or c.get("name") for c in got[1]] if got[0] == "choices" else None,
+                           reason=got[1] if got[0] == "none" else None)
         if got[0] == "choices":
             self._set(step, state="needs_clarification", facts={"choices": got[1]})
             return "needs_clarification"
@@ -239,7 +265,10 @@ class Engine:
         target = got[1]
         self._set(step, target=target)
         if self.policy().get(action["effect"], "ask") == "ask":
+            t = time.monotonic()
             verdict = self._confirm(rec, step, target)
+            diagnostics.record(rec["id"], "confirm", verdict, (time.monotonic() - t) * 1000, step=step["index"],
+                               prompt=describe(step["action"], target))
             if verdict != "confirmed":
                 self._set(step, state="declined" if verdict != "cancelled" else "skipped", detail=verdict)
                 return "declined" if verdict != "cancelled" else "cancelled"
@@ -256,6 +285,14 @@ class Engine:
                 return "cancelled"
             step["state"] = "running"
         self._emit("step", self._view(rec), dict(step))
+        diagnostics.record(rec["id"], "dispatch", "running", step=step["index"], action=step["action"], target=target)
+        started = time.monotonic()
+        state = self._execute(action, step, target)
+        diagnostics.record(rec["id"], "verify", state, (time.monotonic() - started) * 1000, step=step["index"],
+                           detail=step.get("detail"), facts=step.get("facts"), target=target)
+        return state
+
+    def _execute(self, action, step, target):
         deadline = time.monotonic() + action["timeout"]
         try:
             action["run"](target, deadline)

@@ -7,6 +7,7 @@ import requests
 from dotenv import load_dotenv
 from secrets_store import get_secret, get_setting, missing_secrets
 from model_settings import answer_payload, answer_settings, confirm_policy
+import diagnostics
 import planner
 import timers
 import voice_output
@@ -66,7 +67,14 @@ def jev(text, questions=None):
 
 
 def classify(clause):
-    ans, ms, cost = jev(clause)
+    from engine import current_rid
+    try:
+        ans, ms, cost = jev(clause)
+    except Exception as exc:
+        diagnostics.record(current_rid(), "classify", "error", clause=clause, provider=JEV_PROVIDER, error=repr(exc))
+        raise
+    diagnostics.record(current_rid(), "classify", "ok", ms, clause=clause, provider=JEV_PROVIDER,
+                       answers={k: [v, round(c, 2)] for k, (v, c) in ans.items()})
     print(f"  jev {clause!r}: {ms}ms ${cost:.6f}")
     for k, (v, c) in ans.items():
         print(f"    {k:15} {str(v):22} {c:.2f}{'' if c >= planner.GATE else '  <- below gate'}")
@@ -313,12 +321,24 @@ def make_engine(notify=None, ask=None):
                                               step["action"] == "volume.set" and (step.get("target") or {}).get("level") == "silent"):
                 spoke_first.add(view["id"])
                 key = "volume.mute" if step["action"] == "volume.set" else step["action"]  # "about to", not "done"
-                say(say_line(key) if key in REPLIES else "Okay.", notify)
+                line = say_line(key) if key in REPLIES else "Okay."
+                diagnostics.record(view["id"], "speak", "before_dispatch", line=line)
+                say(line, notify)
         elif kind == "done" and view["source"] == "cli":
             emit(notify, "Ready", f"Typed command: {view['state']}")
 
     def answer(text):
-        return ask_llm(text)
+        from engine import current_rid
+        t, model = time.time(), answer_settings().get("model")
+        try:
+            said = ask_llm(text)
+        except Exception as exc:
+            diagnostics.record(current_rid(), "answer", "error", (time.time() - t) * 1000, provider=ANSWER_PROVIDER,
+                               model=model, error=repr(exc))
+            raise
+        diagnostics.record(current_rid(), "answer", "ok", (time.time() - t) * 1000, provider=ANSWER_PROVIDER,
+                           model=model, said=said)
+        return said
 
     eng = Engine(classify, policy=confirm_policy, ask=ask,
                  answer=answer if ANSWER_PROVIDER == "openrouter" else None, on_event=on_event)
@@ -326,7 +346,7 @@ def make_engine(notify=None, ask=None):
     return eng
 
 
-def turn(eng, text, notify, hold=contextlib.nullcontext):
+def turn(eng, text, notify, hold=contextlib.nullcontext, stt_ms=None):
     """One voice turn: submit, wait, speak from the result. A result that outlives the wait is spoken when it lands,
     inside hold() so it does not talk over the microphone."""
     print(f"\n> heard: {text!r}")
@@ -334,8 +354,10 @@ def turn(eng, text, notify, hold=contextlib.nullcontext):
         emit(notify, "Ready", "Didn't catch anything")
         return
     first = eng.submit(text, "voice")
+    diagnostics.record(first.get("id"), "recognize", first["state"], text=text, stt_ms=stt_ms)
     if first["state"] in ("busy", "id_conflict"):  # never queued: nothing to wait for
         line = say_line("busy")
+        diagnostics.record(first.get("id"), "speak", first["state"], line=line)
         say(line, notify)
         emit(notify, "Ready", line)
         return
@@ -367,6 +389,7 @@ def _deliver(eng, result, notify):
         return
     eng.spoke_first.discard(rid)
     line = line_for(result)
+    diagnostics.record(rid, "speak", result["state"], line=line)
     say(line, notify)
     emit(notify, "Ready", line)
 
@@ -494,6 +517,22 @@ def ready_text(wake):
     return "Say “Hey Jev” and your command" if wake else "Ready when you are"
 
 
+def runtime_facts():
+    """Which code and runtime this is, so a log line can be tied to an exact build. No keys."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    rev = dirty = None
+    try:
+        rev = subprocess.run(["git", "-C", here, "rev-parse", "--short", "HEAD"], capture_output=True, text=True,
+                             timeout=2).stdout.strip() or None
+        dirty = bool(subprocess.run(["git", "-C", here, "status", "--porcelain", "--untracked-files=no"],
+                                    capture_output=True, text=True, timeout=2).stdout.strip())
+    except Exception:
+        pass
+    return {"revision": rev, "dirty": dirty, "source": here, "python": sys.version.split()[0],
+            "executable": sys.executable, "bundle": os.environ.get("RESOURCEPATH"), "jev_provider": JEV_PROVIDER,
+            "answer_provider": ANSWER_PROVIDER, "answer_model": answer_settings().get("model")}
+
+
 def start_bridge(eng, notify):
     """Owning the socket is what makes this the one engine. Any failure stops startup: no second mic or engine."""
     from bridge import Bridge
@@ -512,7 +551,13 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
     global ENGINE, BRIDGE
     from faster_whisper import WhisperModel
     ENGINE = make_engine(notify, ask)
-    bridge = BRIDGE = start_bridge(ENGINE, notify)  # raises before any microphone or voice dispatcher exists
+    diagnostics.init(ENGINE.instance)
+    diagnostics.record(None, "startup", "starting", **runtime_facts())
+    try:
+        bridge = BRIDGE = start_bridge(ENGINE, notify)  # raises before any microphone or voice dispatcher exists
+    except Exception as exc:
+        diagnostics.record(None, "startup", "failed", error=repr(exc))
+        raise
     try:
         print("loading whisper...")
         emit(notify, "Starting", "Loading Whisper…")
@@ -521,7 +566,8 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
         rec.enabled = listening
         if not listening:
             rec.stream.stop()
-    except BaseException:  # startup failed: leave no socket or engine behind
+    except BaseException as exc:  # startup failed: leave no socket or engine behind
+        diagnostics.record(None, "startup", "failed", error=repr(exc))
         bridge.stop()
         ENGINE.shutdown()
         ENGINE = BRIDGE = None
@@ -541,7 +587,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
                 return
             try:
                 print(f"  (stt {stt_ms}ms)")
-                turn(ENGINE, text, notify, hold=hold)
+                turn(ENGINE, text, notify, hold=hold, stt_ms=stt_ms)
             except Exception as exc:
                 print(f"\n  turn failed: {exc}")
                 emit(notify, "Something went wrong", str(exc))
@@ -623,6 +669,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
     threading.Thread(target=warm_cache, daemon=True).start()
     threading.Thread(target=wake_loop, daemon=True).start()
     set_mode(mode)
+    diagnostics.record(None, "startup", "ready", mode=mode, listening=listening, log=diagnostics.path)
     print("ready. ctrl+c to quit.")
     if controls is not None:
         while True:

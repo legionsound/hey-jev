@@ -251,7 +251,7 @@ class VoiceWiringTests(unittest.TestCase):
                     self.siri.start_bridge(eng, None)
             eng.shutdown.assert_called_once()
             fake_whisper = MagicMock()
-            with patch.dict(sys.modules, {"faster_whisper": fake_whisper}), \
+            with patch.dict(sys.modules, {"faster_whisper": fake_whisper}), patch("diagnostics.init"), \
                  patch.object(self.siri, "start_bridge", side_effect=RuntimeError("owned")), \
                  patch.object(self.siri, "Recorder") as rec:
                 with self.assertRaises(RuntimeError):
@@ -324,7 +324,7 @@ class FloorTests(unittest.TestCase):
             fake_whisper, b, eng = MagicMock(), MagicMock(), MagicMock()
             if broken == "model":
                 fake_whisper.WhisperModel.side_effect = RuntimeError("no model")
-            with patch.dict(sys.modules, {"faster_whisper": fake_whisper}), \
+            with patch.dict(sys.modules, {"faster_whisper": fake_whisper}), patch("diagnostics.init"), \
                  patch.object(self.siri, "make_engine", return_value=eng), \
                  patch.object(self.siri, "start_bridge", return_value=b), \
                  patch.object(self.siri, "Recorder", side_effect=RuntimeError("no mic")):

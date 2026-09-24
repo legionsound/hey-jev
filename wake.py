@@ -90,3 +90,43 @@ class Wake:
 
     def hint_text(self):
         return f"Say “{self.phrase}”, then your command"
+
+
+# Words ordinary talk is full of. A learned spelling made only of these would wake Hey Jev by accident.
+EVERYDAY = COMMON | frozenset("""a an and are as at be but by can do for from have he her him his how i if in is it its
+me my of oh on or our she so that them then there they this to uh um up us was we what when where who why will with
+yeah yep you your okay hi hello thanks please""".split())
+
+
+def learn(phrase, aliases, takes):
+    """Teach Jev the wake phrase from takes of the user saying it alone.
+    takes: what the current recognizer wrote for each take. -> {"takes", "matched", "candidates": [{"alias", "count"}]}
+    A candidate is a take that didn't match, written the way the recognizer heard it: 1-4 words that pass validate(),
+    aren't already accepted, and aren't made only of everyday words. Nothing is added here: the user picks."""
+    w = Wake(phrase, aliases)
+    known = {" ".join(words(p)) for p in [phrase, *aliases]}
+    matched, counts = 0, {}
+    for heard in takes:
+        heard = (heard or "").strip()
+        if not heard:
+            continue
+        if w.match(heard) is not None:
+            matched += 1
+            continue
+        ws = words(heard)
+        if not 1 <= len(ws) <= MAX_WORDS or all(x in EVERYDAY for x in ws):
+            continue
+        if len(ws) == 1 and len(ws[0]) < 4:
+            continue
+        key = " ".join(ws)
+        if key in known:
+            continue
+        try:
+            spelled = validate(" ".join(heard.replace(",", " ").replace(".", " ").split()))
+        except ValueError:
+            continue
+        seen = counts.setdefault(key, [spelled, 0])
+        seen[1] += 1
+    candidates = sorted(({"alias": a, "count": c} for a, c in counts.values()), key=lambda x: -x["count"])
+    return {"takes": sum(1 for t in takes if (t or "").strip()), "matched": matched, "candidates": candidates}
+

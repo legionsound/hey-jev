@@ -75,6 +75,23 @@ class WakeTests(unittest.TestCase):
             self.assertIsNone(w.match("Lets go open Notes"))
             self.assertIsNone(w.match("Let go open Notes"))
 
+    def test_learn_offers_how_the_recognizer_heard_it(self):
+        got = wake.learn("Computer", [], ["Computer", "Compute her.", "commuter", "Compute her", "Computer!"])
+        self.assertEqual((got["takes"], got["matched"]), (5, 2))
+        self.assertEqual(got["candidates"], [{"alias": "Compute her", "count": 2}, {"alias": "commuter", "count": 1}])
+
+    def test_learn_never_offers_everyday_words_or_known_spellings(self):
+        got = wake.learn("Okay Zorblat", ["OK Zorblat"], ["okay", "so", "OK Zorblat", "Okay Zorblot",
+                                                            "", "hey you", "this is a very long sentence indeed"])
+        self.assertEqual([c["alias"] for c in got["candidates"]], ["Okay Zorblot"])
+        self.assertEqual((got["takes"], got["matched"]), (6, 1))
+
+    def test_learned_aliases_validate_and_match(self):
+        got = wake.learn("Computer", [], ["Compute her"])
+        w = wake.Wake("Computer", [c["alias"] for c in got["candidates"]])
+        self.assertEqual(w.match("Compute her, open Notes"), "open Notes")
+        self.assertIsNone(w.match("I have to compute her taxes"))  # only at the start, as always
+
 
 if __name__ == "__main__":
     unittest.main()

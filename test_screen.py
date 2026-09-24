@@ -210,6 +210,16 @@ class ScreenActionTests(unittest.TestCase):
         self.assertEqual((len(asked), v["state"], v["steps"][0]["detail"]), (1, "failed", "target_changed"))
         self.assertEqual(fake.presses, [])
 
+    def test_screen_choices_never_reach_the_duplicate_app_chooser(self):
+        fake = FakeScreen(self, [item(1, "Buy", frame=(10, 10, 60, 30)), item(2, "Buy", frame=(300, 250, 60, 30))])
+        called = []
+        with patch.object(planner, "plan", lambda *a, **k: ("steps", [{"clause": "click Buy", "action": "screen.press",
+                                                                        "args": {"label": "Buy"}}])):
+            eng = Engine(lambda _: {}, policy=lambda: {**actions.DEFAULT_POLICY, "click": "auto"},
+                         tiebreak=lambda clause, choices: called.append(choices) or (0, 0.99), threshold=lambda: 0.5)
+            v = eng.wait(eng.submit("click Buy", "cli")["id"], 10)
+        self.assertEqual((v["state"], called, fake.presses), ("needs_clarification", [], []))
+
     def test_identical_labels_ask_which(self):
         fake = FakeScreen(self, [item(1, "Buy", frame=(10, 10, 60, 30)), item(2, "Buy", frame=(300, 250, 60, 30))])
         v = self.run_text("click Buy", "screen.press", {"label": "Buy"})

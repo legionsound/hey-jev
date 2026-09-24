@@ -15,6 +15,7 @@ RESULT_TTL = 600.0
 LEDGER_MAX = 10_000
 CONFIRM_TTL = 60.0
 POLL = 0.2
+TIEBREAK_EFFECTS = ("open", "quit")  # app.open / app.quit: the duplicate-app chooser
 PENDING_WAIT = 10.0  # how long a new dispatch waits for an earlier, still-outstanding effect before refusing
 _local = threading.local()
 
@@ -266,6 +267,9 @@ class Engine:
                            if got[0] == "choices" else None,
                            reason=got[1] if got[0] == "none" else None)
         picked = None
+        if got[0] == "choices" and action["effect"] not in TIEBREAK_EFFECTS:  # only duplicate apps are Jev's to break
+            self._set(step, state="needs_clarification", facts={"choices": got[1]})
+            return "needs_clarification"
         if got[0] == "choices":
             t = time.monotonic()
             picked, facts = self._break_tie(step, got[1])

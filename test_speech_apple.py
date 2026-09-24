@@ -9,6 +9,22 @@ import numpy as np
 import speech_apple
 
 
+class FakeError:
+    """NSError-shaped: domain() and code(), like PyObjC hands the result handler."""
+
+    def __init__(self, domain, code):
+        self._domain, self._code = domain, code
+
+    def domain(self):
+        return self._domain
+
+    def code(self):
+        return self._code
+
+    def __str__(self):
+        return f"Error Domain={self._domain} Code={self._code}"
+
+
 def _install_fake(auth=3, on_device=True, available=True, supported_locale=True, final_text="open safari",
                   script="final"):
     """script: final | partial_then_final | partial_only (never finishes) | error."""
@@ -118,6 +134,14 @@ def _install_fake(auth=3, on_device=True, available=True, supported_locale=True,
             if script in ("final", "partial_then_final"):
                 self._handler(FakeResult(), None)
             if script == "error":
+                self._handler(None, FakeError("kAFAssistantErrorDomain", 1101))
+            if script == "no_speech":
+                self._handler(None, FakeError("kAFAssistantErrorDomain", 1110))
+            if script == "other_domain_1110":
+                self._handler(None, FakeError("SomeOtherDomain", 1110))
+            if script == "code_11101":
+                self._handler(None, FakeError("kAFAssistantErrorDomain", 11101))
+            if script == "string_1110":
                 self._handler(None, "Error Domain=kAFAssistantErrorDomain Code=1110 No speech detected")
 
     speech.SFSpeechAudioBufferRecognitionRequest = FakeReq
@@ -262,8 +286,21 @@ class TranscribeTests(unittest.TestCase):
 
     def test_error_callback_raises(self):
         _install_fake(auth=3, script="error")
-        with self.assertRaisesRegex(RuntimeError, "recognition failed.*No speech"):
+        with self.assertRaisesRegex(RuntimeError, "recognition failed.*1101"):
             speech_apple.AppleTranscriber(timeout_s=5).transcribe(np.zeros(1600, dtype=np.float32))
+
+    def test_no_speech_is_an_empty_transcript_not_a_failure(self):
+        _install_fake(auth=3, script="no_speech")
+        text, ms = speech_apple.AppleTranscriber(timeout_s=5).transcribe(np.zeros(1600, dtype=np.float32))
+        self.assertEqual(text, "")
+        self.assertGreaterEqual(ms, 0)
+
+    def test_only_the_exact_no_speech_error_is_empty(self):
+        for script in ("other_domain_1110", "code_11101", "string_1110"):
+            with self.subTest(script=script):
+                _install_fake(auth=3, script=script)
+                with self.assertRaisesRegex(RuntimeError, "recognition failed"):
+                    speech_apple.AppleTranscriber(timeout_s=5).transcribe(np.zeros(1600, dtype=np.float32))
 
     def test_refuses_when_not_ready(self):
         _install_fake(auth=1)

@@ -63,7 +63,7 @@ URL_SPAN = re.compile(r"\b(?:https?://\S+|(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?(?:
 # navigation, so there is no blacklist to maintain. Anything else is prose.
 BROWSERS = {"safari": "com.apple.Safari", "chrome": "org.google.Chrome",
             "google chrome": "org.google.Chrome"}
-BROWSER_QUAL = re.compile(r"\bin\s+([A-Za-z][A-Za-z0-9]*)(?:\s+([A-Za-z][A-Za-z0-9]*))?", re.I)
+BROWSER_QUAL = re.compile(r"\bin\s+(?:(?:my|the|your)\s+)?([A-Za-z][A-Za-z0-9]*)(?:\s+([A-Za-z][A-Za-z0-9]*))?(?:\s+browsers?)?", re.I)
 # Grammar, never a browser name: "log in to google.com" must not clarify.
 QUAL_STOPWORDS = frozenset({"to", "the", "a", "an", "my", "your", "this", "that", "its"})
 
@@ -74,27 +74,33 @@ def browser_qualifier(clause):
     Only the recognized qualifier is removed, so the URL's path, query
     and fragment survive untouched. A trailing "in <Word>" only counts as
     a browser choice when the rest still names a URL or site ("search in
-    page", "example.com/in-depth" stay prose)."""
-    m = BROWSER_QUAL.search(clause)
-    if not m:
+    page", "example.com/in-depth" stay prose). Later matches win, so an
+    earlier grammatical "in" ("log in to ...") never masks a trailing
+    browser clause."""
+    matches = list(BROWSER_QUAL.finditer(clause))
+    if not matches:
         return clause, None, None
-    w1, w2 = m.group(1).lower(), (m.group(2) or "").lower()
-    if w1 in QUAL_STOPWORDS:
-        return clause, None, None
-    if w2 and f"{w1} {w2}" in BROWSERS:
-        name, end = f"{w1} {w2}", m.end()
-    elif w1 in BROWSERS:
-        name, end = w1, m.end(1)
-    else:
-        name, end = (f"{w1} {w2}" if w2 else w1), m.end()
+    for m in reversed(matches):
+        w1, w2 = m.group(1).lower(), (m.group(2) or "").lower()
+        if w2 in ("browser", "browsers"):
+            w2 = ""
+        if w1 in QUAL_STOPWORDS:
+            continue
+        if w2 and f"{w1} {w2}" in BROWSERS:
+            name, end = f"{w1} {w2}", m.end()
+        elif w1 in BROWSERS:
+            name, end = w1, m.end(1)
+        else:
+            name, end = (f"{w1} {w2}" if w2 else w1), m.end()
+            rest = re.sub(r"\s+", " ", (clause[:m.start()] + " " + clause[end:])).strip(" ,.")
+            if url_span(rest) or site_url(rest):
+                return clause, None, name
+            continue
         rest = re.sub(r"\s+", " ", (clause[:m.start()] + " " + clause[end:])).strip(" ,.")
-        if url_span(rest) or site_url(rest):
-            return clause, None, name
-        return clause, None, None
-    rest = re.sub(r"\s+", " ", (clause[:m.start()] + " " + clause[end:])).strip(" ,.")
-    if not (url_span(rest) or site_url(rest)):
-        return clause, None, None
-    return rest, BROWSERS[name], None
+        if not (url_span(rest) or site_url(rest)):
+            continue
+        return rest, BROWSERS[name], None
+    return clause, None, None
 
 
 def app_browser(name):

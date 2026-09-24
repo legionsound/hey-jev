@@ -275,6 +275,11 @@ class PlannerTests(unittest.TestCase):
         kind, got = planner.plan("log in to google.com", lambda _: ans_for())
         self.assertEqual(kind, "steps")
         self.assertNotIn("browser", got[0]["args"])
+        # earlier grammatical "in" never masks a trailing browser clause
+        self.assertEqual(planner.plan("log in to google.com in Firefox", lambda _: ans_for()),
+                         ("clarify", "unsupported_browser"))
+        self.assertEqual(planner.plan("go to example.com in my Firefox browser", lambda _: ans_for()),
+                         ("clarify", "unsupported_browser"))
 
 
 class SpeechTests(unittest.TestCase):

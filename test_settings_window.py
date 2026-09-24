@@ -63,6 +63,8 @@ class SettingsShortPhraseTests(unittest.TestCase):
             self.assertEqual(start.call_count, 1)
             self.assertEqual(d.settings_message.stringValue(),
                              "Short phrases can wake Hey Jev by accident.")
+            self.assertIsNotNone(d.settings_sheet)  # warning stays visible: window kept open
+            self.assertTrue(d.settings_sheet.isVisible())
             d.closeSettings_(None)
 
 

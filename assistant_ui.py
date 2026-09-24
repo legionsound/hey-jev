@@ -1,11 +1,12 @@
-"""Small native macOS status window for the Jev voice assistant."""
+"""Native status, menu bar controls and separate provider/model settings."""
 import queue
 import sys
 import threading
 
 import objc
 from AppKit import (
-    NSApp,
+    NSApp, NSApplicationActivationPolicyAccessory, NSStatusBar, NSVariableStatusItemLength,
+    NSView, NSSlider, NSSearchField, NSTabView, NSTabViewItem, NSImage,
     NSApplication,
     NSApplicationActivationPolicyRegular,
     NSBackingStoreBuffered,
@@ -35,10 +36,12 @@ from AppKit import (
     NSWindowStyleMaskTitled,
 )
 from Foundation import NSObject, NSTimer, NSUserDefaults
+from model_settings import PREFS, PARAMETERS, answer_settings, cached_models, fetch_models, save_answer_settings, validate_parameters
+import voice_output
 from secrets_store import KEY_NAMES, get_secret, get_setting, missing_secrets, save_secret
 
 
-BASE_HEIGHT, ROW = 154, 24
+BASE_HEIGHT, ROW = 250, 24
 STICK_TOP, STICK_BOTTOM = 8, 32  # NSViewMinYMargin, NSViewMaxYMargin
 NORMAL, FLOATING = 0, 3  # NSNormalWindowLevel, NSFloatingWindowLevel
 HINTS = {"ptt": "Hold right Option to talk", "wake": "Say \u201cHey Jev\u201d, then your command"}
@@ -71,15 +74,19 @@ class AppDelegate(NSObject):
         self.controls = queue.Queue()
         self.option_down = False
         self.worker_started = False
+        self.listening = not PREFS.boolForKey_("listening_paused")
+        self.menu_only = PREFS.boolForKey_("menu_only")
+        self.catalog = cached_models()
+        self.fetch_generation = 0
         self.mode = NSUserDefaults.standardUserDefaults().stringForKey_("mode") or "ptt"
         if self.mode not in MODES:
             self.mode = "ptt"
         style = (NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable
                  | NSWindowStyleMaskFullSizeContentView)
         self.panel = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-            NSMakeRect(0, 0, 420, 154), style, NSBackingStoreBuffered, False
+            NSMakeRect(0, 0, 460, 250), style, NSBackingStoreBuffered, False
         )
-        self.panel.setTitle_("Hey Jev - Fish Audio")
+        self.panel.setTitle_("Hey Jev")
         self.panel.setTitlebarAppearsTransparent_(True)
         self.panel.setMovableByWindowBackground_(True)
         self.panel.setReleasedWhenClosed_(False)  # closing just hides it, the Dock icon brings it back
@@ -87,7 +94,7 @@ class AppDelegate(NSObject):
         self.panel.setLevel_(FLOATING if self.on_top else NORMAL)
         self._add_window_menu()
 
-        background = NSVisualEffectView.alloc().initWithFrame_(NSMakeRect(0, 0, 420, 154))
+        background = NSVisualEffectView.alloc().initWithFrame_(NSMakeRect(0, 0, 460, 250))
         background.setMaterial_(NSVisualEffectMaterialHUDWindow)
         background.setBlendingMode_(NSVisualEffectBlendingModeBehindWindow)
         background.setState_(NSVisualEffectStateActive)
@@ -96,18 +103,18 @@ class AppDelegate(NSObject):
         self.background = background
         self.timer_rows = []
 
-        self.dot = label("●", NSMakeRect(25, 76, 24, 30), 18, NSColor.systemOrangeColor())
-        self.status = label("Starting", NSMakeRect(55, 78, 330, 30), 22)
-        self.detail = label("Loading Whisper…", NSMakeRect(27, 39, 365, 30), 14, NSColor.secondaryLabelColor())
-        self.hint = label(HINTS[self.mode], NSMakeRect(27, 14, 220, 22), 12, NSColor.tertiaryLabelColor())
+        self.dot = label("●", NSMakeRect(25, 170, 24, 30), 18, NSColor.systemOrangeColor())
+        self.status = label("Starting", NSMakeRect(55, 171, 375, 30), 22)
+        self.detail = label("Loading Whisper…", NSMakeRect(27, 135, 405, 30), 14, NSColor.secondaryLabelColor())
+        self.hint = label(HINTS[self.mode], NSMakeRect(27, 12, 405, 22), 12, NSColor.tertiaryLabelColor())
         for view in (self.dot, self.status, self.detail, self.hint):
             background.addSubview_(view)
         for view in (self.dot, self.status, self.detail):
             view.setAutoresizingMask_(STICK_TOP)
         self.hint.setAutoresizingMask_(STICK_BOTTOM)
 
-        settings = NSButton.buttonWithTitle_target_action_("Keys…", self, "showSettings:")
-        settings.setFrame_(NSMakeRect(343, 118, 65, 24))  # top right, in line with the title bar
+        settings = NSButton.buttonWithTitle_target_action_("Settings…", self, "showSettings:")
+        settings.setFrame_(NSMakeRect(350, 212, 98, 24))  # top right, in line with the title bar
         settings.setBezelStyle_(1)  # rounded, so the title shows (9 is the "?" help button)
         settings.setControlSize_(1)  # small
         settings.setFont_(NSFont.systemFontOfSize_(11))
@@ -119,17 +126,31 @@ class AppDelegate(NSObject):
         )
         self.mode_switch.setControlSize_(1)
         self.mode_switch.setFont_(NSFont.systemFontOfSize_(11))
-        self.mode_switch.setFrame_(NSMakeRect(252, 12, 156, 24))
+        self.mode_switch.setFrame_(NSMakeRect(24, 92, 275, 28))
         self.mode_switch.setSelectedSegment_(MODES.index(self.mode))
         self.mode_switch.setAutoresizingMask_(STICK_BOTTOM)
         background.addSubview_(self.mode_switch)
+        self.pause_button = NSButton.buttonWithTitle_target_action_("Pause", self, "toggleListening:")
+        self.pause_button.setFrame_(NSMakeRect(320, 91, 115, 30))
+        background.addSubview_(self.pause_button)
+        self.voice_label = label("Voice", NSMakeRect(27, 57, 85, 22), 12)
+        background.addSubview_(self.voice_label)
+        self.voice_slider = self._slider(NSMakeRect(110, 55, 205, 25))
+        background.addSubview_(self.voice_slider)
+        self.mute_button = NSButton.buttonWithTitle_target_action_("Mute voice", self, "toggleVoice:")
+        self.mute_button.setFrame_(NSMakeRect(320, 51, 115, 30))
+        background.addSubview_(self.mute_button)
+        self._build_status_menu()
+        self._sync_controls()
         NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(0.5, self, "tick:", None, True)
 
         screen = NSScreen.mainScreen().visibleFrame()
-        self.panel.setFrameOrigin_(NSMakePoint(screen.origin.x + (screen.size.width - 420) / 2,
-                                               screen.origin.y + screen.size.height - 190))
-        self.panel.makeKeyAndOrderFront_(None)
-        NSApp.activateIgnoringOtherApps_(True)
+        self.panel.setFrameOrigin_(NSMakePoint(screen.origin.x + (screen.size.width - 460) / 2,
+                                               screen.origin.y + screen.size.height - 300))
+        if self.menu_only:
+            NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
+        else:
+            self.showMain_(None)
         self.global_monitor = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
             NSEventMaskFlagsChanged, self._global_flags_changed
         )
@@ -153,7 +174,7 @@ class AppDelegate(NSObject):
 
     @objc.python_method
     def _handle_flags(self, event):
-        if event.keyCode() != 61:
+        if not self.listening or event.keyCode() != 61:
             return
         is_down = bool(event.modifierFlags() & NSEventModifierFlagOption)
         if is_down != self.option_down:
@@ -171,7 +192,7 @@ class AppDelegate(NSObject):
     def _run_assistant(self):
         from siri import run_voice_assistant
         try:
-            run_voice_assistant(self.notify, self.controls, self.mode)
+            run_voice_assistant(self.notify, self.controls, self.mode, self.listening)
         except Exception as exc:
             self.notify("Something went wrong", str(exc))
 
@@ -208,6 +229,106 @@ class AppDelegate(NSObject):
         NSUserDefaults.standardUserDefaults().setObject_forKey_(self.mode, "mode")
         self.hint.setStringValue_(HINTS[self.mode])
         self.controls.put(("mode", self.mode))
+        self._sync_controls()
+
+    @objc.python_method
+    def _slider(self, frame):
+        slider = NSSlider.alloc().initWithFrame_(frame)
+        slider.setMinValue_(0)
+        slider.setMaxValue_(1)
+        slider.setDoubleValue_(voice_output.volume())
+        slider.setContinuous_(True)
+        slider.setTarget_(self)
+        slider.setAction_("voiceVolumeChanged:")
+        slider.setAccessibilityLabel_("Voice output volume")
+        return slider
+
+    @objc.python_method
+    def _build_status_menu(self):
+        self.status_item = NSStatusBar.systemStatusBar().statusItemWithLength_(NSVariableStatusItemLength)
+        self.status_item.button().setTitle_("Jev")
+        self.status_item.button().setAccessibilityLabel_("Hey Jev controls")
+        menu = NSMenu.alloc().initWithTitle_("Hey Jev")
+        menu.setAutoenablesItems_(False)
+        self.menu_status = menu.addItemWithTitle_action_keyEquivalent_("Starting", None, "")
+        self.menu_status.setEnabled_(False)
+        menu.addItem_(NSMenuItem.separatorItem())
+        self.pause_item = menu.addItemWithTitle_action_keyEquivalent_("Pause listening", "toggleListening:", "")
+        self.pause_item.setTarget_(self)
+        self.mode_items = []
+        for title in ("Hold right Option", "Hey Jev wake phrase"):
+            item = menu.addItemWithTitle_action_keyEquivalent_(title, "menuMode:", "")
+            item.setTarget_(self)
+            item.setTag_(len(self.mode_items))
+            self.mode_items.append(item)
+        menu.addItem_(NSMenuItem.separatorItem())
+        view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 270, 62))
+        self.menu_voice_label = label("Voice volume", NSMakeRect(18, 34, 235, 20), 12)
+        view.addSubview_(self.menu_voice_label)
+        self.menu_voice_slider = self._slider(NSMakeRect(18, 8, 235, 25))
+        view.addSubview_(self.menu_voice_slider)
+        item = NSMenuItem.alloc().init()
+        item.setView_(view)
+        menu.addItem_(item)
+        self.mute_item = menu.addItemWithTitle_action_keyEquivalent_("Mute voice", "toggleVoice:", "")
+        self.mute_item.setTarget_(self)
+        hint = menu.addItemWithTitle_action_keyEquivalent_("Timer chimes remain audible", None, "")
+        hint.setEnabled_(False)
+        menu.addItem_(NSMenuItem.separatorItem())
+        for title, action in (("Show status", "showMain:"), ("Settings…", "showSettings:")):
+            menu.addItemWithTitle_action_keyEquivalent_(title, action, "").setTarget_(self)
+        self.menu_only_item = menu.addItemWithTitle_action_keyEquivalent_("Menu bar only", "toggleMenuOnly:", "")
+        self.menu_only_item.setTarget_(self)
+        menu.addItem_(NSMenuItem.separatorItem())
+        menu.addItemWithTitle_action_keyEquivalent_("Quit Hey Jev", "terminate:", "q").setTarget_(NSApp)
+        self.status_item.setMenu_(menu)
+
+    @objc.python_method
+    def _sync_controls(self):
+        self.mode_switch.setSelectedSegment_(MODES.index(self.mode))
+        for i, item in enumerate(self.mode_items):
+            item.setState_(int(MODES[i] == self.mode))
+        self.pause_item.setTitle_("Pause listening" if self.listening else "Resume listening")
+        self.pause_button.setTitle_("Pause" if self.listening else "Resume")
+        self.hint.setStringValue_(HINTS[self.mode] if self.listening else "Microphone paused · timers remain active")
+        self.menu_only_item.setState_(int(self.menu_only))
+        gain, mute = voice_output.volume(), voice_output.muted()
+        self.voice_slider.setDoubleValue_(gain)
+        self.menu_voice_slider.setDoubleValue_(gain)
+        self.voice_label.setStringValue_(f"Voice {round(gain * 100)}%")
+        self.menu_voice_label.setStringValue_(f"Voice volume · {round(gain * 100)}%" + (" · off" if mute else ""))
+        self.mute_button.setTitle_("Voice off" if mute else "Mute voice")
+        self.mute_item.setState_(int(mute))
+
+    def menuMode_(self, sender):
+        self.mode_switch.setSelectedSegment_(sender.tag())
+        self.modeChanged_(self.mode_switch)
+
+    def toggleListening_(self, _sender):
+        self.listening = not self.listening
+        self.option_down = False
+        PREFS.setBool_forKey_(not self.listening, "listening_paused")
+        self.controls.put(("listening", self.listening))
+        self._sync_controls()
+        self.updateStatus_({"state": "Ready" if self.listening else "Paused", "detail": HINTS[self.mode] if self.listening else "Microphone paused. Current action may finish."})
+
+    def voiceVolumeChanged_(self, sender):
+        voice_output.configure(gain=sender.doubleValue())
+        self._sync_controls()
+
+    def toggleVoice_(self, _sender):
+        voice_output.configure(mute=not voice_output.muted())
+        self._sync_controls()
+
+    def toggleMenuOnly_(self, _sender):
+        self.menu_only = not self.menu_only
+        PREFS.setBool_forKey_(self.menu_only, "menu_only")
+        NSApp.setActivationPolicy_(NSApplicationActivationPolicyAccessory if self.menu_only else NSApplicationActivationPolicyRegular)
+        if self.menu_only:
+            self.panel.orderOut_(None)
+        else:
+            self.showMain_(None)
+        self._sync_controls()
 
     def showSettings_(self, _sender):
         try:
@@ -218,89 +339,209 @@ class AppDelegate(NSObject):
     @objc.python_method
     def _show_settings(self):
         if getattr(self, "settings_sheet", None):
+            self.settings_sheet.makeKeyAndOrderFront_(None)
+            NSApp.activateIgnoringOtherApps_(True)
             return
         sheet = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-            NSMakeRect(0, 0, 440, 430), NSWindowStyleMaskTitled, NSBackingStoreBuffered, False
-        )
+            NSMakeRect(0, 0, 680, 620), NSWindowStyleMaskTitled, NSBackingStoreBuffered, False)
+        sheet.setTitle_("Hey Jev Settings")
+        sheet.setReleasedWhenClosed_(False)
         content = sheet.contentView()
-        content.addSubview_(label("Providers and API keys", NSMakeRect(22, 383, 390, 30), 20))
-        content.addSubview_(label("Saved in Keychain. Existing keys stay hidden.",
-                                  NSMakeRect(23, 361, 390, 20), 12, NSColor.secondaryLabelColor()))
-
-        content.addSubview_(label("Jev decisions", NSMakeRect(23, 288, 130, 22), 13))
-        self.jev_provider = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(165, 285, 245, 26), False)
-        self.jev_provider.addItemsWithTitles_(["OpenRouter", "TypeSafe direct"])
+        tabs = NSTabView.alloc().initWithFrame_(NSMakeRect(18, 80, 644, 520))
+        content.addSubview_(tabs)
+        providers, answers = (NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 610, 480)) for _ in range(2))
+        for title, view in (("Providers & keys", providers), ("Deeper answers", answers)):
+            item = NSTabViewItem.alloc().initWithIdentifier_(title)
+            item.setLabel_(title)
+            item.setView_(view)
+            tabs.addTabViewItem_(item)
+        providers.addSubview_(label("Your providers", NSMakeRect(24, 419, 560, 30), 22))
+        providers.addSubview_(label("Keys stay in Keychain. Leave a field blank to keep its saved key.",
+                                    NSMakeRect(24, 390, 560, 24), 12, NSColor.secondaryLabelColor()))
+        providers.addSubview_(label("Jev decisions", NSMakeRect(24, 313, 160, 24), 13))
+        self.jev_provider = self._popup(providers, ["OpenRouter", "TypeSafe direct"], NSMakeRect(194, 310, 385, 28))
         self.jev_provider.selectItemAtIndex_(0 if get_setting("JEV_PROVIDER") == "openrouter" else 1)
-        content.addSubview_(self.jev_provider)
-
-        content.addSubview_(label("Deeper answers", NSMakeRect(23, 149, 130, 22), 13))
-        self.answer_provider = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(165, 146, 245, 26), False)
-        self.answer_provider.addItemsWithTitles_(["Disabled", "OpenRouter (Claude Haiku)"])
+        providers.addSubview_(label("Deeper answers", NSMakeRect(24, 157, 160, 24), 13))
+        self.answer_provider = self._popup(providers, ["Disabled", "OpenRouter"], NSMakeRect(194, 154, 385, 28))
         self.answer_provider.selectItemAtIndex_(0 if get_setting("ANSWER_PROVIDER") == "disabled" else 1)
-        content.addSubview_(self.answer_provider)
-
-        field_names = (
-            ("Voice: Fish Audio", "FISH_AUDIO_API_KEY", 326),
-            ("Jev: OpenRouter", "JEV_OPENROUTER_API_KEY", 244),
-            ("Jev: TypeSafe", "TYPESAFE_API_KEY", 207),
-            ("Answer key", "OPENROUTER_API_KEY", 108),
-        )
         self.key_fields = {}
-        for title, key_name, y in field_names:
-            content.addSubview_(label(title, NSMakeRect(23, y + 3, 137, 22), 13))
-            field = NSSecureTextField.alloc().initWithFrame_(NSMakeRect(165, y, 245, 26))
-            field.setBezelStyle_(1)  # rounded
-            field.setFocusRingType_(1)
-            field.setPlaceholderString_("Already configured" if get_secret(key_name) else "Paste key")
-            content.addSubview_(field)
-            self.key_fields[key_name] = field
+        for title, key, y in (("Voice: Fish Audio", "FISH_AUDIO_API_KEY", 349),
+                              ("Jev: OpenRouter", "JEV_OPENROUTER_API_KEY", 266),
+                              ("Jev: TypeSafe", "TYPESAFE_API_KEY", 222),
+                              ("Answer: OpenRouter", "OPENROUTER_API_KEY", 108)):
+            providers.addSubview_(label(title, NSMakeRect(24, y + 2, 169, 24), 13))
+            field = NSSecureTextField.alloc().initWithFrame_(NSMakeRect(194, y, 385, 28))
+            field.setPlaceholderString_("Already configured" if get_secret(key) else "Paste key")
+            providers.addSubview_(field)
+            self.key_fields[key] = field
+        providers.addSubview_(label("Model and request controls are in the Deeper answers tab.",
+                                    NSMakeRect(24, 63, 560, 24), 12, NSColor.secondaryLabelColor()))
+        providers.addSubview_(label("An existing .env still takes priority over Keychain.",
+                                    NSMakeRect(24, 37, 560, 24), 12, NSColor.secondaryLabelColor()))
 
-        self.settings_message = label("", NSMakeRect(23, 61, 390, 20), 11, NSColor.systemRedColor())
+        current = answer_settings()
+        self.selected_model = current["model"]
+        self.selected_metadata = current["metadata"]
+        self.parameter_drafts = {self.selected_model: current["parameters"]}
+        answers.addSubview_(label("Deeper answers", NSMakeRect(24, 429, 360, 30), 22))
+        self.refresh_button = NSButton.buttonWithTitle_target_action_("Refresh models", self, "refreshModels:")
+        self.refresh_button.setFrame_(NSMakeRect(433, 427, 155, 32))
+        answers.addSubview_(self.refresh_button)
+        self.model_search = NSSearchField.alloc().initWithFrame_(NSMakeRect(24, 388, 560, 28))
+        self.model_search.setPlaceholderString_("Search all text models by name or model ID")
+        self.model_search.setDelegate_(self)
+        answers.addSubview_(self.model_search)
+        self.model_popup = self._popup(answers, [], NSMakeRect(24, 349, 560, 28), "modelChanged:")
+        self.catalog_message = label("Saved model available offline. Refresh to load the catalog.", NSMakeRect(24, 320, 560, 22), 11, NSColor.secondaryLabelColor())
+        answers.addSubview_(self.catalog_message)
+        self.model_info = label("", NSMakeRect(24, 295, 560, 22), 11, NSColor.secondaryLabelColor())
+        answers.addSubview_(self.model_info)
+        answers.addSubview_(label("Advanced request controls", NSMakeRect(24, 258, 560, 26), 16))
+        self.parameter_fields = {}
+        for i, (key, (title, kind, low, high)) in enumerate(PARAMETERS.items()):
+            col, row = i % 2, i // 2
+            x, y = 24 + col * 286, 211 - row * 43
+            answers.addSubview_(label(title, NSMakeRect(x, y + 2, 164, 22), 12))
+            field = NSTextField.alloc().initWithFrame_(NSMakeRect(x + 164, y, 103, 26))
+            field.setToolTip_(f"{key}: {low:g} to {high:g}. Blank uses the default.")
+            answers.addSubview_(field)
+            self.parameter_fields[key] = field
+        answers.addSubview_(label("Blank: provider defaults; token limit: 80 answers / 120 reminders.",
+                                  NSMakeRect(24, 46, 575, 20), 11, NSColor.secondaryLabelColor()))
+        answers.addSubview_(label("Reasoning models may need more tokens. Unsupported controls are disabled.",
+                                  NSMakeRect(24, 23, 580, 20), 11, NSColor.secondaryLabelColor()))
+        self.settings_message = label("", NSMakeRect(25, 48, 630, 24), 12, NSColor.systemRedColor())
         content.addSubview_(self.settings_message)
-        save = NSButton.buttonWithTitle_target_action_("Save", self, "saveSettings:")
-        save.setFrame_(NSMakeRect(328, 18, 82, 32))
-        save.setKeyEquivalent_("\r")
-        content.addSubview_(save)
-        if not missing_secrets():
-            cancel = NSButton.buttonWithTitle_target_action_("Cancel", self, "closeSettings:")
-            cancel.setFrame_(NSMakeRect(240, 18, 86, 32))
-            cancel.setKeyEquivalent_("\x1b")
-            content.addSubview_(cancel)
-
+        for title, action, x in (("Cancel", "closeSettings:", 457), ("Save", "saveSettings:", 556)):
+            button = NSButton.buttonWithTitle_target_action_(title, self, action)
+            button.setFrame_(NSMakeRect(x, 10, 100, 32))
+            button.setKeyEquivalent_("\r" if title == "Save" else "\x1b")
+            content.addSubview_(button)
         self.settings_sheet = sheet
+        self._filter_models()
+        self._display_parameters()
+        sheet.center()
+        sheet.makeKeyAndOrderFront_(None)
         NSApp.activateIgnoringOtherApps_(True)
-        self.panel.makeKeyAndOrderFront_(None)
-        self.panel.beginSheet_completionHandler_(sheet, None)
-        first_key = (missing_secrets() or ["FISH_AUDIO_API_KEY"])[0]
-        sheet.makeFirstResponder_(self.key_fields[first_key])
+        if get_secret("OPENROUTER_API_KEY"):
+            self.refreshModels_(None)
+
+    @objc.python_method
+    def _popup(self, parent, titles, frame, action=None):
+        popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(frame, False)
+        popup.addItemsWithTitles_(titles)
+        if action:
+            popup.setTarget_(self)
+            popup.setAction_(action)
+        parent.addSubview_(popup)
+        return popup
 
     def closeSettings_(self, _sender):
         if getattr(self, "settings_sheet", None):
-            self.panel.endSheet_(self.settings_sheet)
+            self.fetch_generation += 1
             self.settings_sheet.orderOut_(None)
             self.settings_sheet = None
 
+    @objc.python_method
+    def _parameter_values(self):
+        return {key: field.stringValue().strip() for key, field in self.parameter_fields.items() if field.isEnabled()}
+
     def saveSettings_(self, _sender):
         try:
-            for key_name in KEY_NAMES:
-                value = self.key_fields[key_name].stringValue()
-                if value:
-                    save_secret(key_name, value)
+            values = self._parameter_values()
+            validate_parameters(values, self.selected_metadata)
             jev_provider = ("openrouter", "typesafe")[self.jev_provider.indexOfSelectedItem()]
             answer_provider = ("disabled", "openrouter")[self.answer_provider.indexOfSelectedItem()]
-            still_missing = missing_secrets(jev_provider, answer_provider)
-            if still_missing:
-                names = ", ".join(name.replace("_API_KEY", "").replace("_", " ").title() for name in still_missing)
-                self.settings_message.setStringValue_(f"Still needed: {names}")
-                return
+            required = ["FISH_AUDIO_API_KEY", "TYPESAFE_API_KEY" if jev_provider == "typesafe" else "JEV_OPENROUTER_API_KEY"]
+            if answer_provider == "openrouter":
+                required.append("OPENROUTER_API_KEY")
+            if any(not self.key_fields[key].stringValue().strip() and not get_secret(key) for key in required):
+                raise ValueError("Enter the keys required by your selected providers.")
+            for key_name in KEY_NAMES:
+                value = self.key_fields[key_name].stringValue().strip()
+                if value:
+                    save_secret(key_name, value)
             save_secret("JEV_PROVIDER", jev_provider)
             save_secret("ANSWER_PROVIDER", answer_provider)
+            save_answer_settings(self.selected_model, values, self.selected_metadata)
             from siri import reload_keys
             reload_keys()
             self.closeSettings_(None)
             self._start_worker()
         except Exception as exc:
             self.settings_message.setStringValue_(str(exc))
+
+    def refreshModels_(self, _sender):
+        key = self.key_fields["OPENROUTER_API_KEY"].stringValue().strip() or get_secret("OPENROUTER_API_KEY")
+        if not key:
+            self.catalog_message.setStringValue_("Enter an answer key in Providers & keys, then refresh.")
+            return
+        self.fetch_generation += 1
+        generation = self.fetch_generation
+        self.refresh_button.setEnabled_(False)
+        self.catalog_message.setStringValue_("Loading models from OpenRouter…")
+        def load():
+            try:
+                payload = {"generation": generation, "models": fetch_models(key)}
+            except Exception:
+                payload = {"generation": generation, "error": "Could not load models. Check the answer key or connection, then retry."}
+            self.performSelectorOnMainThread_withObject_waitUntilDone_("modelsLoaded:", payload, False)
+        threading.Thread(target=load, daemon=True).start()
+
+    def modelsLoaded_(self, payload):
+        if not getattr(self, "settings_sheet", None) or payload["generation"] != self.fetch_generation:
+            return
+        self.refresh_button.setEnabled_(True)
+        if "error" in payload:
+            self.catalog_message.setStringValue_(payload["error"])
+            return
+        self.catalog = payload["models"]
+        self.catalog_message.setStringValue_(f"{len(self.catalog)} text models available. Selection applies to answers and reminders.")
+        self._filter_models()
+        match = next((m for m in self.catalog if m["id"] == self.selected_model), None)
+        if match:
+            self.parameter_drafts[self.selected_model] = self._parameter_values()
+            self.selected_metadata = match
+            self._display_parameters()
+
+    def controlTextDidChange_(self, notification):
+        if notification.object() == getattr(self, "model_search", None):
+            self._filter_models()
+
+    @objc.python_method
+    def _filter_models(self):
+        query = self.model_search.stringValue().lower().strip()
+        models = {m["id"]: m for m in self.catalog}
+        models.setdefault(self.selected_model, self.selected_metadata)
+        self.filtered_models = [m for m in models.values() if query in (m["id"] + " " + m.get("name", "")).lower()]
+        self.filtered_models.sort(key=lambda m: m["id"].lower())
+        self.model_popup.removeAllItems()
+        for model in self.filtered_models:
+            self.model_popup.addItemWithTitle_(model["id"])
+        ids = [m["id"] for m in self.filtered_models]
+        self.model_popup.selectItemAtIndex_(ids.index(self.selected_model) if self.selected_model in ids else -1)
+        self.model_popup.setEnabled_(bool(ids))
+        self.model_popup.setToolTip_("No matches" if not ids else "Choose a model; filtering does not change the saved selection.")
+
+    def modelChanged_(self, sender):
+        index = sender.indexOfSelectedItem()
+        if index < 0:
+            return
+        self.parameter_drafts[self.selected_model] = self._parameter_values()
+        self.selected_metadata = self.filtered_models[index]
+        self.selected_model = self.selected_metadata["id"]
+        self._display_parameters()
+
+    @objc.python_method
+    def _display_parameters(self):
+        supported = self.selected_metadata.get("supported_parameters", [])
+        values = self.parameter_drafts.get(self.selected_model, {})
+        for key, field in self.parameter_fields.items():
+            field.setEnabled_(key in supported)
+            field.setStringValue_(str(values.get(key, "")) if key in supported else "")
+            field.setPlaceholderString_("Default" if key in supported else "N/A")
+        context = self.selected_metadata.get("context_length")
+        self.model_info.setStringValue_(f"Selected: {self.selected_model}" + (f" · {context:,} context tokens" if context else ""))
 
     @objc.python_method
     def notify(self, state, detail=""):
@@ -330,7 +571,7 @@ class AppDelegate(NSObject):
         top = frame.origin.y + frame.size.height
         self.panel.setFrame_display_animate_(NSMakeRect(frame.origin.x, top - height, frame.size.width, height), True, True)
         for i in range(count):
-            y = 44 + ROW * (count - 1 - i)  # soonest on top, just above the bottom row
+            y = 130 + ROW * (count - 1 - i)  # soonest on top, just above the bottom row
             name_view = label("", NSMakeRect(27, y, 280, 20), 13, NSColor.secondaryLabelColor())
             time_view = label("", NSMakeRect(310, y, 98, 20), 15, NSColor.systemTealColor())
             time_view.setFont_(NSFont.monospacedDigitSystemFontOfSize_weight_(15, 0.4))
@@ -343,6 +584,10 @@ class AppDelegate(NSObject):
     def updateStatus_(self, payload):
         state = str(payload["state"])
         detail = str(payload.get("detail", ""))
+        if not self.listening and state in ("Ready", "Listening"):
+            state, detail = "Paused", "Microphone paused. Current action may finish."
+        self.menu_status.setTitle_(state)
+        self.status_item.button().setToolTip_(f"Hey Jev: {state}")
         self.status.setStringValue_(state)
         self.detail.setStringValue_(detail)
         self.dot.setTextColor_(STATUS_COLORS.get(state, NSColor.labelColor()))
@@ -351,6 +596,7 @@ class AppDelegate(NSObject):
         return False  # keep listening with the window closed, the Dock icon reopens it
 
     def applicationWillTerminate_(self, _notification):
+        voice_output.configure(mute=None)
         if getattr(self, "global_monitor", None):
             NSEvent.removeMonitor_(self.global_monitor)
         if getattr(self, "local_monitor", None):

@@ -99,7 +99,7 @@ def _install_fake(auth=3, on_device=True, available=True, supported_locale=True,
     speech.SFSpeechAudioBufferRecognitionRequest = FakeReq
     speech._fake_req = FakeReq
 
-    av.AVAudioCommonFormatFloat32 = 1
+    av.AVAudioPCMFormatFloat32 = 1  # the real PyObjC name
 
     class FakeFmt:
         @classmethod
@@ -122,11 +122,9 @@ def _install_fake(auth=3, on_device=True, available=True, supported_locale=True,
         def setFrameLength_(self, n):
             pass
 
-        def floatChannelData(self):
-            import ctypes
-
-            return [ctypes.addressof(self._store.ctypes.data_as(ctypes.POINTER(ctypes.c_float)).contents)
-                    if False else self._store.ctypes.data]
+        def floatChannelData(self):  # real PyObjC: tuple of objc.varlist with as_buffer(n)
+            store = self._store
+            return (types.SimpleNamespace(as_buffer=lambda n: memoryview(store).cast("B")[:n * 4]),)
 
     av.AVAudioFormat = FakeFmt
     av.AVAudioPCMBuffer = FakeBuf

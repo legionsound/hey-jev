@@ -81,15 +81,12 @@ class AppleTranscriber:
             raise RuntimeError("empty audio")
 
         fmt = AVFoundation.AVAudioFormat.alloc().initWithCommonFormat_sampleRate_channels_interleaved_(
-            AVFoundation.AVAudioCommonFormatFloat32, SAMPLE_RATE, 1, False
+            AVFoundation.AVAudioPCMFormatFloat32, SAMPLE_RATE, 1, False
         )
         buf = AVFoundation.AVAudioPCMBuffer.alloc().initWithPCMFormat_frameCapacity_(fmt, int(data.size))
         buf.setFrameLength_(int(data.size))
-        import ctypes
-
-        ptr = buf.floatChannelData()[0]
-        cbuf = (ctypes.c_float * data.size).from_address(int(ptr))
-        cbuf[:] = data.tolist()
+        # floatChannelData() is a tuple of objc.varlist; as_buffer gives a writable view of channel 0
+        np.frombuffer(buf.floatChannelData()[0].as_buffer(int(data.size)), dtype=np.float32)[:] = data
 
         req = Speech.SFSpeechAudioBufferRecognitionRequest.alloc().init()
         req.setRequiresOnDeviceRecognition_(True)
@@ -113,12 +110,12 @@ class AppleTranscriber:
                 done_ev.set()
 
         rec.setQueue_(queue)
-        task = rec.recognitionTaskWithRequest_resultHandler_(req, handler)
-        del task
+        task = rec.recognitionTaskWithRequest_resultHandler_(req, handler)  # held until done
         req.appendAudioPCMBuffer_(buf)
         req.endAudio()
 
         if not done_ev.wait(self.timeout_s):
+            task.cancel()
             raise RuntimeError("timeout after %.0fs waiting for on-device result" % self.timeout_s)
         if "error" in out:
             raise RuntimeError("recognition failed: %s" % out["error"])

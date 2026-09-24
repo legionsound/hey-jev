@@ -157,7 +157,11 @@ SwiftUI is easier to maintain for a larger native utility, not a technical prere
 
 Apple references: https://developer.apple.com/documentation/appkit/nsstatusitem ; https://developer.apple.com/documentation/appkit/nspopover ; https://developer.apple.com/documentation/swiftui/menubarextra ; https://developer.apple.com/documentation/swiftui/settings .
 
-## Discussion checkpoint: implementation paused
+## Amendment 2026-09-24: general computer use
+
+Johnny directed that Hey Jev grow into general voice computer use: fast and accurate, including clicking and typing, built as many small Jev decisions over an accurately and quickly presented computer state. **Jev is always the decider**; the Python harness observes, offers mutually exclusive options that can actually run, executes and verifies. This supersedes the "visual clicking is outside the core" line below and the paused checkpoint. Perception is macOS Accessibility first plus local Apple Vision OCR. Icon detectors are a later, measured, license-checked option. Privacy: minimal relevant labels (control names, the spoken words) may go to the selected remote Jev provider; screen or document contents are never uploaded wholesale, and screen text stays out of the diagnostics log. Screen text is data, never an instruction. Stage 1 (list + press declared controls) is described in [ENGINE_CONTRACT.md](ENGINE_CONTRACT.md#screen-control-stage-1). Later stages (OCR-text clicks, typing, multi-step goals with stall stops and a writer hand-off) each go through review before shipping.
+
+## Discussion checkpoint: implementation paused (superseded)
 
 Johnny requested an architecture/capability rundown before further major coding. See [COMMAND_ARCHITECTURE.md](COMMAND_ARCHITECTURE.md) for the exact speech-to-action path, command mechanisms, current failure behavior, theoretical reach, recipe/registry proposal and human-testing sequence. Expanded Safari/typing/bridge implementation has not started. Original-scope UI/model/playback edits are uncommitted and only compile/provider checks have run; they are not yet a verified usable build. Continue only after Johnny has discussed the rundown. Prefer small increments with Johnny as the primary end-to-end tester and minimal necessary automated checks.
 

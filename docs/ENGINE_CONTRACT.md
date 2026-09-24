@@ -78,6 +78,7 @@ Each action has an `effect` category: `open`, `navigate`, `media`, `volume`, `di
 - After a Confirm wins, the engine re-resolves the target before dispatch; if any field differs or it vanished the step fails with `target_changed`.
 - The popover text names the exact effect: volume level and percent, timer duration or reminder text, the pinned timer(s) to cancel, and for apps the install's folder. Timer cancel pins timer ids at resolve; run cancels only those. Quit terminates only processes whose bundle path equals the resolved path, never by bundle id.
 - No request field can confirm, skip policy or supply a target handle.
+- `click` (on-screen controls) defaults to Ask first. A control whose label matches the risky list (buy, send, delete, pay, submit, post, share, install, sign out and similar) always asks, whatever the setting. That list only adds confirmation; it never proves any other click harmless. `look` (reading the screen) has no effect and never asks.
 
 ## Ledger and replay
 
@@ -95,6 +96,8 @@ Each action has an `effect` category: `open`, `navigate`, `media`, `volume`, `di
 - Volume, Spotify volume, dark mode, media: read the value back after setting it.
 - `app.quit`: poll until the bundle id is no longer running.
 - Lock, sleep: `unverified`.
+- `screen.list`: one bounded observation of the frontmost app's focused window. The Accessibility walk (node and time caps, ported from typesafe-computer-use under MIT) lists the controls the app declares, and the menu bar items. Apple Vision OCR on a capture of that window only adds the text lines no control covers. Each item carries its source: `ax`, `ocr` (text, not proof of a control) or `ax+ocr`. Items are numbered in reading order, capped at 60, and remembered as the last list shown. The UI badges them for 12 s. Facts carry the items. The diagnostics log gets only their count, never screen text.
+- `screen.press`: resolve takes a fresh AX observation. A number must match the last list shown: same app and window, and the same role, label and frame, else `screen_changed`; OCR-only items are `not_a_control`. A name matches exactly, then as whole words. Failing that, Jev chooses among the window's control names; only those names and the spoken words are sent, and it must clear 0.65. Identical labels in different places ask which. The target is (pid, window, role, label, rounded frame, occurrence), so a re-resolve after confirmation compares equal only when the control is unchanged. Run re-finds it, then sends `AXPress` (no mouse movement). An AX error meaning the element is gone or refuses → `failed`; any other error after sending → `unknown`. Verify compares an AX fingerprint (window title, window count, focused element, open menu, the control set, a hash of the window text, the control's own value, selection and expansion) before and after. A difference → `done`, listing only which parts changed. No difference within 1.5 s → `unverified`. `done` means the window changed, not that the intended result happened.
 
 ## Bridge
 
@@ -103,6 +106,10 @@ Socket `~/Library/Application Support/Hey Jev/run/jev.sock`; directory mode 0700
 ## Speech
 
 `siri.py` speaks from the final result, naming the failed step when there is one. Exception: mute, lock and sleep speak a short "about to" line before running, because speech cannot follow them. That line never claims completion. `unverified` is spoken as "sent, couldn't check", never "done". A voice request refused as `busy` is spoken at once; a result that outlives the voice wait is spoken when it lands.
+
+## Screen control (stage 1)
+
+Implemented 2026-09-24 on branch screen-control: `screen.list` and `screen.press` above. A clause that starts with "click" or "tap", or that names a UI part (button, checkbox, link, menu item, icon, toggle), always plans as `screen.press`, because Jev's target question hears "the Loud mode checkbox" as volume. Not yet: clicking OCR-only text, typing, scrolling, and multi-step goals.
 
 ## Milestone 1
 

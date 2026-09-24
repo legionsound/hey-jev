@@ -199,7 +199,7 @@ def numbers_window(facts):
     top = AppKit.NSScreen.screens()[0].frame().size.height  # AX frames are top-left on the primary display
     xs = [i["frame"][0] for i in items]
     ys = [i["frame"][1] for i in items]
-    x0, y0 = min(xs) - 4, min(ys) - 4
+    x0, y0 = min(xs) - 34, min(ys) - 4  # room for a badge left of the leftmost item
     x1 = max(i["frame"][0] + 40 for i in items)
     y1 = max(i["frame"][1] + 24 for i in items)
     frame = NSMakeRect(x0, top - y1, x1 - x0, y1 - y0)
@@ -221,7 +221,8 @@ def numbers_window(facts):
         badge.layer().setBackgroundColor_(tint.CGColor())
         badge.layer().setCornerRadius_(7)
         w = 10 + 7 * len(text)
-        x, y = i["frame"][0] - x0, i["frame"][1] - y0
+        x = i["frame"][0] - x0 - w - 2  # just left of the item, so its label stays readable
+        y = i["frame"][1] - y0 + max(0, (i["frame"][3] - 15) / 2)
         badge.setFrame_(NSMakeRect(x, (y1 - y0) - y - 15, w, 15))
         win.contentView().addSubview_(badge)
     return win

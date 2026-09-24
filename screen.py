@@ -130,7 +130,10 @@ def trusted():
 
 
 def frontmost():
-    """(pid, name, bundle id) of the frontmost app."""
+    """(pid, name, bundle id) of the frontmost app. HEYJEV_SCREEN_PID pins another app, for tests only."""
+    if os.environ.get("HEYJEV_SCREEN_PID"):
+        pid = int(os.environ["HEYJEV_SCREEN_PID"])
+        return (pid, *_app_info(pid))
     from AppKit import NSWorkspace
     app = NSWorkspace.sharedWorkspace().frontmostApplication()
     if app is None:
@@ -348,4 +351,20 @@ def signature(pid):
     if win is not None:
         found, _, _ = _walk(win, _frame(win) or (0, 0, 0, 0), 0.4)
         sig["controls"] = sorted((c.role, c.label) for c in found)
+        sig["text"] = _text_digest(win)
     return sig
+
+
+def _text_digest(win, node_cap=1500, time_cap=0.3):
+    """A hash of the window's visible text, so a label that changes ("Count: 1") counts as a change.
+    Only the hash is kept: the text itself is never stored or logged."""
+    import hashlib
+    h, queue, seen, end = hashlib.sha256(), [win], 0, time.monotonic() + time_cap
+    while queue and seen < node_cap and time.monotonic() < end:
+        el = queue.pop(0)
+        seen += 1
+        if str(_attr(el, "AXRole") or "") in ("AXStaticText", "AXTextField", "AXTextArea"):
+            v = _attr(el, "AXValue")
+            h.update(str(v if isinstance(v, str) else "").encode() + b"\0")
+        queue.extend(_children(el))
+    return h.hexdigest()[:16]

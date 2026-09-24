@@ -37,9 +37,9 @@ QUESTIONS = {
                      "criteria": {"set": "start a timer or set a reminder", "check": "ask how much time is left",
                                   "cancel": "stop or cancel a timer", "none": None}},
     "screen_action": {"type": "choice", "instructions": "What should happen on the screen, if anything?",
-                      "criteria": {"list": "say or show what can be clicked or what is on the screen",
-                                   "press": "click, press, tap or choose one named or numbered control on screen",
-                                   "none": None}},
+                      "criteria": {"list": "a question about what is visible or available on screen",
+                                   "press": "an instruction to click, press or select a particular named or numbered thing",
+                                   "none": "neither"}},
     "system_action": {"type": "choice", "instructions": "What should happen to the computer?",
                       "criteria": {"lock": None, "sleep": None, "none": None}},
 }
@@ -82,7 +82,7 @@ def site_url(clause):
 
 
 PRESS_SPAN = re.compile(r"\b(?:click|press|tap|hit|choose|select|pick)\s+(?:on\s+)?(?:the\s+)?(.+?)"
-                        r"(?:\s+(?:button|menu|link|tab|item|checkbox|option|icon))?(?:\s+(?:please|for me|now))*[\s.!?]*$",
+                        r"(?:\s+(?:button|menu|link|tab|item|checkbox|option|icon|toggle))?(?:\s+(?:please|for me|now))*[\s.!?]*$",
                         re.I)
 NUMBER = re.compile(r"^(?:number\s+|item\s+|#\s*)?(\d{1,3}|[a-z]+(?:[\s-][a-z]+)?)$", re.I)
 
@@ -183,8 +183,16 @@ def step_for(ans, target, clause):
     return (conf, f"{target}.{act}", {})
 
 
+UI_WORDS = re.compile(r"^\W*(?:please\s+)?(?:click|tap|double[\s-]click)\b|"
+                      r"\b(?:button|checkbox|check\s+box|link|menu\s+item|icon|toggle)\b", re.I)
+
+
 def pick(ans, clause):
-    """Trust Jev's target if it is fairly sure, else the single most confident action anywhere."""
+    """Trust Jev's target if it is fairly sure, else the single most confident action anywhere.
+    "Click" and "tap", or a named UI part ("the Loud mode checkbox"), always mean a control on screen:
+    Jev's target question hears "Loud" as volume, and that must never turn a click into a volume change."""
+    if UI_WORDS.search(clause):
+        return step_for(ans, "screen", clause)
     target, tconf = ans["target"]
     s = step_for(ans, target, clause) if tconf >= 0.5 else None
     if s is None:

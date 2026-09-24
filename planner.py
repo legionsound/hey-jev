@@ -289,6 +289,17 @@ def judge(ans, clause, can_answer=False, inherited_browser=None):
 def plan(text, classify, can_answer=False):
     """-> ("steps", [{"clause", "action", "args"}]), ("reply", key), ("answer", None) or ("clarify", reason).
     Every clause is judged before anything runs; one unclear clause stops the whole request."""
+    try:
+        import recipes
+        hit = recipes.match(text)
+        if hit is not None:
+            if not hit:
+                return ("clarify", "no_action")
+            return ("steps", hit)
+    except ValueError:
+        return ("clarify", "invalid_recipe")
+    except Exception:
+        pass
     clauses = split_clauses(text)
     if not clauses:
         return ("clarify", "empty")

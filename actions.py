@@ -5,6 +5,7 @@ resolve(args) -> ("target", t) | ("choices", [...]) | ("none", reason)
 run(target, deadline) -> None, may record prior state in target; raises Failed or Timeout
 verify(target, deadline) -> ("done" | "wait" | "failed" | "unverified", facts), or None when nothing can be read
 """
+import os
 import re
 import subprocess
 import time
@@ -24,7 +25,12 @@ class Timeout(Exception):
     """The deadline passed with the native call still out: outcome unknown."""
 
 
-def sh(cmd, deadline):
+class Uncertain(Exception):
+    """The effect was dispatched and then something went wrong: it may or may not have happened."""
+
+
+def sh(cmd, deadline, effect=False):
+    """effect=True marks the call that performs the action: an error there proves nothing, so it is Uncertain."""
     left = deadline - time.monotonic()
     if left <= 0:
         raise Timeout(cmd[0])
@@ -33,16 +39,17 @@ def sh(cmd, deadline):
     except subprocess.TimeoutExpired:  # subprocess.run kills and reaps the child
         raise Timeout(cmd[0])
     if r.returncode:
-        raise Failed(r.stderr.strip() or f"{cmd[0]} exited {r.returncode}")
+        msg = r.stderr.strip() or f"{cmd[0]} exited {r.returncode}"
+        raise Uncertain(msg) if effect else Failed(msg)
     return r.stdout.strip()
 
 
-def osa(deadline, *lines, argv=()):
+def osa(deadline, *lines, argv=(), effect=False):
     """Fixed script lines; user values only ever travel as argv, never inside the script."""
     cmd = ["osascript"]
     for line in lines:
         cmd += ["-e", line]
-    return sh(cmd + list(argv), deadline)
+    return sh(cmd + list(argv), deadline, effect)
 
 
 def _check(value):
@@ -59,19 +66,24 @@ def resolve_app(args):
     return got
 
 
-def running_paths(bundle_id, deadline):
-    """Bundle paths of running processes with this bundle id, via lsappinfo (no Apple Events)."""
+def running(bundle_id, deadline):
+    """(bundle path, pid) of running processes with this bundle id, via lsappinfo (no Apple Events)."""
     asns = re.findall(r"ASN:0x[0-9a-f]+-0x[0-9a-f]+", sh(["lsappinfo", "find", f"bundleid={bundle_id}"], deadline))
-    paths = []
+    found = []
     for asn in asns:
-        m = re.search(r'bundle path="([^"]*)"', sh(["lsappinfo", "info", "-only", "bundlepath", asn], deadline))
-        if m:
-            paths.append(m[1])
-    return paths
+        info = sh(["lsappinfo", "info", "-only", "bundlepath", "-only", "pid", asn], deadline)
+        path, pid = re.search(r'bundle ?path"?="([^"]*)"', info, re.I), re.search(r"\bpid\s*=\s*(\d+)", info)
+        if path:
+            found.append((path[1], int(pid[1]) if pid else None))
+    return found
+
+
+def running_paths(bundle_id, deadline):
+    return [p for p, _ in running(bundle_id, deadline)]
 
 
 def run_app_open(t, deadline):
-    sh(["open", "-a", t["path"]] if t.get("path") else ["open", "-b", t["bundle_id"]], deadline)
+    sh(["open", "-a", t["path"]] if t.get("path") else ["open", "-b", t["bundle_id"]], deadline, effect=True)
 
 
 def verify_app_open(t, deadline):
@@ -83,7 +95,17 @@ def verify_app_open(t, deadline):
 
 
 def run_app_quit(t, deadline):
-    osa(deadline, "on run argv", "tell application id (item 1 of argv) to quit", "end run", argv=[t["bundle_id"]])
+    """Quit only the install that was resolved and confirmed: by pid, never by bundle id, which duplicates share."""
+    from AppKit import NSRunningApplication
+    pids = [pid for path, pid in running(t["bundle_id"], deadline) if path == t.get("path") and pid]
+    if not pids:
+        raise Failed(f"{t.get('name') or 'that app'} is not running from {t.get('path')}")
+    sent = False
+    for pid in pids:
+        app = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+        sent = bool(app and app.terminate()) or sent
+    if not sent:
+        raise Uncertain("quit request not accepted")
 
 
 def verify_app_quit(t, deadline):
@@ -102,7 +124,8 @@ def get_muted(deadline):
 
 
 def set_volume(t, deadline):
-    osa(deadline, "on run argv", "set volume output volume (item 1 of argv as integer)", "end run", argv=[str(t["value"])])
+    osa(deadline, "on run argv", "set volume output volume (item 1 of argv as integer)", "end run", argv=[str(t["value"])],
+        effect=True)
 
 
 def volume_step(delta):
@@ -119,7 +142,7 @@ def verify_volume(t, deadline):
 
 def run_mute(muted):
     def run(t, deadline):
-        osa(deadline, f"set volume output muted {'true' if muted else 'false'}")
+        osa(deadline, f"set volume output muted {'true' if muted else 'false'}", effect=True)
     return run
 
 
@@ -145,7 +168,7 @@ def get_spotify_volume(deadline):
 
 def set_spotify_volume(t, deadline):
     osa(deadline, "on run argv", 'tell application "Spotify" to set sound volume to (item 1 of argv as integer)',
-        "end run", argv=[str(t["value"])])
+        "end run", argv=[str(t["value"])], effect=True)
 
 
 def spotify_step(delta):
@@ -181,8 +204,8 @@ def spotify_track(deadline):
 
 def run_play(t, deadline):
     if not spotify_running(deadline):
-        sh(["open", "-b", "com.spotify.client"], deadline)
-    osa(deadline, 'tell application "Spotify" to play')
+        sh(["open", "-b", "com.spotify.client"], deadline, effect=True)
+    osa(deadline, 'tell application "Spotify" to play', effect=True)
 
 
 def verify_play(t, deadline):
@@ -199,7 +222,7 @@ def run_spotify_cmd(cmd, record_track=False):
             raise Failed("Spotify is not running")
         if record_track:
             t["track"] = spotify_track(deadline)
-        osa(deadline, f'tell application "Spotify" to {cmd}')
+        osa(deadline, f'tell application "Spotify" to {cmd}', effect=True)
     return run
 
 
@@ -222,7 +245,7 @@ def run_dark(value):
     def run(t, deadline):
         t["value"] = (not get_dark(deadline)) if value is None else value
         osa(deadline, 'tell application "System Events" to tell appearance preferences to set dark mode to '
-            + ("true" if t["value"] else "false"))
+            + ("true" if t["value"] else "false"), effect=True)
     return run
 
 
@@ -233,11 +256,11 @@ def verify_dark(t, deadline):
 
 # --------------------------------------------------------------------------- system
 def run_lock(t, deadline):
-    osa(deadline, 'tell application "System Events" to keystroke "q" using {control down, command down}')
+    osa(deadline, 'tell application "System Events" to keystroke "q" using {control down, command down}', effect=True)
 
 
 def run_sleep(t, deadline):
-    sh(["pmset", "sleepnow"], deadline)
+    sh(["pmset", "sleepnow"], deadline, effect=True)
 
 
 # --------------------------------------------------------------------------- timers
@@ -258,11 +281,25 @@ def verify_timer_set(t, deadline):
     return ("done" if alive else "failed", {"secs": t["secs"], "label": t["label"]})
 
 
-def resolve_timer_query(args):
+def _timer_view(x):
+    return {"id": x["id"], "secs": x["secs"], "label": x["label"]}
+
+
+def resolve_timer_check(args):
     with timers.LOCK:
         if not timers.TIMERS:
             return ("none", "no timer running")
-    return ("target", {"all": bool(re.search(r"\ball\b", args.get("text", "").lower()))})
+    return ("target", {})
+
+
+def resolve_timer_cancel(args):
+    """Pin the exact timers now, so the confirmation names them and the run cancels only those."""
+    everything = bool(re.search(r"\ball\b", args.get("text", "").lower()))
+    with timers.LOCK:
+        if not timers.TIMERS:
+            return ("none", "no timer running")
+        pick = list(timers.TIMERS) if everything else [max(timers.TIMERS, key=lambda x: x["end"] - x["secs"])]
+        return ("target", {"all": everything, "timers": [_timer_view(x) for x in pick]})
 
 
 def run_timer_check(t, deadline):
@@ -277,18 +314,19 @@ def verify_timer_check(t, deadline):
 
 
 def run_timer_cancel(t, deadline):
+    ids = {x["id"] for x in t["timers"]}
     with timers.LOCK:
-        if not timers.TIMERS:
-            raise Failed("no timer running")
-        gone = list(timers.TIMERS) if t["all"] else [max(timers.TIMERS, key=lambda x: x["end"] - x["secs"])]
+        gone = [x for x in timers.TIMERS if x["id"] in ids]
+        if not gone:
+            raise Failed("that timer already finished")
         for x in gone:
             timers.TIMERS.remove(x)
-        t["cancelled"] = gone
+    t["cancelled"] = [x["id"] for x in gone]
 
 
 def verify_timer_cancel(t, deadline):
     with timers.LOCK:
-        left = [x for x in t["cancelled"] if any(x is y for y in timers.TIMERS)]
+        left = [x for x in timers.TIMERS if x["id"] in t["cancelled"]]
     return ("done" if not left else "failed", {"cancelled": len(t["cancelled"])})
 
 
@@ -298,15 +336,29 @@ def _wall(deadline):
     return time.time() + (deadline - time.monotonic())
 
 
-def _adapted(fn):
-    def call(t, deadline):
-        try:
-            return fn(t, _wall(deadline))
-        except TimeoutError as exc:
-            raise Timeout(str(exc))
-        except (RuntimeError, ValueError) as exc:
-            raise Failed(str(exc))
-    return call
+def run_url(t, deadline):
+    """Validation and the browser lookup happen here, before dispatch: their errors mean nothing opened.
+    Any error from the adapter after that (no tab id, osascript error) is Uncertain: a tab may exist."""
+    try:
+        url_adapter.normalize_url(t.get("url", ""))
+        browser = url_adapter.default_browser_for_url(t["url"], max(0.1, deadline - time.monotonic()))
+    except TimeoutError as exc:
+        raise Failed(f"browser lookup timed out: {exc}")
+    except (RuntimeError, ValueError) as exc:
+        raise Failed(str(exc))
+    try:
+        url_adapter.run_url_open(t, _wall(deadline), _default_browser_fn=lambda _: browser)
+    except TimeoutError as exc:
+        raise Timeout(str(exc))
+    except Exception as exc:
+        raise Uncertain(str(exc))
+
+
+def verify_url(t, deadline):
+    try:
+        return url_adapter.verify_url_open(t, _wall(deadline))
+    except TimeoutError as exc:
+        raise Timeout(str(exc))
 
 
 def resolve_url(args):
@@ -324,7 +376,7 @@ def entry(effect, resolve, run, verify, proves, timeout=10):
 
 ACTIONS = {
     "app.open": entry("open", resolve_app, run_app_open, verify_app_open, "a running app at the resolved path"),
-    "url.open": entry("navigate", resolve_url, _adapted(url_adapter.run_url_open), _adapted(url_adapter.verify_url_open),
+    "url.open": entry("navigate", resolve_url, run_url, verify_url,
                       "Chrome: the opened tab shows exactly this URL. Safari and others: nothing", 10),
     "app.quit": entry("quit", resolve_app, run_app_quit, verify_app_quit, "no running app at the resolved path"),
     "volume.up": entry("volume", plain, volume_step(20), verify_volume, "output volume reads back the new level", 5),
@@ -349,8 +401,8 @@ ACTIONS = {
     "system.lock": entry("lock", plain, run_lock, None, "nothing: no lock-state readback", 5),
     "system.sleep": entry("sleep", plain, run_sleep, None, "nothing: the Mac is asleep", 5),
     "timer.set": entry("timer", resolve_timer_set, run_timer_set, verify_timer_set, "the timer is in the running list", 2),
-    "timer.check": entry("timer", resolve_timer_query, run_timer_check, verify_timer_check, "read from the running list", 2),
-    "timer.cancel": entry("timer", resolve_timer_query, run_timer_cancel, verify_timer_cancel, "the timer left the running list", 2),
+    "timer.check": entry("timer", resolve_timer_check, run_timer_check, verify_timer_check, "read from the running list", 2),
+    "timer.cancel": entry("timer", resolve_timer_cancel, run_timer_cancel, verify_timer_cancel, "the timer left the running list", 2),
 }
 
 EFFECTS = ("open", "navigate", "media", "volume", "display", "timer", "quit", "lock", "sleep")
@@ -360,9 +412,36 @@ EFFECT_LABELS = {"open": "Open apps", "navigate": "Open websites", "media": "Mus
                  "lock": "Lock screen", "sleep": "Sleep the Mac"}
 
 
+def _timer_name(x):
+    d = timers.say_duration(x["secs"])
+    return f"the reminder to {x['label']}" if x.get("label") else f"the {d} timer"
+
+
 def describe(action, target):
-    """Plain words for the confirmation pop-down."""
-    what = {"app.quit": "Quit {app}", "app.open": "Open {app}", "url.open": "Open {url}", "system.lock": "Lock the screen",
-            "system.sleep": "Put the Mac to sleep"}.get(action, action.replace(".", ": ").replace("_", " "))
+    """Plain words for the confirmation pop-down: the exact level, duration and target, never just the category."""
     t = target or {}
-    return what.format(app=t.get("name") or t.get("app") or "the app", url=t.get("url") or "the website")
+    name = t.get("name") or t.get("app") or "the app"
+    if t.get("path"):
+        name += f" (in {os.path.basename(os.path.dirname(t['path'])) or '/'})"
+    level = t.get("level")
+    level = f"{level} ({LEVELS[level]}%)" if level in LEVELS else "that level"
+    if action == "timer.set":
+        d = timers.say_duration(t.get("secs", 0))
+        return f"Remind you in {d} to {t['label']}" if t.get("label") else f"Start a {d} timer"
+    if action == "timer.cancel":
+        xs = t.get("timers") or []
+        if t.get("all"):
+            return f"Cancel all {len(xs)} timer{'s' if len(xs) != 1 else ''}"
+        return f"Cancel {_timer_name(xs[0])}" if xs else "Cancel a timer"
+    what = {"app.quit": "Quit {name}", "app.open": "Open {name}", "url.open": "Open {url}",
+            "system.lock": "Lock the screen", "system.sleep": "Put the Mac to sleep",
+            "volume.up": "Turn the volume up", "volume.down": "Turn the volume down",
+            "volume.mute": "Mute the sound", "volume.unmute": "Unmute the sound", "volume.set": "Set the volume to {level}",
+            "spotify_volume.up": "Turn Spotify up", "spotify_volume.down": "Turn Spotify down",
+            "spotify_volume.mute": "Mute Spotify", "spotify_volume.unmute": "Unmute Spotify",
+            "spotify_volume.set": "Set Spotify's volume to {level}",
+            "display.dark_on": "Turn dark mode on", "display.dark_off": "Turn dark mode off",
+            "display.toggle": "Switch dark mode", "media.play": "Play music in Spotify", "media.pause": "Pause Spotify",
+            "media.next": "Skip to the next track", "media.previous": "Go back a track",
+            "timer.check": "Read out the time left"}.get(action, action.replace(".", ": ").replace("_", " "))
+    return what.format(name=name, url=t.get("url") or "the website", level=level)

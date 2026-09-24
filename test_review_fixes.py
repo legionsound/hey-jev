@@ -1,0 +1,280 @@
+"""Regressions for the ccbc585 review: each test drives the real path Astra probed."""
+import contextlib
+import json
+import os
+import socket
+import sys
+import tempfile
+import threading
+import time
+import unittest
+from unittest.mock import MagicMock, patch
+
+import actions
+import bridge
+import engine
+import planner
+import timers
+from actions import Failed, Uncertain
+from test_engine import Calls, act, fake_plan, make
+
+
+def answers(**over):
+    base = {"category": ("mac_command", 0.9), "compound": (False, 0.9), "target": ("volume", 0.9),
+            "app_action": ("none", 0.9), "volume_action": ("mute", 0.9), "volume_scope": ("system", 0.9),
+            "volume_level": ("medium", 0.9), "display_action": ("none", 0.9), "media_action": ("none", 0.9),
+            "timer_action": ("none", 0.9), "system_action": ("none", 0.9)}
+    base.update(over)
+    return base
+
+
+@patch.object(engine.planner, "plan", fake_plan)
+class CancelBoundaryTests(unittest.TestCase):
+    def test_cancel_during_blocked_resolver_runs_nothing(self):
+        gate, c = threading.Event(), Calls()
+        eng = make({"slow": act(c, "slow", resolve=lambda a: gate.wait(5) and ("target", {"app": "slow"}))})
+        rid = eng.submit("slow", "cli")["id"]
+        time.sleep(0.1)
+        eng.cancel(rid)
+        gate.set()
+        r = eng.wait(rid, 5)
+        self.assertEqual((r["state"], c.runs), ("cancelled", []))
+        self.assertEqual(r["steps"][0]["state"], "skipped")
+
+    def test_cancel_after_completed_step_lists_it(self):
+        gate, c = threading.Event(), Calls()
+        eng = make({"ok": act(c, "ok"), "slow": act(c, "slow", resolve=lambda a: gate.wait(5) and ("target", {}))})
+        rid = eng.submit("ok; slow", "cli")["id"]
+        time.sleep(0.1)
+        eng.cancel(rid)
+        gate.set()
+        r = eng.wait(rid, 5)
+        self.assertEqual(r["state"], "cancelled")
+        self.assertEqual([s["state"] for s in r["steps"]], ["completed", "skipped"])
+        self.assertEqual(c.runs, ["ok"])
+
+    def test_post_dispatch_error_is_unknown_not_failed(self):
+        c = Calls()
+        eng = make({"ok": act(c, "ok"), "iffy": act(c, "iffy", run_exc=Uncertain("no tab identity returned"))})
+        r = eng.wait(eng.submit("ok; iffy; ok", "cli")["id"], 5)
+        self.assertEqual((r["state"], r["stopped_state"]), ("partial", "unknown"))
+        self.assertEqual(r["uncertain_step"], {"index": 1, "state": "unknown"})
+        self.assertEqual(r["not_started"], ["ok"])
+
+    def test_broken_event_hook_does_not_break_the_run(self):
+        c = Calls()
+        eng = engine.Engine(classify=None, policy=lambda: {"open": "auto"}, actions={"ok": act(c, "ok")},
+                            on_event=lambda *a: 1 / 0)
+        self.assertEqual(eng.wait(eng.submit("ok", "cli")["id"], 5)["state"], "completed")
+
+
+class PlannerTests(unittest.TestCase):
+    def test_every_clause_gets_compound_check(self):
+        per = {"mute and lock": answers(compound=(True, 0.9)), "mute": answers()}
+        self.assertEqual(planner.plan("mute and lock, then mute", lambda c: per[c]), ("clarify", "compound_unsplit"))
+
+    def test_every_clause_gets_category_check(self):
+        per = {"mute": answers(), "blah blah": answers(category=("unclear", 0.9))}
+        self.assertEqual(planner.plan("mute then blah blah", lambda c: per[c]), ("clarify", "unclear"))
+        per["blah blah"] = answers(category=("mac_command", 0.9), volume_action=("none", 0.9), target=("app", 0.2))
+        self.assertEqual(planner.plan("mute then blah blah", lambda c: per[c]), ("clarify", "no_action"))
+
+    def test_single_clause_plan_shape(self):
+        self.assertEqual(planner.plan("mute", lambda c: answers()),
+                         ("steps", [{"clause": "mute", "action": "volume.mute", "args": {"level": "medium"}}]))
+
+    def test_good_multi_clause_still_plans(self):
+        kind, steps = planner.plan("mute then mute", lambda c: answers())
+        self.assertEqual((kind, [s["action"] for s in steps]), ("steps", ["volume.mute", "volume.mute"]))
+
+    def test_url_keeps_query_and_fragment(self):
+        self.assertEqual(planner.url_span("go to example.com?mode=edit#section"), "example.com?mode=edit#section")
+        self.assertEqual(planner.url_span("go to example.com/a?b=1."), "example.com/a?b=1")
+
+
+class EffectUncertaintyTests(unittest.TestCase):
+    def test_native_effect_error_is_uncertain_read_error_is_failed(self):
+        end = time.monotonic() + 5
+        with self.assertRaises(Uncertain):
+            actions.sh(["false"], end, effect=True)
+        with self.assertRaises(Failed):
+            actions.sh(["false"], end)
+
+    def test_url_lookup_failure_is_failed(self):
+        t = {"url": "https://example.com/"}
+        with patch.object(actions.url_adapter, "default_browser_for_url", side_effect=RuntimeError("no handler")):
+            with self.assertRaises(Failed):
+                actions.run_url(t, time.monotonic() + 5)
+
+    def test_url_error_after_dispatch_is_uncertain(self):
+        t = {"url": "https://example.com/"}
+        done = MagicMock(returncode=0, stdout="", stderr="")  # Chrome made the tab but returned no id
+        with patch.object(actions.url_adapter, "default_browser_for_url", return_value="com.google.Chrome"), \
+             patch.object(actions.url_adapter, "_osascript_argv", return_value=done):
+            with self.assertRaises(Uncertain):
+                actions.run_url(t, time.monotonic() + 5)
+
+    def test_bad_url_is_failed_before_dispatch(self):
+        with patch.object(actions.url_adapter, "default_browser_for_url") as lookup:
+            with self.assertRaises(Failed):
+                actions.run_url({"url": "ftp://x"}, time.monotonic() + 5)
+            lookup.assert_not_called()
+
+
+class ConfirmationTargetTests(unittest.TestCase):
+    def tearDown(self):
+        with timers.LOCK:
+            timers.TIMERS.clear()
+
+    def test_prompt_names_level_duration_and_target(self):
+        self.assertEqual(actions.describe("volume.set", {"level": "quiet", "value": 25}), "Set the volume to quiet (25%)")
+        self.assertEqual(actions.describe("timer.set", {"secs": 300, "label": None}), "Start a 5 minutes timer")
+        self.assertEqual(actions.describe("timer.set", {"secs": 600, "label": "call mum"}), "Remind you in 10 minutes to call mum")
+        self.assertEqual(actions.describe("app.quit", {"name": "Live", "path": "/Applications/Old/Live.app"}),
+                         "Quit Live (in Old)")
+
+    def test_cancel_prompt_and_run_use_the_pinned_timer(self):
+        a = timers.add(300)
+        kind, t = actions.resolve_timer_cancel({"text": "cancel the timer"})
+        self.assertEqual(actions.describe("timer.cancel", t), "Cancel the 5 minutes timer")
+        b = timers.add(900)  # arrives while the pop-down is open
+        actions.run_timer_cancel(t, time.monotonic() + 1)
+        with timers.LOCK:
+            self.assertEqual([x["id"] for x in timers.TIMERS], [b["id"]])
+        self.assertNotEqual(a["id"], b["id"])
+        kind, t = actions.resolve_timer_cancel({"text": "cancel all timers"})
+        self.assertEqual(actions.describe("timer.cancel", t), "Cancel all 1 timer")
+
+    def test_quit_targets_the_resolved_install_only(self):
+        t = {"name": "Live", "bundle_id": "com.ableton.live", "path": "/Applications/Live.app"}
+        running = [("/Applications/Old/Live.app", 111), ("/Applications/Live.app", 222)]
+        app = MagicMock()
+        app.terminate.return_value = True
+        with patch.object(actions, "running", return_value=running), \
+             patch("AppKit.NSRunningApplication") as cls:
+            by_pid = cls.runningApplicationWithProcessIdentifier_
+            by_pid.return_value = app
+            actions.run_app_quit(t, time.monotonic() + 5)
+        by_pid.assert_called_once_with(222)
+        with patch.object(actions, "running", return_value=running[:1]):
+            with self.assertRaises(Failed):  # only the other install runs: refuse, never quit it
+                actions.run_app_quit(t, time.monotonic() + 5)
+
+
+class VoiceWiringTests(unittest.TestCase):
+    def setUp(self):
+        import siri
+        self.siri = siri
+        self.said = []
+        self.p = patch.object(siri, "say", lambda line, notify: self.said.append(line))
+        self.p.start()
+
+    def tearDown(self):
+        self.p.stop()
+
+    def test_silent_volume_prespeech_does_not_crash(self):
+        eng = self.siri.make_engine()
+        step = {"index": 0, "clause": "volume silent", "action": "volume.set", "state": "running",
+                "target": {"level": "silent", "value": 0}, "facts": {}, "detail": None}
+        eng.on_event("step", {"id": "x", "source": "voice", "state": "running"}, step)
+        self.assertEqual(len(self.said), 1)
+        self.assertIn(self.said[0], self.siri.REPLIES["volume.mute"])
+        eng.shutdown()
+
+    def test_unverified_never_claims_it_happened(self):
+        for line in self.siri.REPLIES["unverified"]:
+            self.assertNotRegex(line.lower(), r"\bi did\b|\bdone\b")
+
+    def test_busy_rejection_is_spoken_not_waited(self):
+        eng = MagicMock(spoke_first=set())
+        eng.submit.return_value = {"v": 1, "id": "x", "state": "busy", "detail": "queue_full"}
+        self.siri.turn(eng, "open Safari", None)
+        eng.wait.assert_not_called()
+        self.assertIn(self.said[-1], self.siri.REPLIES["busy"])
+
+    def test_late_result_is_delivered(self):
+        eng = MagicMock(spoke_first=set())
+        eng.submit.return_value = {"id": "x", "state": "queued"}
+        done = {"id": "x", "state": "failed", "steps": []}
+        eng.wait.side_effect = [{"id": "x", "state": "running"}, {"id": "x", "state": "running"}, done]
+        held = []
+
+        @contextlib.contextmanager
+        def hold():
+            held.append(True)
+            yield
+
+        self.siri.turn(eng, "open Safari", None, hold=hold)
+        for _ in range(100):
+            if self.said:
+                break
+            time.sleep(0.02)
+        self.assertEqual(held, [True])
+        self.assertIn(self.said[-1], self.siri.REPLIES["failed"])
+
+    def test_second_instance_stops_before_microphone(self):
+        tmp = tempfile.mkdtemp()
+        owner = bridge.Bridge(MagicMock(), run_dir=tmp)
+        owner.start()
+        try:
+            eng = MagicMock()
+            with patch.object(bridge.Bridge.__init__, "__defaults__", (tmp,)):
+                with self.assertRaises(RuntimeError):
+                    self.siri.start_bridge(eng, None)
+            eng.shutdown.assert_called_once()
+            fake_whisper = MagicMock()
+            with patch.dict(sys.modules, {"faster_whisper": fake_whisper}), \
+                 patch.object(self.siri, "start_bridge", side_effect=RuntimeError("owned")), \
+                 patch.object(self.siri, "Recorder") as rec:
+                with self.assertRaises(RuntimeError):
+                    self.siri.run_voice_assistant()
+            rec.assert_not_called()
+            fake_whisper.WhisperModel.assert_not_called()
+        finally:
+            owner.stop()
+            self.siri.ENGINE.shutdown()
+
+
+class BridgeResilienceTests(unittest.TestCase):
+    def setUp(self):
+        self.eng = MagicMock()
+        self.eng.status.return_value = {"state": "running"}
+        self.b = bridge.Bridge(self.eng, run_dir=os.path.join(tempfile.mkdtemp(), "run"))
+
+    def tearDown(self):
+        self.b.stop()
+
+    def test_bad_wait_and_op_types_rejected(self):
+        h = lambda raw: self.b.handle(raw.encode())
+        for wait in ("NaN", "Infinity", "-Infinity", "true"):
+            self.assertEqual(h('{"v":1,"op":"status","id":"a","wait":%s}' % wait)["detail"], "bad_wait", wait)
+        self.assertEqual(h('{"v":1,"op":["status"],"id":"a"}')["detail"], "bad_op_or_field")
+        self.assertEqual(h('{"v":1,"op":{"a":1},"id":"a"}')["detail"], "bad_op_or_field")
+        self.eng.submit.assert_not_called()
+        self.eng.wait.assert_not_called()
+
+    def test_overflow_client_that_hung_up_does_not_kill_accept_loop(self):
+        self.b.slots = threading.BoundedSemaphore(1)
+        self.b.slots.acquire()  # every slot taken: next clients get the overflow reply
+        real, calls = bridge.Bridge._reply, []
+
+        def reply(conn, obj):
+            calls.append(obj)
+            if len(calls) == 1:
+                raise BrokenPipeError()
+            real(conn, obj)
+
+        with patch.object(bridge.Bridge, "_reply", staticmethod(reply)):
+            self.b.start()
+            for _ in range(2):
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                s.settimeout(2)
+                s.connect(self.b.sock_path)
+                data = s.recv(65536)
+                s.close()
+        self.assertEqual(json.loads(data)["detail"], "too_many_clients")
+        self.assertEqual(len(calls), 2)
+
+
+if __name__ == "__main__":
+    unittest.main()

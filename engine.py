@@ -23,8 +23,8 @@ def _sha(text):
 
 
 def _same_target(a, b):
-    keys = ("bundle_id", "path", "url", "app")
-    return {k: a.get(k) for k in keys} == {k: b.get(k) for k in keys}
+    """Resolve returns a fresh dict each time, so any difference means the target moved under the confirmation."""
+    return a == b
 
 
 class Engine:
@@ -163,10 +163,10 @@ class Engine:
             finally:
                 with self.lock:
                     self.running = None
-                self.on_event("done", self._view(rec), None)
+                self._emit("done", self._view(rec), None)
 
     def _run(self, rec):
-        self.on_event("start", self._view(rec), None)
+        self._emit("start", self._view(rec), None)
         kind, payload = planner.plan(rec["text"], self.classify, can_answer=self.answer is not None)
         with self.lock:
             if kind == "reply":
@@ -206,6 +206,13 @@ class Engine:
                 return self._finish(rec, "partial", stopped_state=state, **extra)
             self._finish(rec, state, **extra)
 
+    def _emit(self, kind, view, step):
+        """UI and speech hooks never break the engine."""
+        try:
+            self.on_event(kind, view, step)
+        except Exception as exc:
+            print(f"  on_event {kind} failed: {exc!r}")
+
     def _set(self, step, **kw):
         with self.lock:
             step.update(kw)
@@ -239,8 +246,12 @@ class Engine:
             if again[0] != "target" or not _same_target(again[1], target):
                 self._set(step, state="failed", detail="target_changed")
                 return "failed"
-        self._set(step, state="running")
-        self.on_event("step", self._view(rec), dict(step))
+        with self.lock:  # dispatch boundary: a cancel that lands before this line stops the step, after it cannot
+            if rec["cancel"]:
+                step["state"] = "skipped"
+                return "cancelled"
+            step["state"] = "running"
+        self._emit("step", self._view(rec), dict(step))
         deadline = time.monotonic() + action["timeout"]
         try:
             action["run"](target, deadline)

@@ -38,8 +38,8 @@ One engine inside the running app. Voice and `jevctl` both hand it text; it plan
 | --- | --- |
 | `completed` | `verify` returned `done`. The only success. |
 | `unverified` | `run` returned, and either no `verify` exists or `verify` returned `unverified` (a readback that cannot prove the effect, such as a redirect). Not success. |
-| `unknown` | Deadline hit or process died after dispatch. May or may not have happened. |
-| `failed` | `run` raised a definite error, or `verify` returned `failed`. Carries `error` code and facts. |
+| `unknown` | Deadline hit, process died, or any error after the effect was dispatched (the native call itself exited non-zero, a browser returned no tab id). May or may not have happened. |
+| `failed` | A definite error before dispatch (validation, browser lookup, app not running from the resolved path, a pre-read), or `verify` returned `failed`. Carries `error` code and facts. |
 | `unsupported` | No action fits the clause. |
 | `needs_clarification` | `resolve` returned choices. Nothing ran for this step. Carries `choices`. |
 | `declined` | Ask-first action cancelled or not confirmed within 60 s. |
@@ -53,7 +53,8 @@ Every step carries `index`, `clause`, `action`, `state`, `target`, `facts`, `det
 
 - `partial`: at least one step `completed`, then a stop. `stopped_state` carries the exact state of the stopping step.
 - Single-step or first-step stops use that step's state as the request state.
-- `cancelled`: cancelled while queued, while awaiting confirmation, or between steps. Completed steps stay listed as completed.
+- `cancelled`: cancelled while queued, while awaiting confirmation, or at any point before a step is dispatched. Completed steps stay listed as completed.
+- Dispatch boundary: under the engine lock the worker checks the cancel flag and marks the step `running` in one critical section, immediately before `run`. A cancel that lands before that section stops the step (state `skipped`, nothing dispatched), including while `resolve` is blocked; a cancel after it lets the dispatched step settle on its deadline and stops before the next step.
 
 Every response lists all steps in order and the per-launch `instance` id. On a stop:
 
@@ -74,7 +75,8 @@ Each action has an `effect` category: `open`, `navigate`, `media`, `volume`, `di
 - The engine enforces the policy for every source. Source (`voice`, `cli`) is set by the entry point, never read from a request, and is display metadata only.
 - An Ask-first step blocks the worker and opens a menu-bar popover naming the concrete action and target, with Confirm and Cancel. The pending decision is one record bound to that request id and step.
 - Confirm, popover Cancel, request `cancel` and the 60 s timeout all consume that record with one compare-and-set under the engine lock. The first wins; any later Confirm is a no-op and closes the popover. Request `cancel` gives request state `cancelled`; popover Cancel or timeout gives `declined`.
-- After a Confirm wins, the engine re-resolves the target before dispatch; if it changed or vanished the step fails with `target_changed`.
+- After a Confirm wins, the engine re-resolves the target before dispatch; if any field differs or it vanished the step fails with `target_changed`.
+- The popover text names the exact effect: volume level and percent, timer duration or reminder text, the pinned timer(s) to cancel, and for apps the install's folder. Timer cancel pins timer ids at resolve; run cancels only those. Quit terminates only processes whose bundle path equals the resolved path, never by bundle id.
 - No request field can confirm, skip policy or supply a target handle.
 
 ## Ledger and replay
@@ -96,11 +98,11 @@ Each action has an `effect` category: `open`, `navigate`, `media`, `volume`, `di
 
 ## Bridge
 
-Socket `~/Library/Application Support/Hey Jev/run/jev.sock`; directory mode 0700, socket 0600. Peer uid via `getpeereid` must equal ours, else close. `flock` on a lock file before bind; a stale socket is removed only while holding the lock after a failed connect. One JSON line in, one out; 16 KiB request cap, 5 s to send. Ops: `command {id, text}`, `status {id}`, `cancel {id}`. Cancel removes queued work or stops before the next step; no rollback.
+Socket `~/Library/Application Support/Hey Jev/run/jev.sock`; directory mode 0700, socket 0600. Peer uid via `getpeereid` must equal ours, else close. `flock` on a lock file before bind; a stale socket is removed only while holding the lock after a failed connect. One JSON line in, one out; 16 KiB request cap, 5 s to send. Ops: `command {id, text}`, `status {id}`, `cancel {id}`. `op` must be a string; `wait` a finite non-negative number (not boolean). Cancel follows the dispatch boundary above; no rollback. The overflow `busy` reply has a 1 s send bound and a failed send never stops the accept loop. Startup: if the app cannot own the lock and socket, it stops before creating a microphone or voice dispatcher.
 
 ## Speech
 
-`siri.py` speaks from the final result, naming the failed step when there is one. Exception: mute, lock and sleep speak a short "about to" line before running, because speech cannot follow them. That line never claims completion.
+`siri.py` speaks from the final result, naming the failed step when there is one. Exception: mute, lock and sleep speak a short "about to" line before running, because speech cannot follow them. That line never claims completion. `unverified` is spoken as "sent, couldn't check", never "done". A voice request refused as `busy` is spoken at once; a result that outlives the voice wait is spoken when it lands.
 
 ## Milestone 1
 

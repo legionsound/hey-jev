@@ -1,4 +1,5 @@
 """Timer and reminder state: duration parsing, the running list, and the alert loop."""
+import itertools
 import re
 import threading
 import time
@@ -70,11 +71,12 @@ def short_duration(secs):
 
 
 TIMERS, LOCK = [], threading.Lock()
+_IDS = itertools.count(1)
 on_reminder_set = None  # siri sets this to prepare the spoken alert in the background
 
 
 def add(secs, label=None, said=""):
-    t = {"end": time.time() + secs, "secs": secs, "label": label, "line": None}
+    t = {"id": next(_IDS), "end": time.time() + secs, "secs": secs, "label": label, "line": None}
     with LOCK:
         TIMERS.append(t)
         TIMERS.sort(key=lambda x: x["end"])

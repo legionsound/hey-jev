@@ -56,7 +56,7 @@ def split_clauses(text):
     return [re.sub(r"\x00(\d+)\x00", lambda m: held[int(m[1])], p) for p in parts if p.strip(" ,.")]
 
 
-URL_SPAN = re.compile(r"\b(?:https?://\S+|(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?(?:/\S*)?)", re.I)
+URL_SPAN = re.compile(r"\b(?:https?://\S+|(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?(?:[/?#]\S*)?)", re.I)
 
 
 def url_span(clause):
@@ -102,35 +102,42 @@ def pick(ans, clause):
     return s
 
 
+def judge(ans, clause, can_answer=False):
+    """One clause -> ("step", step) | ("reply", key) | ("answer", None) | ("clarify", reason)."""
+    cat, cconf = ans["category"]
+    if ans["target"][0] == "timer" and ans["target"][1] >= GATE and not ans["compound"][0]:
+        s = step_for(ans, "timer", clause)  # "how long is left?" reads like a question but is a timer command
+        if s:
+            return ("step", {"clause": clause, "action": s[1], "args": s[2]})
+    if cat == "chit_chat" and cconf >= GATE:
+        return ("reply", "chit_chat")
+    if cat == "unclear" and cconf >= GATE:
+        return ("clarify", "unclear")
+    if cat == "information_request" and cconf >= GATE:
+        return ("answer", None) if can_answer else ("reply", "info")
+    if ans["compound"][0] and ans["compound"][1] >= GATE:
+        return ("clarify", "compound_unsplit")  # say it as "X, then Y"
+    s = pick(ans, clause)
+    if not s:
+        return ("answer", None) if can_answer and cat == "information_request" else ("clarify", "no_action")
+    return ("step", {"clause": clause, "action": s[1], "args": s[2]})
+
+
 def plan(text, classify, can_answer=False):
-    """-> ("steps", [{"clause", "action", "args"}]) with action None for unsupported clauses,
-          ("reply", key), ("answer", None) or ("clarify", reason)."""
+    """-> ("steps", [{"clause", "action", "args"}]), ("reply", key), ("answer", None) or ("clarify", reason).
+    Every clause is judged before anything runs; one unclear clause stops the whole request."""
     clauses = split_clauses(text)
     if not clauses:
         return ("clarify", "empty")
     if len(clauses) > MAX_CLAUSES:
         return ("clarify", "too_many_steps")
     if len(clauses) == 1:
-        ans = classify(clauses[0])
-        cat, cconf = ans["category"]
-        if ans["target"][0] == "timer" and ans["target"][1] >= GATE and not ans["compound"][0]:
-            s = step_for(ans, "timer", clauses[0])  # "how long is left?" reads like a question but is a timer command
-            if s:
-                return ("steps", [{"clause": clauses[0], "action": s[1], "args": s[2]}])
-        if cat == "chit_chat" and cconf >= GATE:
-            return ("reply", "chit_chat")
-        if cat == "unclear" and cconf >= GATE:
-            return ("clarify", "unclear")
-        if cat == "information_request" and cconf >= GATE:
-            return ("answer", None) if can_answer else ("reply", "info")
-        if ans["compound"][0] and ans["compound"][1] >= GATE:
-            return ("clarify", "compound_unsplit")  # say it as "X, then Y"
-        s = pick(ans, clauses[0])
-        if not s:
-            return ("answer", None) if can_answer and cat == "information_request" else ("clarify", "no_action")
-        return ("steps", [{"clause": clauses[0], "action": s[1], "args": s[2]}])
+        kind, got = judge(classify(clauses[0]), clauses[0], can_answer)
+        return ("steps", [got]) if kind == "step" else (kind, got)
     steps = []
     for clause in clauses:
-        s = pick(classify(clause), clause)
-        steps.append({"clause": clause, "action": s[1] if s else None, "args": s[2] if s else {}})
+        kind, got = judge(classify(clause), clause)
+        if kind != "step":
+            return ("clarify", got if kind == "clarify" else "no_action")
+        steps.append(got)
     return ("steps", steps)

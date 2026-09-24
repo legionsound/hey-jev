@@ -2,7 +2,7 @@
 
 Voice and `jevctl` both submit text to one engine (engine.py); this file owns the microphone, transcription and speech.
 """
-import os, re, sys, json, time, queue, random, argparse, subprocess, threading, hashlib, collections
+import os, re, sys, json, time, queue, random, argparse, subprocess, threading, hashlib, collections, contextlib
 import requests
 from dotenv import load_dotenv
 from secrets_store import get_secret, get_setting, missing_secrets
@@ -118,7 +118,7 @@ REPLIES = {
     "unsupported": ["[chuckling] I know what you want, I just can't do that one yet."],
     "failed": ["[sighing] That didn't work.", "Hm, that didn't go through."],
     "unknown": ["[clear throat] I'm not sure that worked. Check before I try again."],
-    "unverified": ["Done, I think, but I couldn't check it.", "I did it, but I can't confirm it."],
+    "unverified": ["I sent that, but I couldn't check whether it worked.", "Asked for it, but I can't confirm it happened."],
     "declined": ["Okay, I won't.", "Cancelled."],
     "cancelled": ["Stopped."],
     "busy": ["[sighing] I'm swamped, give me a second."],
@@ -309,7 +309,8 @@ def make_engine(notify=None, ask=None):
             if view["source"] == "voice" and (step["action"] in SPEAK_FIRST or
                                               step["action"] == "volume.set" and (step.get("target") or {}).get("level") == "silent"):
                 spoke_first.add(view["id"])
-                say(say_line(step["action"]) if step["action"] in REPLIES else "Okay.", notify)
+                key = "volume.mute" if step["action"] == "volume.set" else step["action"]  # "about to", not "done"
+                say(say_line(key) if key in REPLIES else "Okay.", notify)
         elif kind == "done" and view["source"] == "cli":
             emit(notify, "Ready", f"Typed command: {view['state']}")
 
@@ -322,19 +323,41 @@ def make_engine(notify=None, ask=None):
     return eng
 
 
-def turn(eng, text, notify):
-    """One voice turn: submit, wait, speak from the result."""
+def turn(eng, text, notify, hold=contextlib.nullcontext):
+    """One voice turn: submit, wait, speak from the result. A result that outlives the wait is spoken when it lands,
+    inside hold() so it does not talk over the microphone."""
     print(f"\n> heard: {text!r}")
     if not text.strip():
         emit(notify, "Ready", "Didn't catch anything")
         return
-    rid = eng.submit(text, "voice")["id"]
+    first = eng.submit(text, "voice")
+    if first["state"] in ("busy", "id_conflict"):  # never queued: nothing to wait for
+        line = say_line("busy")
+        say(line, notify)
+        emit(notify, "Ready", line)
+        return
+    rid = first["id"]
     result = eng.wait(rid, TURN_WAIT)
-    print("  result: " + json.dumps({k: result.get(k) for k in ("state", "stopped_state", "detail")}) +
-          "".join(f"\n    step {s['index']}: {s['action']} {s['state']} {s.get('detail') or ''}" for s in result.get("steps", [])))
     if result["state"] not in planner_final():
         emit(notify, "Ready", "Still working on that")
+        threading.Thread(target=_late, args=(eng, rid, notify, hold), daemon=True).start()
         return
+    _deliver(eng, result, notify)
+
+
+def _late(eng, rid, notify, hold):
+    while True:
+        result = eng.wait(rid, 60)
+        if result["state"] in planner_final():
+            break
+    with hold():
+        _deliver(eng, result, notify)
+
+
+def _deliver(eng, result, notify):
+    rid = result["id"]
+    print("  result: " + json.dumps({k: result.get(k) for k in ("state", "stopped_state", "detail")}) +
+          "".join(f"\n    step {s['index']}: {s['action']} {s['state']} {s.get('detail') or ''}" for s in result.get("steps", [])))
     if rid in eng.spoke_first and result["state"] in ("completed", "unverified"):
         eng.spoke_first.discard(rid)
         emit(notify, "Ready", result["state"])
@@ -347,7 +370,7 @@ def turn(eng, text, notify):
 
 def planner_final():
     from engine import TERMINAL
-    return TERMINAL | {"busy", "id_conflict"}
+    return TERMINAL | {"busy", "id_conflict", "unknown_outcome"}
 
 
 # --------------------------------------------------------------------------- Mic + push to talk
@@ -422,32 +445,43 @@ def ready_text(wake):
 
 
 def start_bridge(eng, notify):
+    """Owning the socket is what makes this the one engine. Any failure stops startup: no second mic or engine."""
     from bridge import Bridge
+    b = Bridge(eng)
     try:
-        b = Bridge(eng)
         b.start()
-        print(f"command socket ready: {b.sock_path}")
-        return b
     except Exception as exc:
-        print(f"command socket unavailable: {exc}")
-        emit(notify, "Something went wrong", f"Command line bridge unavailable: {exc}")
-        return None
+        b.stop()
+        eng.shutdown()
+        raise RuntimeError(f"Hey Jev is already running, or its command socket is unavailable: {exc}") from exc
+    print(f"command socket ready: {b.sock_path}")
+    return b
 
 
 def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, ask=None):
     global ENGINE, BRIDGE
     from faster_whisper import WhisperModel
+    ENGINE = make_engine(notify, ask)
+    bridge = BRIDGE = start_bridge(ENGINE, notify)  # raises before any microphone or voice dispatcher exists
     print("loading whisper...")
     emit(notify, "Starting", "Loading Whisper…")
     model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
-    ENGINE = make_engine(notify, ask)
-    bridge = BRIDGE = start_bridge(ENGINE, notify)
     rec = Recorder()
     rec.enabled = listening
     if not listening:
         rec.stream.stop()
     busy = threading.Lock()
     armed_until = [0.0]
+
+    @contextlib.contextmanager
+    def hold():
+        with busy:
+            rec.paused = True
+            try:
+                yield
+            finally:
+                time.sleep(0.3)
+                rec.paused = False
 
     def transcribe(audio, prompt):
         t = time.time()
@@ -461,7 +495,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
             rec.paused = True  # don't hear her own reply
             try:
                 print(f"  (stt {stt_ms}ms)")
-                turn(ENGINE, text, notify)
+                turn(ENGINE, text, notify, hold=hold)
             except Exception as exc:
                 print(f"\n  turn failed: {exc}")
                 emit(notify, "Something went wrong", str(exc))

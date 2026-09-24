@@ -2,6 +2,7 @@
 import errno
 import fcntl
 import json
+import math
 import os
 import socket
 import stat
@@ -91,8 +92,13 @@ class Bridge:
             except OSError:
                 return
             if not self.slots.acquire(blocking=False):
-                self._reply(conn, {"v": 1, "state": "busy", "detail": "too_many_clients"})
-                conn.close()
+                try:  # bounded; a client that already hung up must not take down the only accept loop
+                    conn.settimeout(1.0)
+                    self._reply(conn, {"v": 1, "state": "busy", "detail": "too_many_clients"})
+                except OSError:
+                    pass
+                finally:
+                    conn.close()
                 continue
             threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
 
@@ -128,12 +134,12 @@ class Bridge:
         op, rid = req.get("op"), req.get("id")
         allowed = {"command": {"v", "op", "id", "text", "wait"}, "status": {"v", "op", "id", "wait"},
                    "cancel": {"v", "op", "id"}}
-        if op not in allowed or set(req) - allowed[op]:
+        if not isinstance(op, str) or op not in allowed or set(req) - allowed[op]:
             return {"v": 1, "state": "rejected", "detail": "bad_op_or_field"}
         if not isinstance(rid, str) or not 0 < len(rid) <= 128:
             return {"v": 1, "state": "rejected", "detail": "bad_id"}
         wait = req.get("wait", 0)
-        if not isinstance(wait, (int, float)) or wait < 0:
+        if isinstance(wait, bool) or not isinstance(wait, (int, float)) or not math.isfinite(wait) or wait < 0:
             return {"v": 1, "state": "rejected", "detail": "bad_wait"}
         wait = min(float(wait), MAX_WAIT)
         if op == "cancel":

@@ -281,6 +281,118 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(planner.plan("go to example.com in my Firefox browser", lambda _: ans_for()),
                          ("clarify", "unsupported_browser"))
 
+    def test_google_search_urls(self):
+        def ans_for(target="website"):
+            return {"category": ("mac_command", 0.9), "target": (target, 0.9),
+                    "compound": (False, 0.0), "app_action": ("open", 0.9),
+                    "volume_action": ("none", 0.0), "volume_scope": ("system", 0.0),
+                    "volume_level": ("medium", 0.5), "display_action": ("none", 0.0),
+                    "media_action": ("none", 0.0), "timer_action": ("none", 0.0),
+                    "system_action": ("none", 0.0)}
+        # three phrasings, whole phrase kept as data
+        for text, q in [("search google for rock and roll", "rock+and+roll"),
+                        ("google rock and roll", "rock+and+roll"),
+                        ("search for rock and roll", "rock+and+roll")]:
+            kind, got = planner.plan(text, lambda _: ans_for())
+            self.assertEqual(kind, "steps", text)
+            self.assertEqual(got[0]["action"], "url.open", text)
+            self.assertEqual(got[0]["args"]["url"],
+                             "https://www.google.com/search?q=" + q, text)
+        # encoding: & # quotes unicode are data, never re-parsed
+        kind, got = planner.plan("search google for fish & chips #1", lambda _: ans_for())
+        self.assertEqual(got[0]["args"]["url"],
+                         "https://www.google.com/search?q=fish+%26+chips+%231")
+        kind, got = planner.plan('google "cafés au lait"', lambda _: ans_for())
+        self.assertEqual(got[0]["args"]["url"],
+                         "https://www.google.com/search?q=%22caf%C3%A9s+au+lait%22")
+        # trailing browser qualifier honoured, polite tail included; words inside the query stay data
+        kind, got = planner.plan("search google for cats in Safari", lambda _: ans_for())
+        self.assertEqual(got[0]["args"]["url"], "https://www.google.com/search?q=cats")
+        self.assertEqual(got[0]["args"].get("browser"), "com.apple.Safari")
+        kind, got = planner.plan("google cats in Safari please", lambda _: ans_for())
+        self.assertEqual(got[0]["args"]["url"], "https://www.google.com/search?q=cats")
+        self.assertEqual(got[0]["args"].get("browser"), "com.apple.Safari")
+        kind, got = planner.plan("google chrome os", lambda _: ans_for())
+        self.assertEqual(got[0]["args"]["url"], "https://www.google.com/search?q=chrome+os")
+        self.assertNotIn("browser", got[0]["args"])
+        # quoted browser words are literal query text
+        kind, got = planner.plan('google "cats in Safari"', lambda _: ans_for())
+        self.assertEqual(got[0]["args"]["url"],
+                         "https://www.google.com/search?q=%22cats+in+Safari%22")
+        self.assertNotIn("browser", got[0]["args"])
+        # quoted query plus a real trailing qualifier: qualifier still found
+        kind, got = planner.plan('google "cats in hats" in Chrome', lambda _: ans_for())
+        self.assertEqual(got[0]["args"]["url"],
+                         "https://www.google.com/search?q=%22cats+in+hats%22")
+        self.assertEqual(got[0]["args"].get("browser"), "org.google.Chrome")
+        self.assertEqual(planner.plan('google "cats in hats" in Firefox', lambda _: ans_for()),
+                         ("clarify", "unsupported_browser"))
+        # literal query text: politeness and punctuation are kept
+        kind, got = planner.plan("google now", lambda _: ans_for())
+        self.assertEqual(got[0]["args"]["url"], "https://www.google.com/search?q=now")
+        kind, got = planner.plan("google why me?", lambda _: ans_for())
+        self.assertEqual(got[0]["args"]["url"], "https://www.google.com/search?q=why+me%3F")
+        kind, got = planner.plan("search for do it for me", lambda _: ans_for())
+        self.assertEqual(got[0]["args"]["url"],
+                         "https://www.google.com/search?q=do+it+for+me")
+        # unsupported browser clarifies with zero dispatch; bare engine word is not a search
+        self.assertEqual(planner.plan("google cats in DuckDuckGo", lambda _: ans_for()),
+                         ("clarify", "unsupported_browser"))
+        self.assertEqual(planner.plan("search google for cats in Firefox", lambda _: ans_for()),
+                         ("clarify", "unsupported_browser"))
+        # the complete trailing name is validated: no silent suffix drop
+        self.assertEqual(planner.plan("google cats in Chrome Canary", lambda _: ans_for()),
+                         ("clarify", "unsupported_browser"))
+        self.assertEqual(planner.plan("google cats in Safari Technology Preview", lambda _: ans_for()),
+                         ("clarify", "unsupported_browser"))
+        # multi-word supported name still works, with filler and polite tail
+        kind, got = planner.plan("search google for cats in Google Chrome please", lambda _: ans_for())
+        self.assertEqual(got[0]["args"]["url"], "https://www.google.com/search?q=cats")
+        self.assertEqual(got[0]["args"].get("browser"), "org.google.Chrome")
+        self.assertEqual(planner.plan("google", lambda _: ans_for()),
+                         ("clarify", "no_action"))
+        self.assertEqual(planner.search_query("search google for"), None)
+        # no regressions: in-page search, plain google navigation, Chrome app
+        self.assertEqual(planner.plan("search in page", lambda _: ans_for()),
+                         ("clarify", "no_action"))
+        kind, got = planner.plan("go to google.com", lambda _: ans_for())
+        self.assertEqual(got[0]["args"]["url"], "google.com")
+        kind, got = planner.plan("open Google Chrome",
+                                 lambda _: {"category": ("mac_command", 0.9), "target": ("app", 0.9),
+                                            "compound": (False, 0.9), "app_action": ("open", 0.9)})
+        self.assertEqual(got[0]["action"], "app.open")
+
+    def test_google_search_end_to_end_exact_url(self):
+        import actions as actions_mod
+        import url_adapter
+        ans = {"category": ("mac_command", 0.9), "target": ("website", 0.9),
+               "compound": (False, 0.0), "app_action": ("open", 0.9),
+               "volume_action": ("none", 0.0), "volume_scope": ("system", 0.0),
+               "volume_level": ("medium", 0.5), "display_action": ("none", 0.0),
+               "media_action": ("none", 0.0), "timer_action": ("none", 0.0),
+               "system_action": ("none", 0.0)}
+        seen = {}
+        def fake_open(t, deadline, _run=None, _default_browser_fn=None):
+            seen["url"] = t.get("url")
+            seen["browser"] = t.get("browser")
+            t["opened_with"] = t.get("browser")  # as the real opener records
+            t["tab"] = "org.google.Chrome#7"
+        def fake_read(tab_id, timeout, _run=None):
+            return ("OK", seen["url"])
+        def no_lookup(*a, **k):
+            raise AssertionError("default lookup must not run with an explicit browser")
+        eng = engine.Engine(classify=lambda _: ans, policy=lambda: {"navigate": "auto"},
+                            actions={"url.open": actions_mod.ACTIONS["url.open"]})
+        with patch.object(url_adapter, "run_url_open", fake_open), \
+             patch.object(url_adapter, "_read_chrome_tab", fake_read), \
+             patch.object(url_adapter, "default_browser_for_url", no_lookup):
+            out = eng.wait(eng.submit("google fish & chips in Chrome", "cli")["id"], 5)
+        exact = "https://www.google.com/search?q=fish+%26+chips"
+        self.assertEqual(out["state"], "completed")
+        self.assertEqual(seen["url"], exact)
+        self.assertEqual(seen["browser"], "org.google.Chrome")
+        self.assertEqual(out["steps"][0]["facts"].get("observed"), exact)
+
 
 class SpeechTests(unittest.TestCase):
     def setUp(self):

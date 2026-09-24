@@ -1,5 +1,6 @@
 """Text to an ordered plan. Jev picks the action type per clause; Python pulls the arguments out of the words."""
 import re
+import urllib.parse
 
 GATE = 0.65
 MAX_CLAUSES = 5
@@ -193,6 +194,67 @@ def type_args(clause):
     return {"text": text, **({"field": field.strip(" .,!?")} if field else {})}
 
 
+# Google search. "search google for X", "google X", "search for X" (Google is
+# the default engine) -> url.open with an encoded search URL. The query text
+# is data: it is never re-parsed as a URL, site or command, and "search for
+# rock and roll" keeps the whole phrase (bare "and" never splits).
+SEARCH_SPAN = re.compile(r"^\s*(?:search\s+google\s+for|search\s+for|google)\s+(.+?)\s*$", re.I)
+# Trailing browser intent, mirroring browser_qualifier's doctrine: a trailing
+# "in <name>" names a browser, so there is no blacklist to maintain. The
+# complete name is validated: recognized filler ("my/the/your", a trailing
+# "browser(s)") and a polite tail are stripped, but an unrecognized suffix
+# is never silently dropped into the query — it clarifies. Quoted words
+# stay query text: quotes are masked (offsets preserved) before the last
+# unquoted "in" is located, so an in-quote "in" can never swallow the real
+# trailing qualifier.
+SEARCH_IN = re.compile(r"\s+(in)\s+(?:(?:my|the|your)\s+)?", re.I)
+SEARCH_POLITE_END = re.compile(r"(?:\s+(?:please|for me|now))*\s*$", re.I)
+SEARCH_BROWSER_FILLER = re.compile(r"\s+browsers?\s*$", re.I)
+
+
+def _mask_quotes(s):
+    """Copy of s with double-quoted spans blanked, offsets preserved."""
+    out, in_q = [], False
+    for ch in s:
+        if ch == '"':
+            in_q = not in_q
+            out.append(" ")
+        elif in_q:
+            out.append(" ")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def search_query(clause):
+    """-> (query, browser bid or None, unsupported name or None), or None when not a search.
+
+    Once the query starts its text is literal: no politeness or punctuation
+    is stripped. A trailing unquoted "in <name>" names a browser (known or
+    not); quoted browser words stay data."""
+    bid, unsupported, rest = None, None, clause
+    masked = _mask_quotes(clause)
+    for m in reversed(list(SEARCH_IN.finditer(masked))):
+        tail = SEARCH_POLITE_END.sub("", masked[m.end():])
+        name = SEARCH_BROWSER_FILLER.sub("", tail).strip()
+        if not name or name.split()[0].lower() in QUAL_STOPWORDS:
+            continue
+        key = re.sub(r"\s+", " ", name).lower()
+        bid = BROWSERS.get(key)
+        unsupported = None if bid else key
+        rest = clause[:m.start(1)]  # cut at the "in": original query text kept
+        break
+    m = SEARCH_SPAN.match(rest)
+    if not m:
+        return None
+    return (m[1].strip(), bid, unsupported)
+
+
+def search_url(query):
+    """Encoded Google search URL. quote_plus: the query is data, never parsed."""
+    return "https://www.google.com/search?q=" + urllib.parse.quote_plus(query)
+
+
 def app_name(clause):
     m = APP_SPAN.search(clause)
     return m[1].strip(" .,!?") if m else ""
@@ -246,6 +308,17 @@ def step_for(ans, target, clause, inherited_browser=None):
             return None
         return (conf, f"app.{act}", {"app": name})
     if target == "website":
+        sq = search_query(clause)
+        if sq is not None:
+            query, sbid, sunsupported = sq
+            if sunsupported:
+                return (ans["target"][1], "clarify", "unsupported_browser")
+            if not query:
+                return (ans["target"][1], "clarify", "empty_search")
+            args = {"url": search_url(query)}
+            if sbid or inherited_browser:
+                args["browser"] = sbid or inherited_browser
+            return (ans["target"][1], "url.open", args)
         rest, bid, unsupported = browser_qualifier(clause)
         if unsupported:
             return (ans["target"][1], "clarify", "unsupported_browser")  # named browser we don't drive: no navigation

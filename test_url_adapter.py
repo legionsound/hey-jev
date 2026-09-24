@@ -65,12 +65,30 @@ class TestCompare(unittest.TestCase):
         ok, _ = ua.urls_equal("https://example.com", "https://example.com/")
         self.assertTrue(ok)
 
-    def test_scheme_matters(self):
+    def test_http_upgrades_to_https(self):
         ok, _ = ua.urls_equal("http://example.com/", "https://example.com/")
+        self.assertTrue(ok)
+
+    def test_https_downgrade_not_equal(self):
+        ok, _ = ua.urls_equal("https://example.com/", "http://example.com/")
         self.assertFalse(ok)
 
-    def test_www_matters(self):
+    def test_www_ignored_either_direction(self):
         ok, _ = ua.urls_equal("https://example.com/", "https://www.example.com/")
+        self.assertTrue(ok)
+        ok, _ = ua.urls_equal("https://www.example.com/", "https://example.com/")
+        self.assertTrue(ok)
+
+    def test_youtube_www_redirect_now_matches(self):
+        ok, _ = ua.urls_equal("https://youtube.com/", "https://www.youtube.com/")
+        self.assertTrue(ok)
+
+    def test_other_subdomain_not_equal(self):
+        ok, _ = ua.urls_equal("https://youtube.com/", "https://m.youtube.com/")
+        self.assertFalse(ok)
+
+    def test_similar_public_suffix_not_equal(self):
+        ok, _ = ua.urls_equal("https://youtube.com/", "https://youtube.co.uk/")
         self.assertFalse(ok)
 
     def test_explicit_default_port_not_equal_to_omitted(self):
@@ -96,6 +114,23 @@ class TestCompare(unittest.TestCase):
     def test_path_prefix_not_equal(self):
         ok, _ = ua.urls_equal("https://e.com/account", "https://e.com/account-delete")
         self.assertFalse(ok)
+
+
+class TestSiteForName(unittest.TestCase):
+    def test_known_sites(self):
+        self.assertEqual(ua.site_for_name("YouTube"), "https://www.youtube.com/")
+        self.assertEqual(ua.site_for_name("  GOOGLE "), "https://www.google.com/")
+        self.assertEqual(ua.site_for_name("gmail"), "https://mail.google.com/")
+        self.assertEqual(ua.site_for_name("GitHub"), "https://github.com/")
+        self.assertEqual(ua.site_for_name("X"), "https://x.com/")
+        self.assertEqual(ua.site_for_name("twitter"), "https://x.com/")
+        self.assertEqual(ua.site_for_name("ChatGPT"), "https://chatgpt.com/")
+        self.assertEqual(ua.site_for_name("Claude"), "https://claude.ai/")
+
+    def test_unknown_names_none(self):
+        for s in ("", "  ", "my bank", "youtube.com", "you tube",
+                  "example", "http://github.com"):
+            self.assertIsNone(ua.site_for_name(s), s)
 
 
 class TestRunVerify(unittest.TestCase):
@@ -140,6 +175,24 @@ class TestRunVerify(unittest.TestCase):
              "tab": "com.google.Chrome#ABC123"}
         st, facts = ua.verify_url_open(t, time.time() + 5, _run=run)
         self.assertEqual(st, "unverified")
+
+    def test_chrome_newtab_waits_not_unverified(self):
+        for observed in ("OK:chrome://newtab/\n", "OK:about:blank\n"):
+            run = Mock(return_value=_ok(observed))
+            t = {"url": "https://www.google.com/",
+                 "opened_with": "com.google.Chrome",
+                 "tab": "com.google.Chrome#ABC123"}
+            st, facts = ua.verify_url_open(t, time.time() + 5, _run=run)
+            self.assertEqual(st, "wait", observed)
+            self.assertIn("not loaded", facts["reason"])
+
+    def test_chrome_www_redirect_now_done(self):
+        run = Mock(return_value=_ok("OK:https://www.youtube.com/\n"))
+        t = {"url": "https://youtube.com/",
+             "opened_with": "com.google.Chrome",
+             "tab": "com.google.Chrome#ABC123"}
+        st, facts = ua.verify_url_open(t, time.time() + 5, _run=run)
+        self.assertEqual(st, "done")
 
     def test_safari_script_targets_new_tab(self):
         body = "\n".join(ua.SAFARI_OPEN)

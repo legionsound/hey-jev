@@ -5,8 +5,10 @@ run_url_open(target, deadline) -> None
 verify_url_open(target, deadline) -> ("done"|"wait"|"failed"|"unverified", facts)
 
 Strict comparison: equal after lowercasing host only, and treating empty
-path as "/". Scheme, www, explicit port, path, RAW query string, and
-fragment must match. Any difference (incl. redirects) -> unverified.
+path as "/". A leading "www." on either host is ignored, and an
+http->https upgrade is accepted (downgrade is not). Explicit port, path,
+RAW query string, and fragment must match. Any other difference
+(incl. redirects) -> unverified.
 
 Capability split (honest, per dictionary evidence):
 - Chrome exposes a unique per-tab id (scripting.sdef, class tab, property
@@ -80,16 +82,25 @@ def normalize_url(url):
     return p
 
 
+def _bare_host(host):
+    """Lowercased host with one leading www. removed."""
+    h = (host or "").lower()
+    if h.startswith("www."):
+        h = h[4:]
+    return h
+
+
 def urls_equal(requested, observed):
-    """Strict compare per contract. Returns (equal: bool, detail: str)."""
+    """Compare per contract. Returns (equal: bool, detail: str)."""
     try:
         a = normalize_url(requested)
         b = normalize_url(observed)
     except ValueError as e:
         return False, str(e)
     if a.scheme != b.scheme:
-        return False, "scheme differs"
-    if (a.hostname or "").lower() != (b.hostname or "").lower():
+        if not (a.scheme == "http" and b.scheme == "https"):
+            return False, "scheme differs"
+    if _bare_host(a.hostname) != _bare_host(b.hostname):
         return False, "host differs"
     # Explicit ports compared directly: omitted != explicit, even when
     # the explicit value equals the scheme default. Only the two cleared
@@ -120,6 +131,31 @@ def _rebuild(p):
         netloc += f":{port}"
     return urllib.parse.urlunsplit(
         (p.scheme, netloc, p.path or "", p.query, p.fragment))
+
+
+SITE_FOR_NAME = {
+    "youtube": "https://www.youtube.com/",
+    "google": "https://www.google.com/",
+    "gmail": "https://mail.google.com/",
+    "github": "https://github.com/",
+    "reddit": "https://www.reddit.com/",
+    "netflix": "https://www.netflix.com/",
+    "amazon": "https://www.amazon.com/",
+    "wikipedia": "https://www.wikipedia.org/",
+    "twitter": "https://x.com/",
+    "x": "https://x.com/",
+    "facebook": "https://www.facebook.com/",
+    "instagram": "https://www.instagram.com/",
+    "linkedin": "https://www.linkedin.com/",
+    "chatgpt": "https://chatgpt.com/",
+    "claude": "https://claude.ai/",
+}
+
+
+def site_for_name(name):
+    """Curated site URL for a whole spoken name, or None. Never guesses."""
+    key = (name or "").strip().lower()
+    return SITE_FOR_NAME.get(key)
 
 
 def resolve_url(spoken):
@@ -318,6 +354,11 @@ def verify_url_open(target, deadline, _run=subprocess.run):
                                    "reason": "tab closed; id not reused"})
         if observed is None:
             return ("wait", {"reason": "tab not readable yet"})
+        try:
+            normalize_url(observed)
+        except ValueError:
+            return ("wait", {"observed": observed,
+                             "reason": "page not loaded yet"})
         ok, detail = urls_equal(url, observed)
         if ok:
             return ("done", {"observed": observed})

@@ -7,6 +7,7 @@ records with a bundle id. No synthetic entries, no silent fuzzy match.
 
 import os
 import plistlib
+import subprocess
 import unicodedata
 
 ROOTS = ("/Applications", "/System/Applications",
@@ -22,6 +23,56 @@ ALIASES = {
 }
 
 _inventory = None
+
+# Source misses from the last scan: e.g. {"mdfind": "timeout"}.
+# A miss never fails the scan; the current sources still stand.
+_last_source_misses = {}
+
+
+def _running_app_paths():
+    """Bundle paths of running apps that have a bundle URL. Best effort."""
+    try:
+        from AppKit import NSWorkspace
+        out = []
+        for app in NSWorkspace.sharedWorkspace().runningApplications():
+            try:
+                url = app.bundleURL()
+            except Exception:
+                continue
+            if url is None:
+                continue
+            try:
+                out.append(url.path())
+            except Exception:
+                continue
+        return out
+    except Exception:
+        return []
+
+
+def _run_mdfind(timeout=10):
+    """mdfind output lines (app bundle paths), or None on failure/timeout."""
+    try:
+        p = subprocess.run(
+            ["mdfind", "kMDItemContentType == 'com.apple.application-bundle'"],
+            capture_output=True, text=True, timeout=timeout)
+    except Exception:
+        return None
+    if p.returncode != 0:
+        return None
+    return [ln.strip() for ln in (p.stdout or "").splitlines() if ln.strip()]
+
+
+def _app_folders():
+    """User-added folders from prefs (app_folders list of paths)."""
+    try:
+        from Foundation import NSUserDefaults
+        raw = NSUserDefaults.standardUserDefaults().arrayForKey_("app_folders")
+        if raw is None:
+            return []
+        return [str(x) for x in list(raw)]
+    except Exception:
+        return []
 
 
 def _norm(s):
@@ -54,8 +105,11 @@ def _read_bundle(path):
     return {"name": disp, "bundle_id": bid, "path": path}
 
 
-def _scan(roots=None):
+def _scan(roots=None, _running="auto", _spotlight="auto", _folders="auto"):
     apps, seen_paths = [], set()
+    misses = {}
+    full = roots is None or any(v != "auto" for v in
+                                (_running, _spotlight, _folders))
 
     def _add(app_path):
         path = os.path.realpath(app_path)
@@ -82,15 +136,54 @@ def _scan(roots=None):
     for extra in EXTRA_APPS if roots is None else ():
         if os.path.isdir(extra):
             _add(extra)
+    if full:
+        # Running apps: bundle URL paths, de-duplicated by real path.
+        running = (_running_app_paths() if _running == "auto" else _running)
+        for app_path in running or []:
+            if isinstance(app_path, str) and app_path.endswith(".app"):
+                _add(app_path)
+        # Spotlight: merged by real path; failure/timeout is a recorded
+        # source miss, never an error.
+        lines = (_run_mdfind() if _spotlight == "auto" else _spotlight)
+        if lines is None:
+            misses["mdfind"] = "unavailable"
+        else:
+            for app_path in lines:
+                if app_path.endswith(".app"):
+                    _add(app_path)
+        # User-added folders: aliases/symlinks resolved via realpath and
+        # must stay inside a real folder; missing folders skipped.
+        folders = (_app_folders() if _folders == "auto" else _folders)
+        for folder in folders or []:
+            real = os.path.realpath(folder)
+            if not os.path.isdir(real):
+                continue
+            for dirpath, dirnames, _ in os.walk(real):
+                if dirpath.endswith(".app"):
+                    dirnames[:] = []
+                    continue
+                for e in list(dirnames):
+                    if not e.endswith(".app"):
+                        continue
+                    dirnames.remove(e)
+                    _add(os.path.join(dirpath, e))
     # Preserve distinct installations; stable order for determinism.
     apps.sort(key=lambda a: (str(a.get("name", "")).casefold(), a["path"]))
+    global _last_source_misses
+    _last_source_misses = misses
     return apps
+
+
+def last_source_misses():
+    """Source misses from the last full scan ({} when roots given)."""
+    return dict(_last_source_misses)
 
 
 def refresh():
     """Rescan roots; engine calls once after a 'none' result."""
     global _inventory
     _inventory = _scan()
+    return len(_inventory)
 
 
 def list_apps():

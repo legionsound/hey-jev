@@ -164,6 +164,49 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(st, "choices")
         self.assertEqual(len(payload), 2)
 
+    def test_running_and_spotlight_dedup_by_realpath(self):
+        p = _make_app(self.tmp, "Sub/Foo.app", "com.ex.foo", "Foo")
+        apps = ac._scan([], _running=[p], _spotlight=[p], _folders=[])
+        self.assertEqual([a["path"] for a in apps
+                          if a["name"] == "Foo"],
+                         [os.path.realpath(p)])
+        self.assertEqual(ac.last_source_misses(), {})
+
+    def test_spotlight_timeout_is_miss_not_error(self):
+        p = _make_app(self.tmp, "Sub/Foo.app", "com.ex.foo", "Foo")
+        apps = ac._scan([self.tmp], _running=[], _spotlight=None,
+                        _folders=[])
+        # explicit roots: extra sources skipped, no misses recorded
+        self.assertTrue(any(a["name"] == "Foo" for a in apps))
+        apps = ac._scan([], _running=[], _spotlight=None, _folders=[])
+        self.assertEqual(apps, [])
+        self.assertEqual(ac.last_source_misses(), {"mdfind": "unavailable"})
+
+    def test_user_folder_alias_and_missing(self):
+        _make_app(self.tmp, "Extra/Bar.app", "com.ex.bar", "Bar")
+        link = os.path.join(self.tmp, "LinkDir")
+        try:
+            os.symlink(os.path.join(self.tmp, "Extra"), link)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks unavailable")
+        apps = ac._scan([], _running=[], _spotlight=[],
+                        _folders=[link,
+                                  os.path.join(self.tmp, "Nope")])
+        self.assertEqual([a["name"] for a in apps], ["Bar"])
+        self.assertEqual(apps[0]["path"],
+                         os.path.realpath(
+                             os.path.join(self.tmp, "Extra/Bar.app")))
+
+    def test_refresh_returns_count(self):
+        p = _make_app(self.tmp, "Sub/Foo.app", "com.ex.foo", "Foo")
+        ac._set_inventory([])
+        n = ac.refresh()
+        self.assertIsInstance(n, int)
+        self.assertGreaterEqual(n, 0)
+        ac._set_inventory([{"name": "Foo", "bundle_id": "com.ex.foo",
+                            "path": p}])
+        self.assertEqual(ac.resolve_app("Foo")[0], "target")
+
 
 if __name__ == "__main__":
     unittest.main()

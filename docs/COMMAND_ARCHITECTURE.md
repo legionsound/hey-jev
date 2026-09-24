@@ -8,7 +8,7 @@ Hey Jev currently understands flexible wording for a small fixed collection of a
 
 We do **not** need to hardcode every sentence. We do need to implement trustworthy capabilities. A reusable “open app” capability can accept many installed apps; “navigate browser” can accept many URLs; a recipe can combine them. Finding an unfamiliar button or deciding what a new website means is a separate semantic/visual problem.
 
-The first control increments should cover any discovered installed app, then Johnny's exact Safari example with URL readback and honest failure reporting. Keep Jev as a fixed-question classifier and Python as the deterministic executor. General visual computer use is outside the core design.
+Two co-equal foundations govern the fork: discoverable reusable Mac capabilities and a text/programmatic bridge for Codex/ChatGPT to command the running app. First prove a single existing app-open action through both voice and bridge; then grow discovered targets and Johnny's Safari sequence with URL readback and honest failure reporting. Keep Jev as a fixed-question classifier and Python as the deterministic executor. General visual computer use is outside the core design.
 
 ## Actual path through the app
 
@@ -116,15 +116,86 @@ Jev can select a capability or recipe from known candidates and score ambiguity.
 
 For consequential steps, show the concrete target/action/content for confirmation before executing. Ordinary app opening and navigation should not acquire unnecessary confirmation prompts. Unknown/ambiguous targets should return a specific question or failure, not a guessed click.
 
-## Shortest robust path after discussion
+## Foundational running-app interface (proposed)
 
-1. Finish and visually check the existing menu bar/model settings work. Let Johnny try volume, mute, settings and model choice first.
-2. Add installed-app discovery and deterministic name resolution to `app.open`; then add `browser.navigate` as a short sequence. Support “open Safari, then go to google.com.” Keep transcript extraction narrow and explicit. Check launch failure, URL readback and stop on failure. Johnny tries it in his actual Safari session.
-3. Add one useful text/search recipe Johnny chooses, such as a Google search using its encoded search URL. For literal field entry, choose one named field/site and verify the value. Do not promise generic form completion.
-4. Add a same-user Unix socket and a small CLI only when sending repeated text turns into the running app is useful. `--text` already skips Whisper; the persistent benefit is shared app/timer state, structured completion and avoiding process/import/key-read overhead, not magical inference acceleration. Serialize requests through the existing busy mechanism and avoid replay after timeout. Benchmark actual turns before making a speed/cost comparison.
-5. Extend the lightweight capability/recipe registry as concrete needs accumulate. A SwiftUI shell can come later without replacing the Python engine.
+One running Hey Jev instance owns the microphone, timers, provider state and dispatcher. Voice transcripts and local typed/API text requests converge **before** Jev classification and deterministic planning. The bridge does not accept arbitrary executable code or provide a privileged direct-executor route. A Codex/ChatGPT client needs local tool access to call it; no remote service or duplicate agent framework is implied.
 
-Minimal checks per increment: one small offline check for parsing/validation/failure behavior, existing provider routing tests, and Johnny's actual end-to-end trial. Avoid a large test harness that delays trying the feature. Do not ask Johnny to evaluate an unlaunched UI as if it were ready.
+```mermaid
+flowchart TD
+    Voice[Voice transcript] --> Queue[One bounded request queue]
+    Client[Local Codex or ChatGPT client] --> Socket[Same-user socket and small CLI]
+    Socket --> Queue
+    Queue --> Classify[Jev fixed-question classification]
+    Classify --> Plan[Deterministic arguments and short plan]
+    Plan --> Validate[Target validation and confirmation]
+    Validate --> Dispatch[One serial dispatcher]
+    Dispatch --> Capabilities[Trusted discovered-target capabilities]
+    Capabilities --> Result[Structured result and observed facts]
+    Result --> UI[App status and optional speech]
+    Result --> Client
+```
+
+Agree the smallest contract before broad discovery work:
+
+- Request: request ID and bounded command text; origin identifies voice or local client for presentation, never authority.
+- Internal action: stable action name, typed arguments, resolved target and deadline. Trusted adapters own effects, preconditions and verification.
+- Result: request ID, state (`completed`, `failed`, `unsupported`, `needs_clarification`, `needs_confirmation`), concise detail and observed facts; include failed step when sequences arrive. Receipt/queue acknowledgement is distinct from completion.
+
+Use simple Python data structures. A Unix socket in a same-user private directory, restrictive file permissions and peer-user verification provide the local boundary. Bound payloads, queue capacity and waits; reject malformed/unauthorized callers. The CLI connects to the running app and reports unavailable rather than launching another engine. Existing one-shot `--text` must not be mistaken for shared running state.
+
+Serialize commands through one dispatcher, coordinating existing timer/state locks without blocking the UI or timer loop. Voice and text receive the same extraction, target validation, readiness checks and failure semantics. Consequential-action confirmation remains tied to the concrete pending action; programmatic input cannot self-authorize it. A disconnected or timed-out caller must not automatically replay a possibly completed action. Clarification and confirmation can initially remain in the app, with their pending state returned to the caller.
+
+### Selected transport and client contract
+
+Use a small Python standard-library Unix domain stream socket server **inside the existing app process**, plus a tiny `jevctl` CLI. This is the selected architecture. A loopback HTTP service adds port/token lifecycle without helping the first local caller; an MCP adapter may later wrap this exact client if needed, but is not part of the first slice. Do not introduce another daemon or model runtime.
+
+The CLI accepts a `command` subcommand with `--text` or `--text-file` (UTF-8, `-` for stdin), plus `--request-id` and a bounded wait option. Codex can use its current `exec_command` tool to run the installed client by absolute path, passing a text-file path when quoting arbitrary text would be awkward. Pass subprocess arguments as arrays when calling from Python. Never construct executable shell/AppleScript from the request text. ChatGPT needs an equivalent authorized local execution tool; the socket is not accessible from a cloud-only chat by itself.
+
+Use one UTF-8 JSON object followed by newline per request/response, protocol version `1`, no streaming protocol in the first slice. Proposed request:
+
+```json
+{"v":1,"id":"caller-generated-unique-id","op":"command","text":"open Safari"}
+```
+
+Proposed terminal response:
+
+```json
+{"v":1,"id":"caller-generated-unique-id","state":"completed","steps":[{"action":"app.open","state":"completed","target":{"bundle_id":"com.apple.Safari"},"observed":{"running":true}}]}
+```
+
+The response may instead report `failed`, `unsupported`, `needs_clarification` or `needs_confirmation`, with a short machine-readable error code and human detail. Per-step results use the same states. Request status additionally supports `queued` and `running`; these are not success. Unknown protocol versions, operations and fields are rejected. Preserve command text exactly after decoding UTF-8; normalize only a separate comparison copy.
+
+**Text versus typed actions:** v1 external commands accept text only, so both voice and CLI enter before the same Jev classification/planning. The typed action contract is internal to the trusted dispatcher, not a second public execution endpoint. A future typed entrypoint would require a concrete measured need and the identical resolver, validation, permission, confirmation and execution path; it must not silently bypass those gates. A client cannot supply arbitrary target handles, executable code or `confirmed=true` to skip review.
+
+### Bounds, cancellation and replay
+
+Initial explicit limits: 16 KiB per request, 64 KiB per response, 8 queued commands, 5 seconds to finish sending one request, 30 seconds queued before expiry, and a 60-second client wait by default. These are conservative starting values to tune from trials. Native adapters have bounded waits (start with 10 seconds for app launch); report timeout honestly when the native effect is uncertain. Reject an overloaded queue with `busy` rather than opening unbounded worker threads. A tiny bounded socket worker accepts/validates requests and hands them to the existing serial engine worker; it must not run Jev or native actions itself. UI updates remain on the main thread, and timer alerts continue under the existing state locks.
+
+Keep a bounded in-memory request ledger (for example 256 records for 10 minutes). Register each ID before queueing. Same ID and same payload returns existing status/result; same ID with different payload is an error. Never evict a queued/running entry to admit another request. Add `status` and `cancel` operations taking the request ID, without another classification call. Cancellation can remove queued work or prevent the next step; it cannot promise rollback or interrupt an already-issued native effect. A disconnect does not cancel execution. Client wait expiry prints structured pending/unknown status and exits without resubmitting. A caller may query status using the same ID, never retry the command blindly with a new ID.
+
+The ledger is not durable. After app restart, an unknown previous ID means outcome unknown, not safe-to-replay. Include a per-start instance ID in responses so callers can detect this boundary. Do not claim exactly-once behavior across crashes. For a consequential action, `needs_confirmation` identifies a concrete pending action for review in the app; v1 confirmation stays in that UI. Resume only after current target/preconditions are revalidated. Same-user authentication establishes caller identity, not permission to bypass action policy.
+
+### Socket lifecycle and same-user boundary
+
+Use a per-user app-support directory, for example `~/Library/Application Support/Hey Jev/run`, owned by the current UID with mode `0700`; the socket has mode `0600`. Verify the peer UID using macOS local-socket peer credentials (`getpeereid` or its supported equivalent). File permissions and peer validation are both required; do not silently omit peer checks when an API binding is unavailable. No credentials travel in payloads or CLI arguments.
+
+At startup, acquire a standard OS file lock in that private directory before binding. If another app owns the lock, the second instance must not create another dispatcher/server. Connect only to an owned socket in the expected directory, reject symlinks/unexpected file types/ownership, and fail closed on permission errors. If a stale socket remains after a crash, remove only that owned socket after obtaining the exclusive lock and confirming no live listener. Never unlink a live endpoint or arbitrary directory content. Bind/listen once engine initialization is ready; return an explicit unavailable/busy result during startup rather than silently spawning another engine.
+
+On quit, stop accepting requests, mark queued requests cancelled, allow the current bounded native call to settle where possible, then close and unlink only this instance's socket and release the lock. If shutdown/crash prevents a terminal reply, the caller receives unknown outcome. Keep request text out of routine logs; log IDs, state and timing without credentials or dictated private content.
+
+### First slice and evidence
+
+Build only the CLI/socket envelope, bounded queue/result ledger and one shared `app.open` action first. Johnny runs the app once, says “open Safari,” then sends the same words with `jevctl command --text-file ...`; both should use one classifier/dispatcher and verify the same app identity. A second simultaneous request queues rather than overlapping or initializing another engine. Confirm timer state survives both inputs, a bad target returns an honest result, a repeated ID does not execute twice, a client timeout does not replay, and quit/relaunch handles a stale socket safely. Leave one small offline protocol/queue check plus the existing provider tests; do not build a large framework or test matrix before this trial.
+
+Measure cold CLI startup, socket/queue overhead, classification calls and latency, native execution/readback, total observed completion, and actual provider token/cost data where available. Compare identical successful actions against the one-shot `--text` route and a measured Codex computer-use baseline. The persistent design avoids reinitialization and shares live state; it does not inherently reduce Jev inference latency or prove lower total cost. Current `--text` skips microphone/Whisper but creates a fresh process and lacks the live timer loop, shared queue and correlated results, so it cannot substitute for this interface.
+
+## Shortest robust implementation path
+
+1. Agree the tiny action/result contract and ownership of the running queue/dispatcher.
+2. Implement the minimal local bridge and route both inputs through it before classification. Prove “open Safari” (or another existing supported app) through voice and CLI using the same `app.open` executor, target checks and observed result. Demonstrate shared state and serial execution without duplicate startup.
+3. Grow installed-app discovery and deterministic name resolution behind `app.open`; try ambiguous/missing targets through both entry points. Then add Safari navigation and short stop-on-failure sequences, including “open Safari, then go to google.com.”
+4. Finish native menu/model/audio/wake-phrase slices without creating a second engine. Add one useful text/search recipe chosen by Johnny; verify one explicit target before claiming broader control.
+5. Extend the lightweight capability/recipe registry only as concrete needs accumulate. Benchmark bridge latency after correctness; no speed/cost claim without a baseline. A SwiftUI shell can later use the same boundary.
 
 ## What Johnny should try first
 

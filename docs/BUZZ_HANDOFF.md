@@ -1,8 +1,11 @@
 # Buzz implementation handoff
 
-Prepared 2026-09-24. **Astra owns spec/design only from this point. Johnny will use agents in a Buzz project on his Claude subscription for implementation.** This task has not created that project/channel or started its agents. No further feature code is authorized in this Astra task.
+Prepared 2026-09-24. **Astra owns spec/design only from this point. Johnny will use agents in a Buzz project on his Claude subscription for implementation.** The existing Buzz project now has a populated native Git repository; one agent performed Git setup only. Feature implementation has not started in this Astra task. No further feature code is authorized in this Astra task.
 
 ## Product goal
+
+**Two co-equal foundations:** reusable discoverable Mac capabilities, and a local text/programmatic bridge through which Codex/ChatGPT can command the single running Hey Jev app. Voice transcripts and typed/API text requests converge before Jev classification and deterministic planning, then share one serial dispatcher, state, validation, confirmation and structured results. Build the smallest bridge as foundation work, not a late optional feature. Existing `--text` starts a fresh one-shot process and does not share running app/timer state.
+
 
 On a user's Mac, discover installed apps and machine-specific targets programmatically, maintain a local catalog and give Jev only the relevant bounded choices. Jev remains a fixed-question classifier; Python owns argument extraction, entity resolution, permission checks, trusted execution and verification. No hardcoded app-name whitelist. Arbitrary cursor/vision control and an LLM command planner remain outside the core.
 
@@ -28,6 +31,10 @@ Newer user refinements govern older suggestions: stay deterministic, discover ap
 **Remote/isolated workers:** begin from the latest spec branch in an isolated checkout. The native-work owner may cherry-pick `6b9fe89` into its feature branch to inspect/finish the WIP. Other workers should not cherry-pick it casually because it changes `siri.py`. Do not repeat that cherry-pick in the dirty shared checkout; it already contains the patch. The integrator decides which implementation branch owns these edits.
 
 This WIP commit was chosen over a local-only patch because workers on another runtime/checkout need a recoverable reference. It is explicitly incomplete, not a release, acceptance claim or permission to overwrite credentials. No upstream PR exists.
+
+### Verified Buzz topology
+
+The separate managed checkout is `/Users/johnmeyer/.buzz/REPOS/74d22bbe06b4ca0468da56ccc8159826814b792a4769fafd0b0ed66f4c615031--hey-jev`. Its `origin` is the existing Buzz repository; `github` is Johnny's GitHub fork; `upstream` is the original GitHub repository. The four branches `main`, `feat/provider-roles`, `feat/menubar-model-settings` and `wip/native-controls-incomplete` were published with the same Git history. The canonical dirty checkout above remains untouched. Use isolated implementation branches from the latest spec branch. Buzz reviews are native reviews; GitHub publication and any eventual upstream PR are separate explicit operations.
 
 ## Incomplete source files
 
@@ -59,19 +66,19 @@ Do not start every item in the effort map. Use two builder streams at most initi
 
 **Discovery/control owner:** implement local installed-app inventory and deterministic name resolution; expose generic open/activate by resolved app identity. Add one Safari navigate adapter after that works. Do not dump the whole catalog into Jev or autogenerate executable adapters from scripting metadata. Work in separate modules to avoid competing `siri.py` edits.
 
-**Integrator (can also be one builder):** owns `siri.py`, classifier questions, bounded argument parsing, shared execution queue/lock, action/result contract and honest step failures. Remove false compound-success behavior and add bounded native-call timeouts. Integrate one usable increment at a time. Add the persistent text bridge only once the common dispatcher and result contract exist.
+**Integrator (can also be one builder):** owns `siri.py`, classifier questions, bounded argument parsing, shared execution queue/lock, action/result contract and honest step failures. Remove false compound-success behavior and add bounded native-call timeouts. Integrate one usable increment at a time. Build the minimal persistent text bridge alongside the common dispatcher and result contract as the first shared execution slice. Voice and local API text converge before classification; prove both through one simple app-open action before broadening discovery or sequences.
 
-Suggested small contract: action name, typed arguments, concrete target reference, timeout and result state/detail/observed facts. Each trusted adapter provides its own readiness/success check and effect/confirmation category. Use simple Python data structures; a framework is unnecessary.
+Suggested small contract: request ID and bounded command text; internal action name, typed arguments, concrete target reference and timeout; result request ID/state/detail/observed facts. Distinguish receipt from completion, and return clarification/confirmation states explicitly. Use the selected `jevctl` CLI and in-process same-user Unix socket, with restrictive permissions and peer-user verification. Follow [the version-1 protocol and lifecycle contract](COMMAND_ARCHITECTURE.md#selected-transport-and-client-contract), including text-only external commands, request-ID status/cancellation, bounded replay protection and explicit crash limitations. Bound payloads, queue capacity and waits; do not replay after caller timeout or bypass validation/confirmation. See the foundational interface in COMMAND_ARCHITECTURE.md. Each trusted adapter provides its own readiness/success check and effect/confirmation category. Use simple Python data structures; a framework is unnecessary.
 
 Do not run multiple live GUI/audio workers concurrently. One controls the desktop for a bounded trial while others work offline. Preserve bundle identity/permissions; Johnny handles unexpected consent/authentication challenges.
 
 ## Human trial order
 
-1. Native menu/settings open correctly; volume changes only voice; mute and pause do what labels promise; status/settings reopen in menu-only mode; custom phrase and push-to-talk work; another model answers a question.
-2. Open three installed apps missing from the original eight-name list. Try duplicate/ambiguous names and an unavailable app. No silent wrong-target execution.
-3. “Open Safari, then go to google.com.” Verify location and report any failure precisely. A failed second step must not claim the whole sequence succeeded.
-4. One concrete Johnny-selected recipe, such as Google search or a named app menu operation. Expand only from the trial result.
-5. Persistent text bridge with same-user access, serialized execution, explicit results and measured latency. No faster/cheaper claim without a baseline.
+1. Agree the tiny action/result contract. In one running app, “open Safari” through voice and the local CLI reaches the same classifier/dispatcher/executor and returns an observed result. Confirm shared state, serial execution and unavailable/malformed-request behavior. No second assistant process.
+2. Open three discovered installed apps missing from the old list through both entry points. Try duplicate/ambiguous names and an unavailable app. No silent wrong-target execution.
+3. “Open Safari, then go to google.com” through voice and bridge. Verify location and precise failure reporting; stop after a failed step. A programmatic request cannot bypass consequential-action confirmation.
+4. Native menu/settings, voice volume/mute/pause, reopening, custom phrase, push-to-talk and model selection get one coherent human trial.
+5. One concrete Johnny-selected recipe. Measure bridge latency after correctness; no faster/cheaper claim without a baseline.
 
 Per slice, leave one small meaningful offline check for tricky validation/failure behavior; use existing routing tests and Johnny's end-to-end trial. Avoid building a large speculative suite before he can try the feature.
 
@@ -79,4 +86,4 @@ Per slice, leave one small meaningful offline check for tricky validation/failur
 
 Use focused implementation commits, push to Johnny's fork, and state what was actually tested. WIP preservation is not acceptance. Do not open upstream PRs until Johnny has tried and accepted the result. Upstream has no evident license; do not describe the fork as a separately redistributable product or begin distribution work without resolving that boundary.
 
-Astra's implementation role is closed. It may clarify/update design if Johnny asks. Buzz workers own future coding under Johnny's direction. No Buzz channel was created by this task.
+Astra's implementation role is closed. It may clarify/update design if Johnny asks. Buzz workers own future coding under Johnny's direction. Buzz Git setup is complete; future implementation remains under Johnny's direction.

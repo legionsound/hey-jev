@@ -1,6 +1,6 @@
 # Hey Jev overhaul
 
-Status: implementation in progress on `feat/menubar-model-settings`, based on `8c04746`.
+Status: proposed overhaul; Astra owns documentation only, Buzz agents own implementation. Spec branch: `feat/menubar-model-settings`, based on `8c04746`.
 Owner: Johnny's fork, `legionsound/hey-jev`. Actual checkout: `/Users/johnmeyer/Developer/Hey Jev`.
 
 ## Current architecture and command inventory
@@ -22,6 +22,10 @@ Existing commands:
 The existing deeper-answer model is fixed to Claude Haiku 4.5 in both answers and reminder preparation. Fish WAV files are cached and played through `afplay`. Right Option push-to-talk and wake phrase modes run beside the native UI. `siri.py --text` starts a fresh process for one text turn; no persistent command bridge exists yet.
 
 ## Goals
+
+### Two co-equal foundations
+
+Build reusable, discoverable Mac capabilities and a local command interface through which Codex/ChatGPT can command the running Hey Jev app. Neither is a late optional add-on. One running app owns state and execution: voice transcripts and typed/API text requests converge before Jev classification and deterministic planning, then use the same validated dispatcher and structured results. The bridge is a local integration point for a same-user Codex/ChatGPT client with local tool access, not a claim that a remote ChatGPT session can reach this Mac automatically.
 
 ### Native everyday controls
 
@@ -56,20 +60,23 @@ Keep responsibilities clear:
 - Optional generative model: only when arbitrary structured language interpretation is actually necessary; never treat generated code or text as execution authority.
 - Browser automation: a verified Safari subset, not arbitrary website control. Investigate native AppleScript navigation and the limits of text entry/site actions without enabling new browser permissions silently.
 
-### Local Codex bridge
+### Foundational local command bridge
 
-Assess a persistent local interface for submitting text commands to the running app. Implement the smallest robust bridge if it removes repeated initialization and supports actual use. Prefer a same-user Unix socket with restrictive permissions over a network listener. Serialize commands with microphone/timer work, bound request size and timeouts, expose structured results, and make confirmation/unsupported behavior explicit. Do not create an unauthenticated TCP endpoint.
+Implement a minimal persistent local interface and CLI client for sending text commands into the single running app. The selected architecture is a standard-library Unix domain socket server inside the existing app process plus a tiny `jevctl` CLI, in a private same-user directory with restrictive permissions and peer-user verification. No unauthenticated TCP listener. Bound request size, queue length and deadlines; reject malformed or unauthorized requests before classification. Do not start a second assistant, model engine or agent framework per request.
 
-Retain `--text` compatibility. Add a CLI client if a persistent bridge is built. Measure observed end-to-end latency and report actual API usage where available. Do not claim faster/cheaper than Codex computer use without a comparable measured baseline.
+Voice transcripts and bridge text enter one request queue before Jev classification, deterministic argument resolution and planning. Serialize command execution against the same app/timer state. Return request-correlated structured completion, failure, unsupported, clarification or confirmation results with observed facts. An acknowledgement is not completion. A caller timeout does not prove cancellation; never blindly retry a possibly executed action. Neither caller identity nor an API field bypasses validation, target checks or consequential-action confirmation. Confirmation must refer to the pending concrete action in the running app.
+
+The version-1 text-only JSON envelope, per-step results, request-ID ledger, bounded queue, cancellation/replay semantics and socket startup/shutdown rules are defined in [the selected technical contract](COMMAND_ARCHITECTURE.md#selected-transport-and-client-contract). Typed actions remain internal; an optional future MCP adapter would wrap the same client.
+
+Existing `siri.py --text` is a one-shot process with no shared running state or persistent timer loop. Preserve or clearly document compatibility, but do not treat it as this bridge. The new CLI talks to the running instance and reports unavailable when it is absent. Measure latency only after the shared path works; do not claim faster/cheaper operation without a comparable baseline.
 
 ## Sequencing and acceptance
 
-1. Commit this specification and preserve existing user state.
-2. Implement model settings and shared request construction; verify both deeper-answer paths with offline tests and live catalog readback.
-3. Implement native menu/status/settings controls and independent playback; inspect actual UI and test gain/mute with local audio, without touching user keys.
-4. Audit the command path, implement bounded Safari plans and error reporting, and test the concrete Safari/google.com case live.
-5. Implement/evaluate persistent local bridge; test permissions, malformed requests, serialization, responses and latency.
-6. Update this file and README with verified results and remaining limits. Run meaningful tests, commit focused changes and push to Johnny's fork.
+1. Agree a tiny shared action/result contract and one queue/dispatcher owner; preserve existing user state.
+2. Implement the running-app text bridge and converge voice/text before classification. Prove one simple `app.open` command through both inputs with the same validation, executor and observed result. Use an existing supported app for this first slice.
+3. Grow installed-app discovery and deterministic target resolution behind that same action. Then add short stop-on-failure sequences, starting with Safari open/navigation. Exercise each through voice and the bridge.
+4. Finish native menu/settings, configurable wake phrase, model settings and independent playback as separate slices sharing the same running engine. Verify both deeper-answer paths and real UI/audio behavior.
+5. Expand one concrete recipe from Johnny's trial. Record verified results, remaining limits and focused checks; publish through the agreed Buzz/GitHub workflow.
 
 Acceptance checks:
 
@@ -81,7 +88,8 @@ Acceptance checks:
 - Existing provider routing checks continue to pass.
 - Safari open then navigate produces a verified URL or a precise failure. Multi-step execution stops after a failed step.
 - Exact text is preserved within documented supported syntax. Generic site automation is not claimed without verified selectors and success evidence.
-- Local bridge only accepts same-user bounded requests, reports completion/errors, and does not bypass consequential-action confirmation.
+- Both voice and a local Codex/ChatGPT client open the same app through one running dispatcher and return equivalent structured outcomes. Timer/app state is shared; simultaneous requests execute serially.
+- Local bridge rejects wrong-user/malformed/oversized requests, reports completion/errors, and does not bypass validation or consequential-action confirmation. Client timeouts do not trigger replay.
 - Tests do not use or print production keys; visual/audio checks distinguish programmatic evidence from human audition.
 
 ## Constraints and open decisions
@@ -93,7 +101,7 @@ Acceptance checks:
 - Generic website interaction depends on permissions, DOM access and site semantics. The exact verified subset will be recorded here after investigation.
 - Listening pause does not promise cancellation of actions already executing. UI and documentation must state the boundary.
 - Menu design uses native Cocoa controls and existing dependencies. Do not add speculative agent frameworks or arbitrary Mac execution.
-- Persistent bridge design and latency claims remain provisional until tested.
+- The bridge is required foundation work; exact transport details and latency claims remain provisional until tested.
 
 ## Implementation evidence
 
@@ -139,6 +147,6 @@ The discussion also includes [CAPABILITY_EFFORT_MAP.md](CAPABILITY_EFFORT_MAP.md
 
 Johnny has selected **Astra for spec/design only** and agents in a Buzz project on his Claude subscription for implementation. No feature coding resumes in this task. See [BUZZ_HANDOFF.md](BUZZ_HANDOFF.md) for preserved WIP code, branches, exact evidence and practical assignments.
 
-The central product goal is a machine-derived local catalog: discover apps/declared interfaces/device metadata, refresh it, resolve targets locally and send Jev only relevant bounded choices. Do not hardcode app names or confuse metadata discovery with permission, a usable adapter or verified completion. Live menus/fields/DOM targets require on-demand observation and revalidation. The [catalog design](CAPABILITY_EFFORT_MAP.md#central-product-design-discover-this-mac-then-offer-bounded-choices) specifies sources, opt-ins, privacy, refresh/rebuild, candidate size and evidence states.
+One co-equal foundation is the running-app bridge described above. The other is a machine-derived local catalog: discover apps/declared interfaces/device metadata, refresh it, resolve targets locally and send Jev only relevant bounded choices. Do not hardcode app names or confuse metadata discovery with permission, a usable adapter or verified completion. Live menus/fields/DOM targets require on-demand observation and revalidation. The [catalog design](CAPABILITY_EFFORT_MAP.md#central-product-design-discover-this-mac-then-offer-bounded-choices) specifies sources, opt-ins, privacy, refresh/rebuild, candidate size and evidence states.
 
 For recoverable cross-runtime handoff, the four pre-existing incomplete source edits were preserved and pushed as `6b9fe89` on `wip/native-controls-incomplete`. The active spec branch and local working edits were left intact. This is an explicitly incomplete snapshot, not a finished build. Further commits on the spec branch remain documentation only; no upstream PR was opened.

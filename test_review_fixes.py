@@ -148,17 +148,34 @@ class ConfirmationTargetTests(unittest.TestCase):
     def test_quit_targets_the_resolved_install_only(self):
         t = {"name": "Live", "bundle_id": "com.ableton.live", "path": "/Applications/Live.app"}
         running = [("/Applications/Old/Live.app", 111), ("/Applications/Live.app", 222)]
-        app = MagicMock()
-        app.terminate.return_value = True
         with patch.object(actions, "running", return_value=running), \
-             patch("AppKit.NSRunningApplication") as cls:
-            by_pid = cls.runningApplicationWithProcessIdentifier_
-            by_pid.return_value = app
+             patch.object(actions, "sh", return_value="222 sent") as sh:
             actions.run_app_quit(t, time.monotonic() + 5)
-        by_pid.assert_called_once_with(222)
-        with patch.object(actions, "running", return_value=running[:1]):
+        cmd = sh.call_args[0][0]
+        self.assertEqual((cmd[0], cmd[1], cmd[3:]), (sys.executable, "-c", ["com.ableton.live", "/Applications/Live.app", "222"]))
+        self.assertTrue(sh.call_args.kwargs["effect"])  # dispatch errors are uncertain
+        with patch.object(actions, "running", return_value=running[:1]), patch.object(actions, "sh") as sh:
             with self.assertRaises(Failed):  # only the other install runs: refuse, never quit it
                 actions.run_app_quit(t, time.monotonic() + 5)
+            sh.assert_not_called()
+
+    def test_replaced_process_is_not_terminated(self):
+        with patch.object(actions, "running", return_value=[("/Applications/Live.app", 222)]), \
+             patch.object(actions, "sh", return_value="222 mismatch"):
+            with self.assertRaises(Failed):
+                actions.run_app_quit({"bundle_id": "b", "path": "/Applications/Live.app"}, time.monotonic() + 5)
+
+    def test_quit_helper_rechecks_live_identity(self):
+        """Real helper against the real Finder pid, with identities that do not match: never terminated."""
+        [(path, pid)] = actions.running("com.apple.finder", time.monotonic() + 5)
+        for bid, p in (("com.example.not-finder", path), ("com.apple.finder", "/Applications/Other.app")):
+            out = actions.sh([sys.executable, "-c", actions.QUIT_HELPER, bid, p, str(pid)], time.monotonic() + 20)
+            self.assertEqual(out, f"{pid} mismatch")
+
+    def test_quit_is_bounded_by_the_deadline(self):
+        with patch.object(actions, "running", return_value=[("/A.app", 1)]):
+            with self.assertRaises(actions.Timeout):
+                actions.run_app_quit({"bundle_id": "b", "path": "/A.app"}, time.monotonic() - 1)
 
 
 class VoiceWiringTests(unittest.TestCase):
@@ -233,6 +250,78 @@ class VoiceWiringTests(unittest.TestCase):
         finally:
             owner.stop()
             self.siri.ENGINE.shutdown()
+
+
+class FloorTests(unittest.TestCase):
+    def setUp(self):
+        import siri
+        self.siri = siri
+
+    def rec(self):
+        r = MagicMock(on=False, paused=False)
+        r.start.side_effect = lambda: setattr(r, "on", True)
+        r.stop.side_effect = lambda: setattr(r, "on", False) or "audio"
+        r.invalidate.side_effect = lambda: setattr(r, "on", False)
+        return r
+
+    def test_late_speech_waits_for_push_to_talk_to_end(self):
+        rec = self.rec()
+        floor = self.siri.Floor(rec)
+        self.assertTrue(floor.start_recording())
+        spoke = threading.Event()
+
+        def late():
+            with floor.hold():
+                self.assertFalse(rec.on)  # never speaks into a live recording
+                spoke.set()
+
+        threading.Thread(target=late, daemon=True).start()
+        self.assertFalse(spoke.wait(0.3))
+        self.assertEqual(floor.stop_recording(), "audio")
+        self.assertTrue(spoke.wait(2))
+
+    def test_no_recording_starts_while_jev_speaks(self):
+        rec = self.rec()
+        floor = self.siri.Floor(rec)
+        with patch.object(self.siri.time, "sleep"):
+            with floor.hold():
+                self.assertFalse(floor.start_recording())
+                rec.start.assert_not_called()
+            self.assertTrue(floor.start_recording())
+
+    def test_dropped_recording_frees_the_floor(self):
+        floor = self.siri.Floor(self.rec())
+        floor.start_recording()
+        floor.drop_recording()
+        self.assertFalse(floor.locked())
+        floor.drop_recording()  # no recording: nothing to release
+        self.assertFalse(floor.locked())
+
+    def test_recorder_ignores_audio_while_paused(self):
+        import numpy as np
+        r = object.__new__(self.siri.Recorder)
+        r.np, r.enabled, r.on, r.paused, r.wake, r.frames = np, True, True, True, False, []
+        r._reset_segment()
+        r._cb(np.ones((4, 1), dtype="float32"))
+        self.assertEqual(r.frames, [])
+        r.paused = False
+        r._cb(np.ones((4, 1), dtype="float32"))
+        self.assertEqual(len(r.frames), 1)
+
+    def test_failed_startup_leaves_no_bridge_or_engine(self):
+        for broken in ("model", "recorder"):
+            fake_whisper, b, eng = MagicMock(), MagicMock(), MagicMock()
+            if broken == "model":
+                fake_whisper.WhisperModel.side_effect = RuntimeError("no model")
+            with patch.dict(sys.modules, {"faster_whisper": fake_whisper}), \
+                 patch.object(self.siri, "make_engine", return_value=eng), \
+                 patch.object(self.siri, "start_bridge", return_value=b), \
+                 patch.object(self.siri, "Recorder", side_effect=RuntimeError("no mic")):
+                with self.assertRaises(RuntimeError):
+                    self.siri.run_voice_assistant()
+            b.stop.assert_called_once()
+            eng.shutdown.assert_called_once()
+            self.assertIsNone(self.siri.ENGINE)
 
 
 class BridgeResilienceTests(unittest.TestCase):

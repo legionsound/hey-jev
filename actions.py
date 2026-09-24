@@ -8,6 +8,7 @@ verify(target, deadline) -> ("done" | "wait" | "failed" | "unverified", facts), 
 import os
 import re
 import subprocess
+import sys
 import time
 
 import app_catalog
@@ -94,18 +95,32 @@ def verify_app_open(t, deadline):
     return ("wait", facts)
 
 
+QUIT_HELPER = "\n".join([
+    "import os, sys",
+    "from AppKit import NSRunningApplication",
+    "bid, path = sys.argv[1], os.path.realpath(sys.argv[2])",
+    "for pid in map(int, sys.argv[3:]):",
+    "    app = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)",
+    "    if app is None or app.isTerminated():",
+    "        print(pid, 'gone')",
+    "    elif app.bundleIdentifier() != bid or not app.bundleURL() or os.path.realpath(app.bundleURL().path()) != path:",
+    "        print(pid, 'mismatch')",
+    "    else:",
+    "        print(pid, 'sent' if app.terminate() else 'refused', flush=True)",
+])
+
+
 def run_app_quit(t, deadline):
-    """Quit only the install that was resolved and confirmed: by pid, never by bundle id, which duplicates share."""
-    from AppKit import NSRunningApplication
+    """Quit only the install that was resolved and confirmed. A fixed helper runs in a bounded subprocess and
+    rechecks each pid's current bundle id and path right before terminate; a mismatch is never terminated."""
     pids = [pid for path, pid in running(t["bundle_id"], deadline) if path == t.get("path") and pid]
     if not pids:
         raise Failed(f"{t.get('name') or 'that app'} is not running from {t.get('path')}")
-    sent = False
-    for pid in pids:
-        app = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
-        sent = bool(app and app.terminate()) or sent
-    if not sent:
-        raise Uncertain("quit request not accepted")
+    out = sh([sys.executable, "-c", QUIT_HELPER, t["bundle_id"], t["path"], *map(str, pids)], deadline, effect=True)
+    results = dict(line.split() for line in out.splitlines() if line.strip())
+    t["quit"] = results
+    if "sent" not in results.values():
+        raise Failed(f"nothing quit: {results}")
 
 
 def verify_app_quit(t, deadline):

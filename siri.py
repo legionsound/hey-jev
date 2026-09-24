@@ -398,7 +398,7 @@ class Recorder:
         np = self.np
         if not self.enabled:
             return
-        if self.on:
+        if self.on and not self.paused:
             self.frames.append(indata.copy())
         if not self.wake or self.paused:
             if self.speech:
@@ -440,6 +440,53 @@ class Recorder:
         return self.np.concatenate(self.frames)[:, 0] if self.frames else self.np.zeros(0, dtype="float32")
 
 
+class Floor:
+    """One owner of the room at a time: the user holding the talk key, or Jev speaking.
+    A push-to-talk recording holds the floor from key down to key up, so speech that lands meanwhile waits."""
+
+    def __init__(self, rec):
+        self.rec = rec
+        self.lock = threading.Lock()   # the floor
+        self.state = threading.Lock()  # guards the recording start/stop transition
+
+    def locked(self):
+        return self.lock.locked()
+
+    def start_recording(self):
+        with self.state:
+            if self.rec.on or not self.lock.acquire(blocking=False):
+                return False
+            self.rec.start()
+            return True
+
+    def stop_recording(self):
+        """-> the audio, or None when no recording was running."""
+        with self.state:
+            if not self.rec.on:
+                return None
+            audio = self.rec.stop()
+            self.lock.release()
+            return audio
+
+    def drop_recording(self):
+        """Mode or mic change: discard any recording and give the floor back if it held it."""
+        with self.state:
+            was = self.rec.on
+            self.rec.invalidate()
+            if was:
+                self.lock.release()
+
+    @contextlib.contextmanager
+    def hold(self):
+        with self.lock:
+            self.rec.paused = True  # don't hear her own reply
+            try:
+                yield
+            finally:
+                time.sleep(0.3)
+                self.rec.paused = False
+
+
 def ready_text(wake):
     return "Say “Hey Jev” and your command" if wake else "Ready when you are"
 
@@ -463,25 +510,22 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
     from faster_whisper import WhisperModel
     ENGINE = make_engine(notify, ask)
     bridge = BRIDGE = start_bridge(ENGINE, notify)  # raises before any microphone or voice dispatcher exists
-    print("loading whisper...")
-    emit(notify, "Starting", "Loading Whisper…")
-    model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
-    rec = Recorder()
-    rec.enabled = listening
-    if not listening:
-        rec.stream.stop()
-    busy = threading.Lock()
+    try:
+        print("loading whisper...")
+        emit(notify, "Starting", "Loading Whisper…")
+        model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+        rec = Recorder()
+        rec.enabled = listening
+        if not listening:
+            rec.stream.stop()
+    except BaseException:  # startup failed: leave no socket or engine behind
+        bridge.stop()
+        ENGINE.shutdown()
+        ENGINE = BRIDGE = None
+        raise
+    floor = Floor(rec)
+    hold = floor.hold
     armed_until = [0.0]
-
-    @contextlib.contextmanager
-    def hold():
-        with busy:
-            rec.paused = True
-            try:
-                yield
-            finally:
-                time.sleep(0.3)
-                rec.paused = False
 
     def transcribe(audio, prompt):
         t = time.time()
@@ -489,10 +533,9 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
         return " ".join(s.text.strip() for s in segs).strip(), int((time.time() - t) * 1000)
 
     def run_turn(text, stt_ms, epoch):
-        with busy:
+        with hold():
             if not rec.enabled or epoch != rec.epoch:
                 return
-            rec.paused = True  # don't hear her own reply
             try:
                 print(f"  (stt {stt_ms}ms)")
                 turn(ENGINE, text, notify, hold=hold)
@@ -501,9 +544,6 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
                 emit(notify, "Something went wrong", str(exc))
                 time.sleep(2)
                 emit(notify, "Ready", ready_text(rec.wake))
-            finally:
-                time.sleep(0.3)
-                rec.paused = False
 
     def ptt_turn(audio, epoch):
         emit(notify, "Transcribing", "Working out what you said…")
@@ -523,7 +563,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
                     armed_until[0] = 0
                     emit(notify, "Ready", ready_text(rec.wake))
                 continue
-            if not rec.enabled or not rec.wake or busy.locked():
+            if not rec.enabled or not rec.wake or floor.locked():
                 continue
             epoch = rec.epoch
             try:
@@ -540,11 +580,8 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
                     armed_until[0] = 0
                     run_turn(rest, ms, epoch)
                 else:
-                    with busy:
-                        rec.paused = True
+                    with hold():
                         say(say_line("wake"), notify)
-                        time.sleep(0.2)
-                        rec.paused = False
                     armed_until[0] = time.time() + WAKE_WINDOW
                     emit(notify, "Listening", "Go ahead…")
             elif armed_until[0] and time.time() < armed_until[0]:
@@ -554,35 +591,29 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
                 print(f"\n  (not for me: {text!r})")
 
     def set_mode(new):
-        rec.invalidate()
+        floor.drop_recording()
         rec.wake = new == "wake"
         armed_until[0] = 0
         print(f"\n[mode: {'always listening' if rec.wake else 'hold right Option'}]")
-        if not busy.locked():
+        if not floor.locked():
             emit(notify, "Ready", ready_text(rec.wake))
 
     def start_recording():
-        if rec.enabled and not rec.wake and not rec.on and not busy.locked():
-            rec.start()
+        if rec.enabled and not rec.wake and floor.start_recording():
             print("\n[listening]", end="", flush=True)
             emit(notify, "Listening", "Release right Option when you’re done")
 
     def stop_recording():
-        if rec.on:
-            audio = rec.stop()
+        audio = floor.stop_recording()
+        if audio is not None:
             if len(audio) > SAMPLE_RATE * 0.3:
                 threading.Thread(target=ptt_turn, args=(audio, rec.epoch), daemon=True).start()
 
     def timer_done(t):
-        with busy:
-            rec.paused = True
-            try:
-                emit(notify, "Time's up", t["label"] or "Timer finished")
-                subprocess.run(["afplay", "/System/Library/Sounds/Glass.aiff"])
-                say(timer_done_line(t), notify)
-            finally:
-                time.sleep(0.3)
-                rec.paused = False
+        with hold():
+            emit(notify, "Time's up", t["label"] or "Timer finished")
+            subprocess.run(["afplay", "/System/Library/Sounds/Glass.aiff"])
+            say(timer_done_line(t), notify)
         emit(notify, "Ready", ready_text(rec.wake))
 
     timers.start_loop(timer_done)
@@ -597,7 +628,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
                 set_mode(command[1])
             elif isinstance(command, tuple) and command[0] == "listening":
                 rec.enabled = bool(command[1])
-                rec.invalidate()
+                floor.drop_recording()
                 armed_until[0] = 0
                 if rec.enabled:
                     rec.stream.start()

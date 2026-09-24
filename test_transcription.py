@@ -36,19 +36,18 @@ class BackendTests(unittest.TestCase):
         self.assertIn("isn't installed", blocked)
 
     def test_backend_pref_validates(self):
-        saved = model_settings.PREFS.stringForKey_("transcription_backend")
-        try:
+        class Prefs(dict):  # never touch the real app preferences
+            stringForKey_ = dict.get
+
+            def setObject_forKey_(self, value, key):
+                self[key] = value
+        with patch.object(model_settings, "PREFS", Prefs()):
             with self.assertRaises(ValueError):
                 model_settings.save_transcription_backend("cloud")
             model_settings.save_transcription_backend("apple")
             self.assertEqual(model_settings.transcription_backend(), "apple")
             model_settings.PREFS.setObject_forKey_("bogus", "transcription_backend")
             self.assertEqual(model_settings.transcription_backend(), "whisper")
-        finally:
-            if saved:
-                model_settings.PREFS.setObject_forKey_(saved, "transcription_backend")
-            else:
-                model_settings.PREFS.removeObjectForKey_("transcription_backend")
 
 
 class FakeRecorder:

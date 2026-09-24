@@ -72,41 +72,39 @@ def app_name(clause):
 UNITS = {w: i for i, w in enumerate("zero one two three four five six seven eight nine ten eleven twelve thirteen "
                                      "fourteen fifteen sixteen seventeen eighteen nineteen".split())}
 TENS = {w: 10 * i for i, w in enumerate("twenty thirty forty fifty sixty seventy eighty ninety".split(), 2)}
-# Everything that can be part of a spoken number, so the match takes the whole phrase, never just its tail.
-NUM_WORD = r"(?:" + "|".join([*UNITS, *TENS, "a", "and", "hundred", "thousand", "minus", "negative", "point"]) + r")"
-PERCENT = re.compile(r"(?:[-+\u2212]\s*)?(?:\d[\d.,]*|" + NUM_WORD + r"(?:[\s-]+" + NUM_WORD + r")*)\s*(?:%|\bper\s*cent\b)", re.I)
+MARKER = re.compile(r"%|\bper\s*cent\b", re.I)
+ANCHORS = {"to", "by", "at", "on", "volume", "spotify", "it", "up", "down", "set", "make", "put", "turn"}
 
 
 def words_value(words):
-    """Plain whole numbers only: "seventy five", "a hundred", "one hundred and five". None for anything else."""
-    total, cur, seen = 0, 0, False
-    for w in words:
-        if w in UNITS or w in TENS:
-            cur, seen = cur + UNITS.get(w, TENS.get(w)), True
-        elif w == "hundred":
-            cur, seen = (cur or 1) * 100, True
-        elif w == "thousand":
-            total, cur, seen = total + (cur or 1) * 1000, 0, True
-        elif w not in ("a", "and"):
-            return None  # minus, negative, point
-    return total + cur if seen else None
+    """Strict: "zero".."nineteen", "twenty".."ninety" [+ "one".."nine"], "[a|one] hundred". None for anything else."""
+    if words in (["hundred"], ["a", "hundred"], ["one", "hundred"]):
+        return 100
+    if len(words) == 1 and words[0] in UNITS:
+        return UNITS[words[0]]
+    if len(words) == 1 and words[0] in TENS:
+        return TENS[words[0]]
+    if len(words) == 2 and words[0] in TENS and 1 <= UNITS.get(words[1], 0) <= 9:
+        return TENS[words[0]] + UNITS[words[1]]
+    return None
 
 
 def percent(clause):
-    """None when no percent is spoken, else (value or None when invalid, relative). Valid = whole number 0..100.
-    The whole number phrase is parsed: "-10", "12.5", "two hundred" and "one hundred and five" are invalid, not 10/5/100/5."""
-    m = PERCENT.search(clause)
+    """None when no percent marker is spoken, else (value or None when invalid, relative).
+    The argument is every word between the marker and the nearest anchor ("to", "by", "volume"...), and all of it
+    must parse: "-10", ".5", "12.5", "one hundred and 5", "a million" are invalid, never a guessed suffix."""
+    m = MARKER.search(clause)
     if not m:
         return None
-    phrase = re.sub(r"\s*(?:%|per\s*cent)$", "", m[0], flags=re.I).strip().lower()
-    words = re.split(r"[\s-]+", phrase)
-    while words and words[0] in ("a", "and") and words[1:2] != ["hundred"]:
-        words.pop(0)  # "to a" / "and" before the number are not part of it
-    relative = bool(re.search(r"\bby\s*$", clause[:m.start()], re.I))
-    if re.fullmatch(r"\d+", phrase):
-        n = int(phrase)
+    words = clause[:m.start()].lower().split()
+    arg = []
+    while words and words[-1] not in ANCHORS:
+        arg.insert(0, words.pop())
+    relative = bool(words) and words[-1] == "by"
+    if len(arg) == 1 and re.fullmatch(r"\d{1,3}", arg[0]):
+        n = int(arg[0])
     else:
-        n = None if re.search(r"\d", phrase) else words_value(words)  # signs, decimals, "1,5"
+        n = words_value(" ".join(arg).replace("-", " ").split())
     return (n if n is not None and 0 <= n <= 100 else None, relative)
 
 

@@ -401,7 +401,8 @@ class PercentVolumeTests(unittest.TestCase):
     def test_invalid_percent_clarifies_instead_of_guessing(self):
         for text in ["set volume to -10 percent", "set volume to 12.5 percent", "set volume to two hundred percent",
                      "set volume to one hundred and five percent", "set volume to 150 percent", "set volume to minus ten percent",
-                     "set volume to 1,000 percent", "set volume by 10 percent"]:
+                     "set volume to 1,000 percent", "set volume by 10 percent", "set volume to .5 percent",
+                     "set volume to one hundred and 5 percent", "set volume to a million percent", "set volume to percent"]:
             self.assertEqual(self.plan(text), ("clarify", "bad_percent"), text)
         self.assertEqual(self.plan("open Spotify, then set volume to 12.5 percent"), ("clarify", "bad_percent"))
 

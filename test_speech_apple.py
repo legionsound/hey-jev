@@ -114,6 +114,8 @@ def _install_fake(auth=3, on_device=True, available=True, supported_locale=True,
             if script in ("final", "partial_then_final"):
                 self._handler(FakeResult(), None)
             if script == "error":
+                self._handler(None, "Error Domain=kAFAssistantErrorDomain Code=1101 Recognition service error")
+            if script == "no_speech":
                 self._handler(None, "Error Domain=kAFAssistantErrorDomain Code=1110 No speech detected")
 
     speech.SFSpeechAudioBufferRecognitionRequest = FakeReq
@@ -258,8 +260,14 @@ class TranscribeTests(unittest.TestCase):
 
     def test_error_callback_raises(self):
         _install_fake(auth=3, script="error")
-        with self.assertRaisesRegex(RuntimeError, "recognition failed.*No speech"):
+        with self.assertRaisesRegex(RuntimeError, "recognition failed.*1101"):
             speech_apple.AppleTranscriber(timeout_s=5).transcribe(np.zeros(1600, dtype=np.float32))
+
+    def test_no_speech_is_an_empty_transcript_not_a_failure(self):
+        _install_fake(auth=3, script="no_speech")
+        text, ms = speech_apple.AppleTranscriber(timeout_s=5).transcribe(np.zeros(1600, dtype=np.float32))
+        self.assertEqual(text, "")
+        self.assertGreaterEqual(ms, 0)
 
     def test_refuses_when_not_ready(self):
         _install_fake(auth=1)

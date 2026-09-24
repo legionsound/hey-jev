@@ -58,6 +58,16 @@ def request_access(done):
     Speech.SFSpeechRecognizer.requestAuthorization_(done)
 
 
+NO_SPEECH = 1110  # kAFAssistantErrorDomain "No speech detected"
+
+
+def _no_speech(error):
+    try:
+        return error.code() == NO_SPEECH
+    except AttributeError:
+        return f"Code={NO_SPEECH}" in str(error)
+
+
 class AppleTranscriber:
     def __init__(self, locale="en-US", timeout_s=DEFAULT_TIMEOUT_S):
         self.locale = locale
@@ -100,7 +110,9 @@ class AppleTranscriber:
         out = {}
 
         def handler(result, error):
-            if error is not None:
+            if error is not None and _no_speech(error):
+                out["text"] = ""  # silence or noise: an empty transcript, like Whisper, not a failure
+            elif error is not None:
                 out["error"] = error
             elif result is not None and result.isFinal():
                 out["text"] = str(result.bestTranscription().formattedString())
@@ -117,7 +129,7 @@ class AppleTranscriber:
         if not done_ev.wait(self.timeout_s):
             task.cancel()
             raise RuntimeError("timeout after %.0fs waiting for on-device result" % self.timeout_s)
-        if "error" in out:
+        if "error" in out and "text" not in out:
             raise RuntimeError("recognition failed: %s" % out["error"])
         ms = int((time.time() - t0) * 1000)
         return (out.get("text", "").strip(), ms)

@@ -8,7 +8,7 @@ Hey Jev currently understands flexible wording for a small fixed collection of a
 
 We do **not** need to hardcode every sentence. We do need to implement trustworthy capabilities. A reusable “open app” capability can accept many installed apps; “navigate browser” can accept many URLs; a recipe can combine them. Finding an unfamiliar button or deciding what a new website means is a separate semantic/visual problem.
 
-The shortest next increment is Johnny's exact Safari example, with URL readback and honest failure reporting. Let Johnny try that before building a general browser agent or elaborate recipe editor.
+The first control increments should cover any discovered installed app, then Johnny's exact Safari example with URL readback and honest failure reporting. Keep Jev as a fixed-question classifier and Python as the deterministic executor. General visual computer use is outside the core design.
 
 ## Actual path through the app
 
@@ -112,17 +112,17 @@ A recipe is data composing these capabilities. Illustrative only; no recipe runn
 
 For noncoders, Johnny can describe or demonstrate a workflow and have Codex create a reviewed recipe. A later small form could expose supported steps and arguments. Do not build that editor before a handful of recipes prove useful. Recipes must not contain arbitrary Python, shell or AppleScript supplied by speech; trusted adapters own executable code.
 
-Jev can select a capability or recipe from known candidates and score ambiguity. Deterministic extraction handles URLs and explicitly delimited text. A generative model can later propose a structured plan when natural language is too varied for those rules, but its output must pass the same schema and executor checks. It must not silently rewrite requested text. Whisper itself can mishear speech, so “exact” voice text means preserving the transcript and allowing review where exact wording matters; a typed bridge can preserve bytes directly.
+Jev can select a capability or recipe from known candidates and score ambiguity. Deterministic extraction handles URLs and explicitly delimited text. Generative command planning is outside the current design. If the deterministic grammar cannot extract arguments unambiguously, ask for a clearer command rather than introducing an LLM planner. The optional deeper-answer LLM remains separate from control and must not rewrite command arguments. Whisper itself can mishear speech, so “exact” voice text means preserving the transcript and allowing review where exact wording matters; a typed bridge can preserve bytes directly.
 
 For consequential steps, show the concrete target/action/content for confirmation before executing. Ordinary app opening and navigation should not acquire unnecessary confirmation prompts. Unknown/ambiguous targets should return a specific question or failure, not a guessed click.
 
 ## Shortest robust path after discussion
 
 1. Finish and visually check the existing menu bar/model settings work. Let Johnny try volume, mute, settings and model choice first.
-2. Add exactly `app.open` plus `browser.navigate` as a short sequence. Support “open Safari, then go to google.com.” Keep transcript extraction narrow and explicit. Check launch failure, URL readback and stop on failure. Johnny tries it in his actual Safari session.
+2. Add installed-app discovery and deterministic name resolution to `app.open`; then add `browser.navigate` as a short sequence. Support “open Safari, then go to google.com.” Keep transcript extraction narrow and explicit. Check launch failure, URL readback and stop on failure. Johnny tries it in his actual Safari session.
 3. Add one useful text/search recipe Johnny chooses, such as a Google search using its encoded search URL. For literal field entry, choose one named field/site and verify the value. Do not promise generic form completion.
 4. Add a same-user Unix socket and a small CLI only when sending repeated text turns into the running app is useful. `--text` already skips Whisper; the persistent benefit is shared app/timer state, structured completion and avoiding process/import/key-read overhead, not magical inference acceleration. Serialize requests through the existing busy mechanism and avoid replay after timeout. Benchmark actual turns before making a speed/cost comparison.
-5. Add app discovery and a lightweight capability/recipe registry as concrete needs accumulate. A SwiftUI shell can come later without replacing the Python engine.
+5. Extend the lightweight capability/recipe registry as concrete needs accumulate. A SwiftUI shell can come later without replacing the Python engine.
 
 Minimal checks per increment: one small offline check for parsing/validation/failure behavior, existing provider routing tests, and Johnny's actual end-to-end trial. Avoid a large test harness that delays trying the feature. Do not ask Johnny to evaluate an unlaunched UI as if it were ready.
 
@@ -140,3 +140,69 @@ Decision for this discussion: is Safari navigation plus a Google-search recipe t
 - Not yet checked: actual new UI launch/pixels, live voice gain/mute, new parameter/recording behavior. These edits are **not ready for user acceptance** and have not replaced the running process.
 - Expanded Safari, typing, registry and local bridge implementations: **not started**.
 - No keys changed, no upstream PR opened. Major implementation paused for Johnny's discussion.
+
+
+## Proposed core: fixed Jev questions, dynamic arguments
+
+This section supersedes any earlier suggestion of generative command planning for the current scope. Johnny wants broad deterministic Mac voice control through **Jev classification plus a Python harness**. Arbitrary cursor movement and visual clicking are outside the core. The design below is proposed, not implemented.
+
+### Open any installed app without a list of app choices in Jev
+
+Yes: one reusable `app.open` action can resolve an app name from the transcript against the Mac's actual apps. Jev only needs to classify “open an application”; it does not need an answer choice for every app or its version.
+
+Proposed discovery and resolution:
+
+1. Build an in-memory inventory from standard application roots (`/Applications`, `/System/Applications`, `~/Applications`, including app-containing subfolders) plus Spotlight results for application bundles and currently running apps. Do not descend into app bundles to expose internal helpers as ordinary apps. Read bundle path, localized display name/name, filename and bundle identifier. This is a derived inventory, not a maintained database.
+2. Refresh lazily on a failed match and through an explicit refresh action. Newly installed apps should work without editing code. Spotlight can be disabled or stale; standard-root scanning provides a fallback. Apps on external volumes or in unusual locations need indexing or a user-selected search folder/path. “Any installed app” means any discovered, launchable app, not a guarantee that every hidden bundle anywhere on disk will be found.
+3. For the classified clause, extract the app-name span using bounded syntax such as “open/launch/start <app>.” Normalize case, Unicode and harmless punctuation/spacing for comparison while retaining the original string. Match against discovered names. Use a unique exact name first; a unique well-defined shortened name can be supported. Fuzzy suggestions are acceptable; silent fuzzy execution is not.
+4. Ambiguous names or duplicate installations yield explicit choices, for example two versions of Ableton Live. Optional user aliases such as “my editor” can map to a selected app. Aliases are preferences, not a required catalog of all apps.
+5. Launch the resolved application URL through `NSWorkspace` and verify the resulting running application by bundle identity/path. A bundle ID can help resolution, but a path distinguishes duplicate installations. Await launch completion; do not confuse “process running” with “document ready.”
+
+Launch Services/NSWorkspace supply app resolution and launching. Public APIs such as `urlForApplication(withBundleIdentifier:)` and `LSCopyApplicationURLsForBundleIdentifier` take a **known bundle ID**; they are not a magical name-to-complete-inventory API. Combine supported discovery sources rather than depending on private Launch Services database dumps. A short-lived in-memory lookup is sufficient; no SQLite database or cloud catalog is needed.
+
+Examples: “open Blender,” “launch DaVinci Resolve,” and “open Safari” all use the same action type. “Open Google” may require clarification between Chrome and another Google app. “Open the thing I used yesterday” is semantic/history resolution and outside this deterministic first pass.
+
+Apple references: [NSWorkspace](https://developer.apple.com/documentation/appkit/nsworkspace), [Launch Services lookup by bundle ID](https://developer.apple.com/documentation/coreservices/1449290-lscopyapplicationurlsforbundleid), [bundle names and identifiers](https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html).
+
+### Scale action types, not exhaustive sentences or entities
+
+Keep three separate pieces:
+
+- **Action type:** a bounded operation such as open app, navigate browser, change volume, choose menu item or run recipe. Jev classifies this from flexible language.
+- **Arguments/entities:** app identity, URL, amount, text or menu path. Python extracts and resolves these from the transcript and current system state.
+- **Executor:** fixed trusted code validates preconditions, performs the operation and observes its result. A new app name or URL changes arguments, not executable code.
+
+Start with a compact schema while it remains fast and accurate. Do not ask every app-specific question on every request as the capability set grows. If measured schema size/accuracy warrants it, use a small top-level domain choice (apps, browser, audio, system, timer, recipe), followed by fixed questions for that domain. That adds a model round trip, so it is a measured tradeoff, not an automatic improvement.
+
+For many recipes, deterministic name/alias/keyword lookup can produce a small candidate set before Jev chooses among candidates. Include “none/unclear”; retrieval can miss the right recipe and must not force a bad match. No embedding database is necessary initially. Separate clauses deterministically only for supported sequencing syntax, protecting quoted text and URLs; classify each clause with the same question schema or use bounded slots. Never split arbitrary dictated text on every “and.”
+
+This does not provide unrestricted language understanding. Commands with unresolved pronouns, missing arguments or unsupported ordering need a concise clarification. The benefit is broad reusable control with explicit limits and predictable execution.
+
+### Noncoder recipes
+
+A recipe adds a name, aliases, typed inputs and an ordered list of existing actions. Johnny can say “make a recipe that opens my browser and searches this site”; Codex authors the data and Johnny tries it. Later, a simple step picker can expose the same fields without editing JSON.
+
+Recipes cannot invent new capabilities. A new target-specific operation may need a small adapter once. Reusing that adapter for many arguments/workflows does not require source changes. Static validation checks that steps exist, argument types match and each step has a bounded completion condition. Runtime execution stops at the first failure and reports which step failed. Confirmation attaches to a concrete consequential step, not every recipe or ordinary action.
+
+### What “click this or that” can mean without visual computer use
+
+- “Choose File > New Window in Safari”: an explicit menu path can be resolved through app scripting or Accessibility. It is a deterministic target, not a screen coordinate.
+- “Press the Refresh button in this window”: possible if Accessibility exposes one unique matching button and the window is identified. Inspect its supported actions and invoke the press action; verify the expected change where observable.
+- “Run my named shortcut”: a registered, user-chosen macOS Shortcut can be an adapter/recipe. Its actual effects determine whether confirmation is needed; a Shortcut name is not proof that an operation is harmless.
+- “Click this”: insufficient without an explicit focus/selection reference. Do not infer a target from the cursor or screenshot in the core path.
+- “Click the second blue thing” or “find whichever button completes this new website”: visual/semantic interpretation, outside scope.
+
+Accessibility permission enables an API, not universal understanding. Missing labels, duplicate names, custom canvas controls, changing menus, hidden elements and stale focus are real limits. Known website DOM selectors also remain target-specific. A deterministic operation can return “target not uniquely identified” without becoming a visual agent.
+
+## Proposed configurable wake phrase
+
+Johnny can choose his own spoken wake phrase in Settings. This is proposed, not implemented. Preserve “Hey Jev” as the default and preserve push-to-talk independently.
+
+- Add a plain-text Wake phrase field, explanatory hint, Apply/Save behavior and a “Use Hey Jev” reset. Persist it as a non-secret preference shared by the app's runtime, not in Keychain. Reject empty/whitespace-only values; accept user-chosen phrases rather than a fixed list. State that the current `small.en` recognizer is English-focused, so arbitrary non-English phrases are not guaranteed.
+- Match against locally produced transcripts, not raw audio. Normalize case, Unicode, spacing and punctuation in a defined way, then match complete phrase tokens at the start of an utterance. Never interpret user input as a regular expression; never match a short phrase inside a larger word. Preserve the remainder of the transcript as the command.
+- Keep the current Jev/Jeff/Jeb-style recognition aliases only for the default phrase. A custom phrase should not silently inherit “Hey Jev” aliases. Custom aliases can be a later explicit preference if Johnny's chosen phrase needs them.
+- Update the Whisper wake prompt, readiness text, mode labels/help and menu/status hints from the same preference. The custom phrase followed by a command works in one utterance; the phrase alone retains the existing six-second follow-up behavior.
+- Prefer live updates: Save sends a configuration change through the controls queue. Clear the armed follow-up window, discard queued old-phrase segments and invalidate transcriptions begun under the previous phrase. No app restart or Whisper-model reload should be necessary. Apply new configuration between turns; do not reinterpret an already executing command.
+- Explain practical limits beside the field: very short/common phrases trigger more easily in conversation or media; unusual names can be misheard; a distinctive multiword phrase is generally easier to distinguish. Do not prohibit a short choice merely because it is less reliable. This remains transcript matching, not a trained always-on wake-word detector, and it does not promise an accuracy rate before Johnny tests his chosen phrase.
+
+Small acceptance check: default phrase, one custom phrase, punctuation/case, no partial-word match, phrase-only follow-up and live change rejecting queued old-phrase work. Johnny then tries his own phrase in his room and confirms that push-to-talk still works. No generative planner or general browser control is needed for this feature.

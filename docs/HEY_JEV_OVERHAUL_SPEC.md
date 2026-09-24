@@ -121,3 +121,14 @@ Apple references: https://developer.apple.com/documentation/appkit/nsstatusitem 
 ## Discussion checkpoint: implementation paused
 
 Johnny requested an architecture/capability rundown before further major coding. See [COMMAND_ARCHITECTURE.md](COMMAND_ARCHITECTURE.md) for the exact speech-to-action path, command mechanisms, current failure behavior, theoretical reach, recipe/registry proposal and human-testing sequence. Expanded Safari/typing/bridge implementation has not started. Original-scope UI/model/playback edits are uncommitted and only compile/provider checks have run; they are not yet a verified usable build. Continue only after Johnny has discussed the rundown. Prefer small increments with Johnny as the primary end-to-end tester and minimal necessary automated checks.
+
+
+## Scope refinement: deterministic control and wake phrase
+
+Johnny clarified that expanded control stays within the Jev fixed-question/classifier plus Python harness pattern. Generative command planning, arbitrary cursor movement and visual clicking are outside the current core. Optional OpenRouter deeper answers remain separate. Prefer reusable action types with deterministic argument resolution over exhaustive command/app lists.
+
+Prioritize opening any discovered installed app: runtime bundle discovery plus Spotlight/running-app sources, normalized name matching, ambiguity handling and native launch verification. No app-per-choice Jev schema or maintained app database is required. Known-bundle-ID Launch Services APIs help resolve/launch apps; they are not themselves a complete installed-app enumeration API. See [the capability design](COMMAND_ARCHITECTURE.md#proposed-core-fixed-jev-questions-dynamic-arguments) for discovery limits, schema scaling, noncoder recipes and deterministic menu/button targeting.
+
+Add a **user-configurable wake phrase** to Settings. Preserve “Hey Jev” and push-to-talk defaults. Store a non-secret preference, match normalized complete phrase tokens at transcript start, escape literal input, and use the same setting for the Whisper prompt and UI hints. Prefer live application through the worker controls queue, clearing old armed/queued transcription state. Default-only aliases preserve current recognition tolerance; arbitrary custom phrases do not inherit Jev aliases. Short/common phrases can false-trigger, and the current English-focused Whisper model cannot guarantee every language/name. See [wake phrase design](COMMAND_ARCHITECTURE.md#proposed-configurable-wake-phrase) for UI, persistence, update behavior and small human-centered acceptance checks.
+
+These are proposed requirements, not implemented behavior. Discussion pause remains in effect; no major coding resumes until Johnny has reviewed the design.

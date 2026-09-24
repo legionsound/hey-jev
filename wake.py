@@ -11,6 +11,9 @@ DEFAULT = "Hey Jev"
 DEFAULT_PATTERN = r"(?:hey|hi|hay|okay|ok|a)\W+(?:jev|jevs|jeff|jeffs|jef|jeb|jab|chev|jeve|jav)"
 MAX_WORDS, MAX_CHARS, MAX_ALIASES = 4, 40, 6
 WORD = re.compile(r"[^\W_]+(?:'[^\W_]+)*")  # any script's letters and digits, inner apostrophes kept
+# Single common words that ordinary talk contains: saving one still works,
+# but the settings form warns that it can wake Hey Jev by accident.
+COMMON = frozenset({"ok", "hey", "yes", "no", "stop", "go", "play", "the"})
 
 
 def norm(text):
@@ -33,9 +36,18 @@ def validate(phrase):
         raise ValueError(f"Keep the wake phrase to {MAX_WORDS} words or fewer.")
     if " ".join(ws) != " ".join(words(re.sub(r"[,.!?;:]", " ", phrase))) or re.search(r"[^\w\s'’,.!?-]", phrase):
         raise ValueError("Use letters, numbers and spaces only.")
-    if len(ws) == 1 and len(ws[0]) < 4:
-        raise ValueError("A one-word wake phrase needs at least 4 letters, or it will trigger by accident.")
     return phrase
+
+
+def short_warning(phrase):
+    """Warning text when a saved phrase risks accidental wakes, else "".
+
+    Any valid 1-4 word phrase saves; a single short or common word
+    ("Jo", "Hi", "stop") still saves but earns this warning."""
+    ws = words(phrase or "")
+    if len(ws) == 1 and (len(ws[0]) < 4 or ws[0] in COMMON):
+        return "Short phrases can wake Hey Jev by accident."
+    return ""
 
 
 def parse_aliases(text):

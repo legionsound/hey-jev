@@ -34,13 +34,22 @@ class WakeTests(unittest.TestCase):
         self.assertIn("Hey Jev, open Spotify.", wake.Wake().prompt)
 
     def test_validation(self):
-        for bad in ["", "   ", "a b c d e", "Hi", "hey <jev>", "x" * 41]:
+        for bad in ["", "   ", "a b c d e", "hey <jev>", "x" * 41]:
             with self.assertRaises(ValueError, msg=bad):
                 wake.validate(bad)
         self.assertEqual(wake.validate("  Hey   Jarvis "), "Hey Jarvis")
         self.assertEqual(wake.validate("Computer"), "Computer")
         with self.assertRaises(ValueError):
             wake.parse_aliases(",".join(f"Hey Bot{i}" for i in range(7)))
+
+    def test_short_phrases_save_with_warning(self):
+        self.assertEqual(wake.validate("Jo"), "Jo")
+        self.assertEqual(wake.validate("Hi"), "Hi")
+        self.assertEqual(wake.short_warning("Jo"), "Short phrases can wake Hey Jev by accident.")
+        self.assertEqual(wake.short_warning("Hi"), "Short phrases can wake Hey Jev by accident.")
+        self.assertEqual(wake.short_warning("stop"), "Short phrases can wake Hey Jev by accident.")
+        self.assertEqual(wake.short_warning("Okay Zorblat"), "")
+        self.assertEqual(wake.short_warning("Computer"), "")
 
     def test_regex_special_characters_are_literal(self):
         w = wake.Wake("Hey J.D.")

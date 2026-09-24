@@ -808,6 +808,10 @@ class AppDelegate(NSObject):
                 self.controls.put(("transcription", backend))  # live switch through the control queue
             from siri import reload_keys
             reload_keys()
+            warn = wake.short_warning(phrase)
+            if warn:
+                self.settings_message.setStringValue_(warn)  # saved and live; stays open so the warning is seen
+                return
             self.closeSettings_(None)
             self._start_worker()
         except Exception as exc:

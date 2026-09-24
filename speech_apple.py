@@ -59,9 +59,10 @@ def request_access(done):
 
 
 class AppleTranscriber:
-    def __init__(self, locale="en-US", timeout_s=DEFAULT_TIMEOUT_S):
+    def __init__(self, locale="en-US", timeout_s=DEFAULT_TIMEOUT_S, contextual_strings=()):
         self.locale = locale
         self.timeout_s = timeout_s
+        self.contextual_strings = tuple(contextual_strings)
 
     def transcribe(self, audio, prompt=None):
         """Transcribe float32 mono 16kHz numpy audio. Returns (text, ms)."""
@@ -91,6 +92,8 @@ class AppleTranscriber:
         req = Speech.SFSpeechAudioBufferRecognitionRequest.alloc().init()
         req.setRequiresOnDeviceRecognition_(True)
         req.setShouldReportPartialResults_(False)
+        if self.contextual_strings:
+            req.setContextualStrings_(list(self.contextual_strings))
 
         loc = Foundation.NSLocale.alloc().initWithLocaleIdentifier_(self.locale)
         rec = Speech.SFSpeechRecognizer.alloc().initWithLocale_(loc)

@@ -95,6 +95,7 @@ def _install_fake(auth=3, on_device=True, available=True, supported_locale=True,
 
         def init(self):
             self.flags = {}
+            type(self).last = self
             return self
 
         def setRequiresOnDeviceRecognition_(self, v):
@@ -102,6 +103,9 @@ def _install_fake(auth=3, on_device=True, available=True, supported_locale=True,
 
         def setShouldReportPartialResults_(self, v):
             self.flags["partial"] = bool(v)
+
+        def setContextualStrings_(self, strings):
+            self.flags["contextual"] = list(strings)
 
         def appendAudioPCMBuffer_(self, buf):
             self.buf = buf
@@ -272,6 +276,19 @@ class TranscribeTests(unittest.TestCase):
         tr = speech_apple.AppleTranscriber()
         with self.assertRaisesRegex(RuntimeError, "empty"):
             tr.transcribe(np.zeros(0, dtype=np.float32))
+
+    def test_contextual_strings_set_on_every_request(self):
+        speech = _install_fake(auth=3, final_text="okay zorblat open notes")
+        tr = speech_apple.AppleTranscriber(timeout_s=5, contextual_strings=("Okay Zorblat",))
+        text, _ = tr.transcribe(np.zeros(1600, dtype=np.float32))
+        self.assertEqual(text, "okay zorblat open notes")
+        self.assertEqual(speech._fake_req.last.flags.get("contextual"), ["Okay Zorblat"])
+        self.assertTrue(speech._fake_req.last.flags.get("on_device"))
+
+    def test_no_contextual_strings_by_default(self):
+        speech = _install_fake(auth=3)
+        speech_apple.AppleTranscriber(timeout_s=5).transcribe(np.zeros(1600, dtype=np.float32))
+        self.assertNotIn("contextual", speech._fake_req.last.flags)
 
 
 if __name__ == "__main__":

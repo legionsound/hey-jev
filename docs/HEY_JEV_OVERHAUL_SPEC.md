@@ -33,6 +33,37 @@ Provide a polished native status window and an always-discoverable menu bar drop
 
 Everyday controls include listening mode, pause/resume, independent voice output gain and voice off/mute. Voice gain must not change system or Spotify volume. Mute stops current spoken playback and suppresses future speech generation/playback. Timer alert sounds may remain separate, but the UI and documentation must say so. Existing Keychain entries and separate provider routes must survive.
 
+### Modular full Settings window
+
+Keep the compact menu bar for daily listening, pause, voice gain/mute and opening Settings. Full Settings is a polished native window with clear grouped sections, collapsible advanced controls, consistent spacing, keyboard navigation and accessible labels. Persist disclosure state where useful. Show the active value and any blocking error in each section summary; collapsing a section must not hide an error. Provider-specific controls appear only when relevant. Keep one shared preference store and explicit Apply behavior for changes that restart a worker; do not scatter independent provider state across views.
+
+Functional sections:
+
+| Section | Controls and behavior |
+| --- | --- |
+| Transcription | Backend (local faster-whisper or Apple Speech on-device), available model/locale, installed/ready status and a short transcript-only microphone test. Show model loading/download requirements explicitly. Apple manages its model; do not show a fictitious model picker. |
+| Jev decisions | Supported source/provider, masked Keychain-backed key management, connection status and a deliberate validation action. Preserve separate decision and deeper-answer routes. |
+| Deeper answers | Supported provider, masked key, model search/selection and provider/model-supported advanced arguments. Preserve saved values and show unsupported options as unavailable. Do not imply every provider/backend exists merely because the settings architecture is modular. |
+| Voice output | Supported voice provider (Fish initially), masked credentials where required, voice selection where implemented, independent gain/mute and deliberate sample playback/stop. List unsupported future providers only as unavailable, never functional choices. |
+| Wake phrase and listening | Wake phrase, default reset, push-to-talk/wake mode, pause/resume and recognition limitations. Reflect live active configuration. |
+| App and menu behavior | Status window versus menu-only mode, reopen behavior, launch behavior only where implemented, and Quit. Daily menu controls and Settings stay synchronized. |
+
+Every exposed control must work or explain its unavailable state. Never mark the incomplete WIP as verified based on compilation. Non-secret settings persist; credentials remain in Keychain and never appear in logs or exports. Failed validation preserves the previous working configuration.
+
+### Apple on-device transcription (design, runtime trial pending)
+
+Add Apple Speech as a selectable alternative to existing local faster-whisper. Prefer the Objective-C `SFSpeechRecognizer` route through Python/PyObjC for the first trial: it fits the current native app and avoids another helper process. Verify availability of the installed Speech bindings and PCM buffer conversion at runtime; adding the specific PyObjC framework package is acceptable if required. Reuse one microphone capture owner and the current segmentation; feed bounded utterance audio to an on-device recognition request, dispatch only the final transcript once, and preserve the shared text command path. Partial hypotheses are UI feedback, never executable commands.
+
+Apple documents that offline support depends on the recognizer. Check the selected locale, recognizer availability, Speech authorization and `supportsOnDeviceRecognition` before enabling recognition. Require `requiresOnDeviceRecognition = true` on **every** request, and refuse Apple recognition if on-device support is false. Never silently enable network recognition or switch to another backend. See [Apple's capability gate](https://developer.apple.com/documentation/speech/sfspeechrecognizer/supportsondevicerecognition) and [network-prevention request flag](https://developer.apple.com/documentation/speech/sfspeechrecognitionrequest/requiresondevicerecognition).
+
+Show distinct unavailable states: unsupported OS/device/locale, missing model resources, permission not requested, denied/restricted permission, temporary service unavailability and recognition failure. Explain the next action beside the selection; retain faster-whisper as an explicit user choice. Request Speech permission only through a deliberate enable/test action and preserve microphone permission handling. Supply the required bundle usage descriptions; Johnny handles OS permission prompts. Do not rename/rebundle the app casually or reset existing grants. A selected but unavailable backend disables listening with a visible reason rather than claiming it is active.
+
+Newer [SpeechTranscriber](https://developer.apple.com/documentation/speech/speechtranscriber) requires its own OS/device/locale checks, including `isAvailable`, supported versus installed locales and model asset readiness. It is a Swift-native API; consider a minimal Swift helper only if the PyObjC route fails a concrete quality/availability requirement and a runtime trial justifies the additional lifecycle/packaging work. Do not assume it is usable on every Mac or available directly through PyObjC. Any needed asset download is explicit and separate from claims about offline audio processing.
+
+For switching backend/model/locale, use the existing control queue: stop accepting old audio, invalidate queued/in-flight transcriptions by generation, finish or cancel recognition safely, load/check the new backend off the UI thread, then resume at a clean utterance boundary. Clear any armed wake follow-up. An already executing command is not reinterpreted. Prefer live switching; if the verified runtime requires restart, show “Restart required” with active versus saved settings and do not pretend the change has applied. Keep only one recorder and one active transcription backend.
+
+Human acceptance must include actual default/custom wake phrase and push-to-talk transcription on each available backend, switching during an utterance without duplicate/stale execution, unavailable/denied-permission UX, persistence after restart and an offline Apple transcription trial after resources are ready. Use transcript-only test mode to distinguish recognition failures from Jev/network command failures. Compare the same spoken phrases and latency; report observed hardware/locale/backend, not universal offline compatibility. Also audition voice gain/mute/sample stop, exercise provider/key preservation and model/advanced-argument selection, and inspect the real grouped Settings window with keyboard navigation. No such new runtime/UI/audio verification has occurred yet.
+
 ### OpenRouter model settings
 
 Rename the provider label to OpenRouter. Fetch the full text-capable model catalog from `https://openrouter.ai/api/v1/models` after an answer key is available. Provide search, selection, refresh, loading/error states and an offline fallback preserving the saved model. Persist model selection and validated advanced overrides for both ordinary answers and reminder preparation.

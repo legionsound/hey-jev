@@ -265,6 +265,12 @@ Recipes cannot invent new capabilities. A new target-specific operation may need
 
 Accessibility permission enables an API, not universal understanding. Missing labels, duplicate names, custom canvas controls, changing menus, hidden elements and stale focus are real limits. Known website DOM selectors also remain target-specific. A deterministic operation can return “target not uniquely identified” without becoming a visual agent.
 
+## Selectable transcription and settings boundary
+
+The full Settings window groups transcription, Jev source/key, deeper answers/models/advanced arguments, voice output, wake/listening and app/menu behavior. Keep daily controls compact in the menu; both views share preferences and live state. See [the Settings and Apple Speech specification](HEY_JEV_OVERHAUL_SPEC.md#modular-full-settings-window).
+
+Transcription is a replaceable input adapter before the common command queue. Keep faster-whisper and add a runtime-gated Apple on-device option using `SFSpeechRecognizer` through PyObjC first. One capture owner feeds the selected adapter; only a final transcript may create one command request. Apple requires locale/availability/authorization checks, a true on-device capability gate and the on-device-required request flag, with no silent cloud fallback. A Swift helper for SpeechTranscriber is deferred unless a concrete runtime trial warrants it. Switch backend/model through the control queue, invalidate old transcription generations and show a clear restart requirement if live switching is unavailable. This design does not claim those adapters or Settings controls are implemented.
+
 ## Proposed configurable wake phrase
 
 Johnny can choose his own spoken wake phrase in Settings. This is proposed, not implemented. Preserve “Hey Jev” as the default and preserve push-to-talk independently.

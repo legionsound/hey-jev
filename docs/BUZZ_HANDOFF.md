@@ -62,7 +62,7 @@ Existing provider/Keychain code was not changed. Keychain service is `com.jevsir
 
 Do not start every item in the effort map. Use two builder streams at most initially, with one explicit integrator; follow Johnny's actual Buzz setup decisions.
 
-**Native owner:** finish/review the WIP menu/settings/model/audio slice; add configurable wake phrase using the documented live-update design; launch the real app and give Johnny one coherent trial. Keep API/provider roles and Keychain entries intact. A native AppKit dropdown/popover is possible now; SwiftUI rewrite is not required.
+**Native owner:** finish/review the WIP menu/settings/model/audio slice as a polished grouped/collapsible Settings window covering transcription, Jev provider/key, deeper answers/provider/model/advanced arguments, voice provider/gain/mute, wake/listening and app/menu behavior; add configurable wake phrase using the documented live-update design; launch the real app and give Johnny one coherent trial. Keep API/provider roles and Keychain entries intact. Add selectable Apple on-device transcription beside faster-whisper using the spec's availability/locale/permission gates and no-cloud-fallback rule. Trial SFSpeechRecognizer through PyObjC before considering a Swift helper. Ensure one recorder/backend and generation-safe live switching, or show an honest restart requirement. A native AppKit dropdown/popover is possible now; SwiftUI rewrite is not required.
 
 **Discovery/control owner:** implement local installed-app inventory and deterministic name resolution; expose generic open/activate by resolved app identity. Add one Safari navigate adapter after that works. Do not dump the whole catalog into Jev or autogenerate executable adapters from scripting metadata. Work in separate modules to avoid competing `siri.py` edits.
 
@@ -77,7 +77,7 @@ Do not run multiple live GUI/audio workers concurrently. One controls the deskto
 1. Agree the tiny action/result contract. In one running app, “open Safari” through voice and the local CLI reaches the same classifier/dispatcher/executor and returns an observed result. Confirm shared state, serial execution and unavailable/malformed-request behavior. No second assistant process.
 2. Open three discovered installed apps missing from the old list through both entry points. Try duplicate/ambiguous names and an unavailable app. No silent wrong-target execution.
 3. “Open Safari, then go to google.com” through voice and bridge. Verify location and precise failure reporting; stop after a failed step. A programmatic request cannot bypass consequential-action confirmation.
-4. Native menu/settings, voice volume/mute/pause, reopening, custom phrase, push-to-talk and model selection get one coherent human trial.
+4. Inspect grouped/collapsible Settings and keyboard navigation. Actually transcribe with each available backend, test unavailable/permission states and offline Apple recognition, switch mid-utterance without stale/duplicate commands, audition voice volume/mute/sample stop, and verify provider/key preservation, model/advanced arguments, reopening, custom phrase and push-to-talk. WIP compilation does not establish these results.
 5. One concrete Johnny-selected recipe. Measure bridge latency after correctness; no faster/cheaper claim without a baseline.
 
 Per slice, leave one small meaningful offline check for tricky validation/failure behavior; use existing routing tests and Johnny's end-to-end trial. Avoid building a large speculative suite before he can try the feature.

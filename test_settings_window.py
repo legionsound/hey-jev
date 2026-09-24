@@ -28,6 +28,19 @@ class SettingsCloseTests(unittest.TestCase):
             self.assertIsNone(d.settings_sheet)
             self.assertEqual(d.fetch_generation, gen + 2)  # Cancel discards once, not twice
 
+    def test_mic_test_names_the_phrase_it_tested(self):
+        with patch.object(assistant_ui.AppDelegate, "refreshModels_", lambda self, s: None):
+            d = self.make()
+            d._show_settings()
+            d.wake_field.setStringValue_("Okay Zorblat")
+            d.micTestDone_({"text": "Okay Zorblat open Notes", "ms": 90, "wake": "Okay Zorblat", "wake_matched": True})
+            self.assertEqual(d.test_result.stringValue(), "“Okay Zorblat open Notes” · heard “Okay Zorblat” · 90 ms")
+            d.wake_field.setStringValue_("Hey José")  # typed, not saved: the test still used the running phrase
+            d.micTestDone_({"text": "Hey José open Notes", "ms": 90, "wake": "Okay Zorblat", "wake_matched": False})
+            self.assertEqual(d.test_result.stringValue(),
+                             "“Hey José open Notes” · didn't hear “Okay Zorblat” · 90 ms · Save to test the new phrase")
+            d.closeSettings_(None)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -308,6 +308,24 @@ class WakePhraseLiveTests(LoopHarness):
         time.sleep(0.3)
         self.assertEqual(self.submitted, [])
 
+    def test_unicode_phrase_dispatches_only_when_heard_whole(self):
+        import numpy as np
+        self.controls.put(("wake_phrase", "Hey José", []))
+        self.wait(lambda: siri.WAKE.phrase == "Hey José")
+        self.controls.put(("mode", "wake"))
+        self.wait(lambda: self.rec.wake)
+        for heard in ["Hey Jos open Notes", "Hey Jose open Notes", "Jos open Notes"]:
+            self.heard = heard
+            self.rec.segments.put(np.ones(16000, dtype="float32"))
+        import time
+        time.sleep(0.5)
+        self.assertEqual(self.submitted, [])  # shortened or changed phrases dispatch nothing
+        self.heard = "Hey José open Notes"
+        self.rec.segments.put(np.ones(16000, dtype="float32"))
+        self.wait(lambda: self.submitted)
+        self.assertEqual(len(self.submitted), 1)
+        self.assertIn("open Notes", repr(self.submitted[0]))
+
 
 class RecorderIsolationTests(unittest.TestCase):
     def test_stop_clears_wake_leftovers_before_the_floor_frees(self):

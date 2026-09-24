@@ -4,17 +4,23 @@ Matching is exact on normalized words. The default "Hey Jev" keeps its known mis
 only itself plus aliases the user typed in. Nothing fuzzy is added silently, so ordinary talk can't become a command.
 """
 import re
+import unicodedata
 
 DEFAULT = "Hey Jev"
 # How speech recognizers tend to hear "Hey Jev". Used for the default phrase only.
 DEFAULT_PATTERN = r"(?:hey|hi|hay|okay|ok|a)\W+(?:jev|jevs|jeff|jeffs|jef|jeb|jab|chev|jeve|jav)"
 MAX_WORDS, MAX_CHARS, MAX_ALIASES = 4, 40, 6
-WORD = re.compile(r"[a-z0-9]+(?:'[a-z0-9]+)*")
+WORD = re.compile(r"[^\W_]+(?:'[^\W_]+)*")  # any script's letters and digits, inner apostrophes kept
+
+
+def norm(text):
+    """One spelling for comparison: NFC, lower-cased, curly apostrophes straightened."""
+    return unicodedata.normalize("NFC", text or "").lower().replace("’", "'")
 
 
 def words(text):
-    """Lower-case words, punctuation dropped: "Okay, Zorblat!" -> ["okay", "zorblat"]."""
-    return WORD.findall(text.lower().replace("’", "'"))
+    """Words, punctuation dropped, nothing else lost: "Okay, José!" -> ["okay", "josé"]."""
+    return WORD.findall(norm(text))
 
 
 def validate(phrase):
@@ -50,12 +56,13 @@ class Wake:
         self.is_default = words(self.phrase) == words(DEFAULT)
         alts = [DEFAULT_PATTERN] if self.is_default else []
         for p in [self.phrase, *self.aliases]:
-            alts.append(r"\W+".join(re.escape(w) for w in words(p)))
+            alts.append(r"\W+".join(re.escape(w).replace("'", "['’]") for w in words(p)))
         self.regex = re.compile(r"^\W*(?:" + "|".join(alts) + r")\b\W*", re.I)
 
     def match(self, text):
         """-> the command after the phrase ("" when only the phrase was said), or None when it isn't there."""
-        m = self.regex.match(text or "")
+        text = unicodedata.normalize("NFC", text or "")
+        m = self.regex.match(text)
         return text[m.end():].strip(" .,!?") if m else None
 
     @property

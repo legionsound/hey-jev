@@ -46,6 +46,26 @@ class WakeTests(unittest.TestCase):
         w = wake.Wake("Hey J.D.")
         self.assertIsNone(w.match("Hey JxDx open Notes"))
 
+    def test_non_ascii_phrases_keep_every_letter(self):
+        w = wake.Wake("Hey José")
+        self.assertEqual(w.match("Hey José open Notes"), "open Notes")
+        self.assertEqual(w.match("hey JOSÉ, open Notes"), "open Notes")
+        self.assertEqual(w.match("Hey Jose\u0301 open Notes"), "open Notes")  # decomposed é
+        for near in ["Hey Jos open Notes", "Hey Jose open Notes", "Hey Josés open Notes"]:
+            self.assertIsNone(w.match(near), near)
+        w = wake.Wake("你好 buddy")
+        self.assertEqual(w.match("你好 buddy open Notes"), "open Notes")
+        self.assertIsNone(w.match("buddy open Notes"))
+        self.assertEqual(wake.words("你好 buddy"), ["你好", "buddy"])
+
+    def test_apostrophes_match_either_way(self):
+        for typed in ["Let's go", "Let’s go"]:
+            w = wake.Wake(typed)
+            for heard in ["Let's go open Notes", "Let’s go open Notes"]:
+                self.assertEqual(w.match(heard), "open Notes", (typed, heard))
+            self.assertIsNone(w.match("Lets go open Notes"))
+            self.assertIsNone(w.match("Let go open Notes"))
+
 
 if __name__ == "__main__":
     unittest.main()

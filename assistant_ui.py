@@ -737,8 +737,12 @@ class AppDelegate(NSObject):
         if result.get("error"):
             self.test_result.setStringValue_(f"Test failed: {result['error']}")
         else:
-            matched = "wake phrase matched" if result.get("wake_matched") else "no wake phrase"
-            self.test_result.setStringValue_(f"“{result['text'] or '(nothing)'}” · {matched} · {result['ms']} ms")
+            tested = result["wake"]  # the saved, running phrase the test listened for
+            matched = f"heard “{tested}”" if result.get("wake_matched") else f"didn't hear “{tested}”"
+            line = f"“{result['text'] or '(nothing)'}” · {matched} · {result['ms']} ms"
+            if " ".join(self.wake_field.stringValue().split()) not in ("", tested):
+                line += " · Save to test the new phrase"
+            self.test_result.setStringValue_(line)
         self.test_result.setToolTip_(self.test_result.stringValue())  # long results and errors stay readable
 
     @objc.python_method

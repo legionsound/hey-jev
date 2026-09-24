@@ -167,10 +167,26 @@ SEARCH_SPAN = re.compile(r"^\s*(?:search\s+google\s+for|search\s+for|google)\s+(
 # complete name is validated: recognized filler ("my/the/your", a trailing
 # "browser(s)") and a polite tail are stripped, but an unrecognized suffix
 # is never silently dropped into the query — it clarifies. Quoted words
-# stay query text.
-SEARCH_TRAIL = re.compile(
-    r"\s+in\s+(?:(?:my|the|your)\s+)?(.+?)(?:\s+(?:please|for me|now))*\s*$", re.I)
+# stay query text: quotes are masked (offsets preserved) before the last
+# unquoted "in" is located, so an in-quote "in" can never swallow the real
+# trailing qualifier.
+SEARCH_IN = re.compile(r"\s+(in)\s+(?:(?:my|the|your)\s+)?", re.I)
+SEARCH_POLITE_END = re.compile(r"(?:\s+(?:please|for me|now))*\s*$", re.I)
 SEARCH_BROWSER_FILLER = re.compile(r"\s+browsers?\s*$", re.I)
+
+
+def _mask_quotes(s):
+    """Copy of s with double-quoted spans blanked, offsets preserved."""
+    out, in_q = [], False
+    for ch in s:
+        if ch == '"':
+            in_q = not in_q
+            out.append(" ")
+        elif in_q:
+            out.append(" ")
+        else:
+            out.append(ch)
+    return "".join(out)
 
 
 def search_query(clause):
@@ -180,16 +196,16 @@ def search_query(clause):
     is stripped. A trailing unquoted "in <name>" names a browser (known or
     not); quoted browser words stay data."""
     bid, unsupported, rest = None, None, clause
-    for m in reversed(list(SEARCH_TRAIL.finditer(clause))):
-        if clause[:m.start()].count('"') % 2:
-            continue  # inside quoted query text: literal
-        name = SEARCH_BROWSER_FILLER.sub("", m[1]).strip()
+    masked = _mask_quotes(clause)
+    for m in reversed(list(SEARCH_IN.finditer(masked))):
+        tail = SEARCH_POLITE_END.sub("", masked[m.end():])
+        name = SEARCH_BROWSER_FILLER.sub("", tail).strip()
         if not name or name.split()[0].lower() in QUAL_STOPWORDS:
             continue
         key = re.sub(r"\s+", " ", name).lower()
         bid = BROWSERS.get(key)
         unsupported = None if bid else key
-        rest = clause[:m.start()]
+        rest = clause[:m.start(1)]  # cut at the "in": original query text kept
         break
     m = SEARCH_SPAN.match(rest)
     if not m:

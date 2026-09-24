@@ -320,6 +320,13 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(got[0]["args"]["url"],
                          "https://www.google.com/search?q=%22cats+in+Safari%22")
         self.assertNotIn("browser", got[0]["args"])
+        # quoted query plus a real trailing qualifier: qualifier still found
+        kind, got = planner.plan('google "cats in hats" in Chrome', lambda _: ans_for())
+        self.assertEqual(got[0]["args"]["url"],
+                         "https://www.google.com/search?q=%22cats+in+hats%22")
+        self.assertEqual(got[0]["args"].get("browser"), "org.google.Chrome")
+        self.assertEqual(planner.plan('google "cats in hats" in Firefox', lambda _: ans_for()),
+                         ("clarify", "unsupported_browser"))
         # literal query text: politeness and punctuation are kept
         kind, got = planner.plan("google now", lambda _: ans_for())
         self.assertEqual(got[0]["args"]["url"], "https://www.google.com/search?q=now")

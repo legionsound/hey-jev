@@ -1,7 +1,7 @@
 """Build the app bundle in alias mode, it runs the code straight from this folder: python setup.py py2app -A"""
 from setuptools import setup
 
-APP_NAME = "Hey Jev - Fish Audio"
+APP_NAME = "Hey Jev"
 
 setup(
     name=APP_NAME,

@@ -47,7 +47,7 @@ cd hey-jev
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements.txt setuptools py2app
 .venv/bin/python setup.py py2app -A
-open "dist/Hey Jev - Fish Audio.app"
+open "dist/Hey Jev.app"
 ```
 
 The py2app line builds the app bundle in alias mode, so it runs the code straight from this folder. Build it once, and again only if you move the folder.
@@ -57,7 +57,7 @@ First launch:
 1. The Keys panel opens. Choose the Jev provider and whether to enable deeper answers. Enter the keys required for those choices. They are saved in your Mac Keychain. Change them any time with **Keys…**.
 2. Whisper downloads its `small.en` model (about 250MB), one time.
 3. macOS will ask for **Microphone** access. Say yes.
-4. Add "Hey Jev - Fish Audio" (or your terminal, if you run from the terminal) under **System Settings > Privacy & Security > Accessibility**, or key presses are ignored.
+4. Add "Hey Jev" (or your terminal, if you run from the terminal) under **System Settings > Privacy & Security > Accessibility**, or key presses are ignored.
 5. The first time it quits an app or toggles dark mode you'll get an **Automation** prompt. Say yes.
 
 The window goes green when it's ready. The switch in the bottom right picks how you talk to it:

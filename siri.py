@@ -4,6 +4,8 @@ import numpy as np, requests, sounddevice as sd, soundfile as sf
 from dotenv import load_dotenv
 from pynput import keyboard
 from secrets_store import get_secret, get_setting, missing_secrets
+from model_settings import answer_payload, answer_settings
+import voice_output
 
 load_dotenv()
 TS_KEY = get_secret("TYPESAFE_API_KEY")
@@ -304,14 +306,13 @@ def prepare_reminder(t, said):
     try:
         r = requests.post("https://openrouter.ai/api/v1/chat/completions",
                           headers={"Authorization": f"Bearer {OR_KEY}"},
-                          json={"model": LLM_MODEL, "max_tokens": 120, "response_format": {"type": "json_object"},
-                                "messages": [{"role": "system", "content":
+                          json=answer_payload([{"role": "system", "content":
                                     "The user set a reminder with a voice assistant. Reply with JSON only: "
                                     '{"label": "2 to 4 word name for the task, e.g. Call Sam", '
                                     '"alert": "one short friendly sentence the assistant says out loud when the time is up, '
                                     'speaking to the user, e.g. Hey, it\'s time to give Sam a call."}. '
                                     "The alert may start with one tag from [cheerful] [chuckling] [sighing], or none. No markdown."},
-                                    {"role": "user", "content": said}]}, timeout=30)
+                                    {"role": "user", "content": said}], reminder=True), timeout=30, allow_redirects=False)
         r.raise_for_status()
         raw = r.json()["choices"][0]["message"]["content"]
         data = json.loads(raw[raw.index("{"):raw.rindex("}") + 1])
@@ -385,20 +386,21 @@ def timer_done_line(t):
 
 
 # --------------------------------------------------------------------------- LLM fallback (questions only)
-LLM_MODEL = "anthropic/claude-haiku-4.5"
 
 
 def ask_llm(text):
     t = time.time()
     r = requests.post("https://openrouter.ai/api/v1/chat/completions",
                       headers={"Authorization": f"Bearer {OR_KEY}"},
-                      json={"model": LLM_MODEL, "max_tokens": 80, "usage": {"include": True},
-                            "messages": [{"role": "system", "content": "You are a voice assistant. Answer in one short spoken sentence, no markdown. "
+                      json=answer_payload([{"role": "system", "content": "You are a voice assistant. Answer in one short spoken sentence, no markdown. "
                                           "You may start with exactly one tag from: [chuckling] [laughing] [sighing] [cheerful], or none."},
-                                         {"role": "user", "content": text}]}, timeout=30)
+                                         {"role": "user", "content": text}]), timeout=30, allow_redirects=False)
     r.raise_for_status()
     j = r.json()
-    return j["choices"][0]["message"]["content"].strip(), int((time.time() - t) * 1000), j.get("usage", {}).get("cost")
+    content = j["choices"][0]["message"].get("content")
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("Model returned no spoken answer. Try a larger output token limit in Settings.")
+    return content.strip(), int((time.time() - t) * 1000), j.get("usage", {}).get("cost")
 
 
 # --------------------------------------------------------------------------- Decision
@@ -490,8 +492,10 @@ def fetch_tts(text):
 
 
 def speak(text):
+    if voice_output.muted() or voice_output.volume() == 0:
+        return 0
     path, ms, cached = fetch_tts(text)
-    subprocess.run(["afplay", path])
+    voice_output.play(path)
     return ms
 
 
@@ -556,7 +560,7 @@ def handle(text, stt_ms=None, notify=None):
             line = say_line(payload)
         elif kind == "llm":
             line, llm_ms, llm_cost = ask_llm(text)
-            print(f"  llm {LLM_MODEL} {llm_ms}ms  ${llm_cost}")
+            print(f"  llm {answer_settings()['model']} {llm_ms}ms  ${llm_cost}")
         else:
             default_line = lambda: say_line(payload[0][3], **payload[0][4]) if len(payload) == 1 else say_line("compound_done")
             # anything that kills the sound or the screen gets the reply first, or she'd mute herself
@@ -603,6 +607,7 @@ class Recorder:
     def __init__(self):
         self.frames, self.on = [], False
         self.wake, self.paused = False, False
+        self.enabled, self.epoch = True, 0
         self.segments = queue.Queue()
         self.noise = 0.005
         self._reset_segment()
@@ -615,6 +620,8 @@ class Recorder:
         self.preroll = collections.deque(maxlen=3)
 
     def _cb(self, indata, *_):
+        if not self.enabled:
+            return
         if self.on:
             self.frames.append(indata.copy())
         if not self.wake or self.paused:
@@ -638,6 +645,17 @@ class Recorder:
                 self.segments.put(np.concatenate(self.speech))
             self._reset_segment()
 
+    def invalidate(self):
+        self.epoch += 1
+        self.on = False
+        self.frames = []
+        self._reset_segment()
+        while not self.segments.empty():
+            try:
+                self.segments.get_nowait()
+            except queue.Empty:
+                break
+
     def start(self):
         self.frames, self.on = [], True
 
@@ -650,12 +668,15 @@ def ready_text(wake):
     return "Say \u201cHey Jev\u201d and your command" if wake else "Ready when you are"
 
 
-def run_voice_assistant(notify=None, controls=None, mode="ptt"):
+def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True):
     from faster_whisper import WhisperModel
     print("loading whisper...")
     emit(notify, "Starting", "Loading Whisper\u2026")
     model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
     rec = Recorder()
+    rec.enabled = listening
+    if not listening:
+        rec.stream.stop()
     busy = threading.Lock()
     armed_until = [0.0]
 
@@ -664,8 +685,10 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt"):
         segs, _ = model.transcribe(audio, language="en", beam_size=1, vad_filter=True, initial_prompt=prompt)
         return " ".join(s.text.strip() for s in segs).strip(), int((time.time() - t) * 1000)
 
-    def run_turn(text, stt_ms):
+    def run_turn(text, stt_ms, epoch):
         with busy:
+            if not rec.enabled or epoch != rec.epoch:
+                return
             rec.paused = True  # don't hear her own reply
             try:
                 handle(text, stt_ms, notify)
@@ -678,14 +701,14 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt"):
                 time.sleep(0.3)
                 rec.paused = False
 
-    def ptt_turn(audio):
+    def ptt_turn(audio, epoch):
         emit(notify, "Transcribing", "Working out what you said\u2026")
         try:
             text, ms = transcribe(audio, COMMAND_PROMPT)
         except Exception as exc:
             emit(notify, "Something went wrong", str(exc))
             return
-        run_turn(text, ms)
+        run_turn(text, ms, epoch)
 
     def wake_loop():
         while True:
@@ -696,19 +719,22 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt"):
                     armed_until[0] = 0
                     emit(notify, "Ready", ready_text(rec.wake))
                 continue
-            if not rec.wake or busy.locked():
+            if not rec.enabled or not rec.wake or busy.locked():
                 continue
+            epoch = rec.epoch
             try:
                 text, ms = transcribe(audio, WAKE_PROMPT)
             except Exception as exc:
                 print(f"\n  transcribe failed: {exc}")
+                continue
+            if not rec.enabled or not rec.wake or epoch != rec.epoch:
                 continue
             m = WAKE.match(text)
             if m:
                 rest = text[m.end():].strip(" .,!?")
                 if rest:
                     armed_until[0] = 0
-                    run_turn(rest, ms)
+                    run_turn(rest, ms, epoch)
                 else:
                     with busy:
                         rec.paused = True
@@ -719,11 +745,12 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt"):
                     emit(notify, "Listening", "Go ahead\u2026")
             elif armed_until[0] and time.time() < armed_until[0]:
                 armed_until[0] = 0
-                run_turn(text, ms)
+                run_turn(text, ms, epoch)
             elif text:
                 print(f"\n  (not for me: {text!r})")
 
     def set_mode(new):
+        rec.invalidate()
         rec.wake = new == "wake"
         armed_until[0] = 0
         print(f"\n[mode: {'always listening' if rec.wake else 'hold right Option'}]")
@@ -731,7 +758,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt"):
             emit(notify, "Ready", ready_text(rec.wake))
 
     def start_recording():
-        if not rec.wake and not rec.on and not busy.locked():
+        if rec.enabled and not rec.wake and not rec.on and not busy.locked():
             rec.start()
             print("\n[listening]", end="", flush=True)
             emit(notify, "Listening", "Release right Option when you\u2019re done")
@@ -740,7 +767,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt"):
         if rec.on:
             audio = rec.stop()
             if len(audio) > SAMPLE_RATE * 0.3:
-                threading.Thread(target=ptt_turn, args=(audio,), daemon=True).start()
+                threading.Thread(target=ptt_turn, args=(audio, rec.epoch), daemon=True).start()
 
     def timer_done(t):
         with busy:
@@ -764,6 +791,16 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt"):
             command = controls.get()
             if isinstance(command, tuple) and command[0] == "mode":
                 set_mode(command[1])
+            elif isinstance(command, tuple) and command[0] == "listening":
+                rec.enabled = bool(command[1])
+                rec.invalidate()
+                armed_until[0] = 0
+                if rec.enabled:
+                    rec.stream.start()
+                else:
+                    rec.stream.stop()
+                emit(notify, "Ready" if rec.enabled else "Paused",
+                     ready_text(rec.wake) if rec.enabled else "Microphone paused. Current action may finish.")
             elif command == "press":
                 start_recording()
             elif command == "release":

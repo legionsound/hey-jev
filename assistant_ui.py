@@ -32,6 +32,11 @@ from AppKit import (
     NSVisualEffectStateActive,
     NSVisualEffectView,
     NSImageView,
+    NSBox,
+    NSBezierPath,
+    NSInsetRect,
+    NSToolbar,
+    NSToolbarItem,
     NSImageSymbolConfiguration,
     NSWindowStyleMaskClosable,
     NSWindowStyleMaskMiniaturizable,
@@ -114,6 +119,62 @@ def glass_backdrop(window, content):
     backdrop.setState_(NSVisualEffectStateActive)
     backdrop.addSubview_(content)
     return backdrop
+
+
+PANE_W, PANE_H, FOOTER_H = 580, 560, 56
+GROUP_X, CONTROL_W = 20, 250
+SETTINGS_PANES = (("providers", "Providers", "key.fill"), ("answers", "Answers", "sparkles"),
+                  ("confirm", "Confirmations", "checkmark.shield"), ("transcription", "Transcription", "waveform"))
+
+
+class FlippedView(NSView):
+    """Top-down layout for forms."""
+    def isFlipped(self):
+        return True
+
+
+class GroupView(FlippedView):
+    """Rounded inset panel; label-colour tints keep it right in light and dark."""
+    def drawRect_(self, _rect):
+        path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(NSInsetRect(self.bounds(), 0.5, 0.5), 10, 10)
+        NSColor.labelColor().colorWithAlphaComponent_(0.045).setFill()
+        path.fill()
+        NSColor.labelColor().colorWithAlphaComponent_(0.08).setStroke()
+        path.setLineWidth_(1)
+        path.stroke()
+
+
+def form_group(parent, top, header, rows, row_h=40):
+    """A System Settings style inset group: small header, rounded background, one row per (title, control) with
+    the title left and the control right-aligned, hairline separators. Returns the y below it."""
+    width = PANE_W - 2 * GROUP_X
+    if header:
+        parent.addSubview_(text(header, NSMakeRect(GROUP_X + 6, top, width, 18), 12,
+                                NSColor.secondaryLabelColor(), weight=0.3))
+        top += 22
+    box = GroupView.alloc().initWithFrame_(NSMakeRect(GROUP_X, top, width, row_h * len(rows)))
+    parent.addSubview_(box)
+    for i, (title, control) in enumerate(rows):
+        y = i * row_h
+        if title:
+            box.addSubview_(text(title, NSMakeRect(14, y + (row_h - 17) / 2, width - CONTROL_W - 40, 17), 13))
+        f = control.frame()
+        control.setFrame_(NSMakeRect(width - 14 - f.size.width, y + (row_h - f.size.height) / 2, f.size.width,
+                                     f.size.height))
+        box.addSubview_(control)
+        if i:
+            line = NSBox.alloc().initWithFrame_(NSMakeRect(14, y, width - 28, 1))
+            line.setBoxType_(2)  # separator
+            box.addSubview_(line)
+    return top + row_h * len(rows) + 22
+
+
+def footnote(parent, top, value):
+    view = text(value, NSMakeRect(GROUP_X + 6, top - 12, PANE_W - 2 * GROUP_X - 12, 32), 11,
+                NSColor.secondaryLabelColor())
+    view.setLineBreakMode_(0)  # wrap
+    view.cell().setWraps_(True)
+    parent.addSubview_(view)
 
 
 def label(text, frame, size, color=None):
@@ -405,119 +466,132 @@ class AppDelegate(NSObject):
             NSApp.activateIgnoringOtherApps_(True)
             return
         sheet = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-            NSMakeRect(0, 0, 680, 620), NSWindowStyleMaskTitled, NSBackingStoreBuffered, False)
-        sheet.setTitle_("Hey Jev Settings")
+            NSMakeRect(0, 0, PANE_W, PANE_H + FOOTER_H),
+            NSWindowStyleMaskTitled | NSWindowStyleMaskClosable, NSBackingStoreBuffered, False)
         sheet.setReleasedWhenClosed_(False)
+        sheet.setToolbarStyle_(2)  # NSWindowToolbarStylePreference: icon tabs, like System Settings panes
         content = sheet.contentView()
-        tabs = NSTabView.alloc().initWithFrame_(NSMakeRect(18, 80, 644, 520))
+        tabs = NSTabView.alloc().initWithFrame_(NSMakeRect(0, FOOTER_H, PANE_W, PANE_H))
+        tabs.setTabViewType_(6)  # no tabs, no border: the toolbar picks the pane
         content.addSubview_(tabs)
-        providers, answers, confirms, hearing = (NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 610, 480)) for _ in range(4))
-        for title, view in (("Providers & keys", providers), ("Deeper answers", answers), ("Confirmations", confirms),
-                            ("Transcription", hearing)):
-            item = NSTabViewItem.alloc().initWithIdentifier_(title)
+        self.settings_tabs = tabs
+        panes = {}
+        for ident, title, _icon in SETTINGS_PANES:
+            view = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, PANE_W, PANE_H))
+            item = NSTabViewItem.alloc().initWithIdentifier_(ident)
             item.setLabel_(title)
             item.setView_(view)
             tabs.addTabViewItem_(item)
-        providers.addSubview_(label("Your providers", NSMakeRect(24, 419, 560, 30), 22))
-        providers.addSubview_(label("Keys stay in Keychain. Leave a field blank to keep its saved key.",
-                                    NSMakeRect(24, 390, 560, 24), 12, NSColor.secondaryLabelColor()))
-        providers.addSubview_(label("Jev decisions", NSMakeRect(24, 313, 160, 24), 13))
-        self.jev_provider = self._popup(providers, ["OpenRouter", "TypeSafe direct"], NSMakeRect(194, 310, 385, 28))
-        self.jev_provider.selectItemAtIndex_(0 if get_setting("JEV_PROVIDER") == "openrouter" else 1)
-        providers.addSubview_(label("Deeper answers", NSMakeRect(24, 157, 160, 24), 13))
-        self.answer_provider = self._popup(providers, ["Disabled", "OpenRouter"], NSMakeRect(194, 154, 385, 28))
-        self.answer_provider.selectItemAtIndex_(0 if get_setting("ANSWER_PROVIDER") == "disabled" else 1)
-        self.key_fields = {}
-        for title, key, y in (("Voice: Fish Audio", "FISH_AUDIO_API_KEY", 349),
-                              ("Jev: OpenRouter", "JEV_OPENROUTER_API_KEY", 266),
-                              ("Jev: TypeSafe", "TYPESAFE_API_KEY", 222),
-                              ("Answer: OpenRouter", "OPENROUTER_API_KEY", 108)):
-            providers.addSubview_(label(title, NSMakeRect(24, y + 2, 169, 24), 13))
-            field = NSSecureTextField.alloc().initWithFrame_(NSMakeRect(194, y, 385, 28))
-            field.setPlaceholderString_("Already configured" if get_secret(key) else "Paste key")
-            providers.addSubview_(field)
-            self.key_fields[key] = field
-        providers.addSubview_(label("Model and request controls are in the Deeper answers tab.",
-                                    NSMakeRect(24, 63, 560, 24), 12, NSColor.secondaryLabelColor()))
-        providers.addSubview_(label("An existing .env still takes priority over Keychain.",
-                                    NSMakeRect(24, 37, 560, 24), 12, NSColor.secondaryLabelColor()))
+            panes[ident] = view
+        toolbar = NSToolbar.alloc().initWithIdentifier_("HeyJevSettings")
+        toolbar.setDelegate_(self)
+        toolbar.setDisplayMode_(1)  # icon and label
+        sheet.setToolbar_(toolbar)
+        toolbar.setSelectedItemIdentifier_(SETTINGS_PANES[0][0])
+        sheet.setTitle_(SETTINGS_PANES[0][1])
 
+        # Providers: one source + its key for Jev, one provider + key for deeper answers, the voice key.
+        p = panes["providers"]
+        self.key_fields = {}
+
+        def key_field(key):
+            field = NSSecureTextField.alloc().initWithFrame_(NSMakeRect(0, 0, CONTROL_W, 22))
+            field.setPlaceholderString_("Saved in Keychain" if get_secret(key) else "Paste key")
+            field.setBezelStyle_(1)  # rounded
+            self.key_fields[key] = field
+            return field
+        self.jev_provider = self._popup(None, ["OpenRouter", "TypeSafe"], NSMakeRect(0, 0, CONTROL_W, 24), "jevSourceChanged:")
+        self.jev_provider.selectItemAtIndex_(0 if get_setting("JEV_PROVIDER") == "openrouter" else 1)
+        jev_keys = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, CONTROL_W, 22))
+        for key in ("JEV_OPENROUTER_API_KEY", "TYPESAFE_API_KEY"):
+            jev_keys.addSubview_(key_field(key))  # stacked; only the selected source's key shows
+        y = form_group(p, 20, "Jev decisions", [("Source", self.jev_provider), ("API key", jev_keys)])
+        self.answer_provider = self._popup(None, ["Off", "OpenRouter"], NSMakeRect(0, 0, CONTROL_W, 24), "answerSourceChanged:")
+        self.answer_provider.selectItemAtIndex_(0 if get_setting("ANSWER_PROVIDER") == "disabled" else 1)
+        y = form_group(p, y, "Deeper answers", [("Provider", self.answer_provider),
+                                                ("OpenRouter key", key_field("OPENROUTER_API_KEY"))])
+        y = form_group(p, y, "Voice", [("Fish Audio key", key_field("FISH_AUDIO_API_KEY"))])
+        footnote(p, y, "Keys are stored in your Keychain. Leave a field empty to keep the saved key.")
+        self._sync_key_rows()
+
+        # Deeper answers: model, then the advanced request controls.
         current = answer_settings()
         self.selected_model = current["model"]
         self.selected_metadata = current["metadata"]
         self.parameter_drafts = {self.selected_model: current["parameters"]}
-        answers.addSubview_(label("Deeper answers", NSMakeRect(24, 429, 360, 30), 22))
-        self.refresh_button = NSButton.buttonWithTitle_target_action_("Refresh models", self, "refreshModels:")
-        self.refresh_button.setFrame_(NSMakeRect(433, 427, 155, 32))
-        answers.addSubview_(self.refresh_button)
-        self.model_search = NSSearchField.alloc().initWithFrame_(NSMakeRect(24, 388, 560, 28))
-        self.model_search.setPlaceholderString_("Search all text models by name or model ID")
+        a = panes["answers"]
+        self.model_search = NSSearchField.alloc().initWithFrame_(NSMakeRect(0, 0, CONTROL_W, 22))
+        self.model_search.setPlaceholderString_("Search models")
         self.model_search.setDelegate_(self)
-        answers.addSubview_(self.model_search)
-        self.model_popup = self._popup(answers, [], NSMakeRect(24, 349, 560, 28), "modelChanged:")
-        self.catalog_message = label("Saved model available offline. Refresh to load the catalog.", NSMakeRect(24, 320, 560, 22), 11, NSColor.secondaryLabelColor())
-        answers.addSubview_(self.catalog_message)
-        self.model_info = label("", NSMakeRect(24, 295, 560, 22), 11, NSColor.secondaryLabelColor())
-        answers.addSubview_(self.model_info)
-        answers.addSubview_(label("Advanced request controls", NSMakeRect(24, 258, 560, 26), 16))
+        self.model_popup = self._popup(None, [], NSMakeRect(0, 0, CONTROL_W, 24), "modelChanged:")
+        self.refresh_button = NSButton.buttonWithTitle_target_action_("Refresh", self, "refreshModels:")
+        self.catalog_message = text("Saved model works offline. Refresh to load the catalog.", NSMakeRect(0, 0, CONTROL_W, 16),
+                                    11, NSColor.secondaryLabelColor())
+        self.model_info = text("", NSMakeRect(0, 0, CONTROL_W, 16), 11, NSColor.secondaryLabelColor())
+        y = form_group(a, 20, "Model", [("Search", self.model_search), ("Model", self.model_popup),
+                                        ("Catalog", self.refresh_button)])
+        a.addSubview_(self.catalog_message)
+        self.catalog_message.setFrame_(NSMakeRect(GROUP_X + 14, y - 14, PANE_W - 2 * GROUP_X, 16))
+        a.addSubview_(self.model_info)
+        self.model_info.setFrame_(NSMakeRect(GROUP_X + 14, y + 2, PANE_W - 2 * GROUP_X, 16))
         self.parameter_fields = {}
-        for i, (key, (title, kind, low, high)) in enumerate(PARAMETERS.items()):
-            col, row = i % 2, i // 2
-            x, y = 24 + col * 286, 211 - row * 43
-            answers.addSubview_(label(title, NSMakeRect(x, y + 2, 164, 22), 12))
-            field = NSTextField.alloc().initWithFrame_(NSMakeRect(x + 164, y, 103, 26))
-            field.setToolTip_(f"{key}: {low:g} to {high:g}. Blank uses the default.")
-            answers.addSubview_(field)
+        rows = []
+        for key, (title, kind, low, high) in PARAMETERS.items():
+            field = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 110, 22))
+            field.setPlaceholderString_("Default")
+            field.setAlignment_(2)
+            field.setToolTip_(f"{key}: {low:g} to {high:g}. Empty uses the default.")
             self.parameter_fields[key] = field
-        answers.addSubview_(label("Blank: provider defaults; token limit: 80 answers / 120 reminders.",
-                                  NSMakeRect(24, 46, 575, 20), 11, NSColor.secondaryLabelColor()))
-        answers.addSubview_(label("Reasoning models may need more tokens. Unsupported controls are disabled.",
-                                  NSMakeRect(24, 23, 580, 20), 11, NSColor.secondaryLabelColor()))
-        confirms.addSubview_(label("Ask before doing", NSMakeRect(24, 429, 560, 30), 22))
-        confirms.addSubview_(label("Applies to voice and typed commands alike. Ask first shows a pop-down from the menu bar.",
-                                   NSMakeRect(24, 400, 575, 22), 12, NSColor.secondaryLabelColor()))
+            rows.append((title, field))
+        y = form_group(a, y + 28, "Advanced", rows, row_h=32)
+        footnote(a, y, "Empty fields use the provider's defaults. Reasoning models may need a higher token limit.")
+
+        # Confirmations: one row per kind of action.
+        c = panes["confirm"]
         policy = confirm_policy()
         self.policy_popups = {}
-        for i, effect in enumerate(EFFECTS):
-            y = 350 - i * 36
-            confirms.addSubview_(label(EFFECT_LABELS[effect], NSMakeRect(24, y + 2, 250, 24), 13))
-            popup = self._popup(confirms, ["Ask first", "Automatic"], NSMakeRect(300, y, 200, 28))
+        rows = []
+        for effect in EFFECTS:
+            popup = self._popup(None, ["Ask first", "Automatic"], NSMakeRect(0, 0, 140, 24))
             popup.selectItemAtIndex_(0 if policy[effect] == "ask" else 1)
             popup.setAccessibilityLabel_(f"{EFFECT_LABELS[effect]} confirmation")
             self.policy_popups[effect] = popup
-        hearing.addSubview_(label("Transcription", NSMakeRect(24, 429, 560, 30), 22))
-        hearing.addSubview_(label("What turns your voice into text. Typed and jevctl commands don't use it.",
-                                  NSMakeRect(24, 400, 575, 22), 12, NSColor.secondaryLabelColor()))
-        hearing.addSubview_(label("Backend", NSMakeRect(24, 352, 160, 24), 13))
-        self.backend_popup = self._popup(hearing, ["Local Whisper", "Apple on-device"], NSMakeRect(194, 349, 385, 28),
+            rows.append((EFFECT_LABELS[effect], popup))
+        y = form_group(c, 20, "Ask before doing", rows, row_h=34)
+        footnote(c, y, "Applies to voice and typed commands. Ask first shows a pop-down from the menu bar.")
+
+        # Transcription: backend and its state, then the transcript-only microphone test.
+        h = panes["transcription"]
+        self.backend_popup = self._popup(None, ["Local Whisper", "Apple on-device"], NSMakeRect(0, 0, CONTROL_W, 24),
                                          "backendChanged:")
         self.backend_popup.selectItemAtIndex_(BACKENDS.index(transcription_backend()))
-        self.backend_status = label("", NSMakeRect(24, 305, 575, 22), 12)
-        self.backend_next = label("", NSMakeRect(24, 280, 575, 22), 12, NSColor.secondaryLabelColor())
-        self.backend_restart = label("", NSMakeRect(24, 255, 575, 22), 12, NSColor.systemOrangeColor())
-        for view in (self.backend_status, self.backend_next, self.backend_restart):
-            hearing.addSubview_(view)
-        self.allow_button = NSButton.buttonWithTitle_target_action_("Allow Apple dictation", self, "allowAppleSpeech:")
-        self.allow_button.setFrame_(NSMakeRect(24, 205, 200, 32))
-        hearing.addSubview_(self.allow_button)
-        hearing.addSubview_(label("Microphone test", NSMakeRect(24, 160, 560, 24), 16))
-        hearing.addSubview_(label("Records 4 seconds with the backend in use and shows the text. Nothing is run.",
-                                  NSMakeRect(24, 136, 575, 20), 11, NSColor.secondaryLabelColor()))
-        self.test_button = NSButton.buttonWithTitle_target_action_("Test microphone", self, "micTest:")
-        self.test_button.setFrame_(NSMakeRect(24, 96, 170, 32))
-        hearing.addSubview_(self.test_button)
-        self.test_result = label("", NSMakeRect(204, 101, 395, 22), 12)
-        hearing.addSubview_(self.test_result)
-        hearing.addSubview_(label("Apple dictation runs only on this Mac. If on-device recognition isn't available,",
-                                  NSMakeRect(24, 60, 575, 20), 11, NSColor.secondaryLabelColor()))
-        hearing.addSubview_(label("it stays off and says why. It never sends your voice to Apple or switches backends by itself.",
-                                  NSMakeRect(24, 40, 575, 20), 11, NSColor.secondaryLabelColor()))
+        status_cell = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, CONTROL_W, 24))
+        self.backend_status = text("", NSMakeRect(0, 4, CONTROL_W, 17), 13, NSColor.secondaryLabelColor())
+        self.backend_status.setAlignment_(2)
+        self.allow_button = NSButton.buttonWithTitle_target_action_("Allow…", self, "allowAppleSpeech:")
+        self.allow_button.setFrame_(NSMakeRect(CONTROL_W - 90, 0, 90, 24))
+        for view in (self.backend_status, self.allow_button):  # status text, or the Allow button when it's needed
+            status_cell.addSubview_(view)
+        y = form_group(h, 20, "Speech recognition", [("Recognizer", self.backend_popup), ("Status", status_cell)])
+        self.backend_next = text("", NSMakeRect(GROUP_X + 14, y - 14, PANE_W - 2 * GROUP_X, 16), 11,
+                                 NSColor.secondaryLabelColor())
+        self.backend_restart = text("", NSMakeRect(GROUP_X + 14, y + 2, PANE_W - 2 * GROUP_X, 16), 11,
+                                    NSColor.secondaryLabelColor())
+        for view in (self.backend_next, self.backend_restart):
+            h.addSubview_(view)
+        self.test_button = NSButton.buttonWithTitle_target_action_("Test Microphone", self, "micTest:")
+        self.test_result = text("—", NSMakeRect(0, 0, CONTROL_W + 60, 17), 13, NSColor.secondaryLabelColor())
+        self.test_result.setAlignment_(2)
+        y = form_group(h, y + 28, "Microphone test", [("Record 4 seconds", self.test_button), ("Heard", self.test_result)])
+        footnote(h, y, "The test only shows what was heard; nothing runs. Apple dictation stays on this Mac: if it "
+                       "isn't available it stays off and says why, and never sends your voice online.")
         self._show_backend()
-        self.settings_message = label("", NSMakeRect(25, 48, 630, 24), 12, NSColor.systemRedColor())
+
+        self.settings_message = text("", NSMakeRect(20, 18, PANE_W - 240, 20), 12, NSColor.systemRedColor())
         content.addSubview_(self.settings_message)
-        for title, action, x in (("Cancel", "closeSettings:", 457), ("Save", "saveSettings:", 556)):
+        for title, action, x in (("Cancel", "closeSettings:", PANE_W - 196), ("Save", "saveSettings:", PANE_W - 104)):
             button = NSButton.buttonWithTitle_target_action_(title, self, action)
-            button.setFrame_(NSMakeRect(x, 10, 100, 32))
+            button.setFrame_(NSMakeRect(x, 14, 88, 28))
             button.setKeyEquivalent_("\r" if title == "Save" else "\x1b")
             content.addSubview_(button)
         self.settings_sheet = sheet
@@ -529,32 +603,70 @@ class AppDelegate(NSObject):
         if get_secret("OPENROUTER_API_KEY"):
             self.refreshModels_(None)
 
+    # NSToolbarDelegate: the pane switcher.
+    def toolbarAllowedItemIdentifiers_(self, _toolbar):
+        return [p[0] for p in SETTINGS_PANES]
+
+    def toolbarDefaultItemIdentifiers_(self, _toolbar):
+        return [p[0] for p in SETTINGS_PANES]
+
+    def toolbarSelectableItemIdentifiers_(self, _toolbar):
+        return [p[0] for p in SETTINGS_PANES]
+
+    def toolbar_itemForItemIdentifier_willBeInsertedIntoToolbar_(self, _toolbar, ident, _insert):
+        _i, title, icon = next(p for p in SETTINGS_PANES if p[0] == ident)
+        item = NSToolbarItem.alloc().initWithItemIdentifier_(ident)
+        item.setLabel_(title)
+        item.setImage_(NSImage.imageWithSystemSymbolName_accessibilityDescription_(icon, title))
+        item.setTarget_(self)
+        item.setAction_("showPane:")
+        return item
+
+    def showPane_(self, item):
+        ident = item.itemIdentifier()
+        self.settings_tabs.selectTabViewItemWithIdentifier_(ident)
+        self.settings_sheet.setTitle_(next(p[1] for p in SETTINGS_PANES if p[0] == ident))
+
+    def jevSourceChanged_(self, _sender):
+        self._sync_key_rows()
+
+    def answerSourceChanged_(self, _sender):
+        self._sync_key_rows()
+
+    @objc.python_method
+    def _sync_key_rows(self):
+        typesafe = self.jev_provider.indexOfSelectedItem() == 1
+        self.key_fields["JEV_OPENROUTER_API_KEY"].setHidden_(typesafe)
+        self.key_fields["TYPESAFE_API_KEY"].setHidden_(not typesafe)
+        self.key_fields["OPENROUTER_API_KEY"].setEnabled_(self.answer_provider.indexOfSelectedItem() == 1)
+
     @objc.python_method
     def _show_backend(self):
         """Status of the selected backend, what to do next, and whether a restart is needed to use it."""
         chosen = BACKENDS[self.backend_popup.indexOfSelectedItem()]
         self.allow_button.setHidden_(True)
         if chosen == "whisper":
-            status, nxt = "Local Whisper: runs on this Mac. Loads when Hey Jev starts.", ""
+            status, nxt = "Runs on this Mac", ""
         else:
             try:
                 import speech_apple
                 state, reason = speech_apple.status("en-US")
             except ImportError:
                 state, reason = "missing_bindings", "Apple Speech support isn't installed in this build."
-            status = "Apple on-device: " + {
-                "ready": "ready.", "not_determined": "needs your permission.", "denied": "permission is off.",
-                "restricted": "not allowed on this Mac.", "unsupported_locale": "not available for English (US).",
-                "no_on_device": "this Mac can't do it on-device, so it stays off.",
-                "unavailable": "temporarily unavailable. Try again shortly.",
-                "missing_bindings": "not installed in this build.",
-            }.get(state, f"not ready ({reason}).")
-            nxt = {"not_determined": "Click Allow Apple dictation, then approve the macOS prompt.",
+            status = {
+                "ready": "Ready", "not_determined": "Needs permission", "denied": "Permission is off",
+                "restricted": "Not allowed on this Mac", "unsupported_locale": "Not available for English (US)",
+                "no_on_device": "Not available on-device",
+                "unavailable": "Temporarily unavailable",
+                "missing_bindings": "Not installed in this build",
+            }.get(state, "Not ready")
+            nxt = {"not_determined": "Click Allow, then approve the macOS prompt.",
                    "denied": "Turn on Hey Jev in System Settings, Privacy & Security, Speech Recognition.",
                    "restricted": "Speech recognition is restricted on this Mac.",
                    }.get(state, "" if state == "ready" else "Listening stays off with this choice until it's ready.")
             self.allow_button.setHidden_(state != "not_determined")
         self.backend_status.setStringValue_(status)
+        self.backend_status.setHidden_(not self.allow_button.isHidden())
         self.backend_next.setStringValue_(nxt)
         from siri import STT
         names = {"whisper": "Local Whisper", "apple": "Apple on-device"}
@@ -603,6 +715,7 @@ class AppDelegate(NSObject):
             self.test_result.setStringValue_(f"Test failed: {result['error']}")
         else:
             self.test_result.setStringValue_(f"Heard “{result['text'] or '(nothing)'}” in {result['ms']} ms")
+        self.test_result.setToolTip_(self.test_result.stringValue())  # long results and errors stay readable
 
     @objc.python_method
     def _popup(self, parent, titles, frame, action=None):
@@ -611,7 +724,8 @@ class AppDelegate(NSObject):
         if action:
             popup.setTarget_(self)
             popup.setAction_(action)
-        parent.addSubview_(popup)
+        if parent is not None:
+            parent.addSubview_(popup)
         return popup
 
     def closeSettings_(self, _sender):

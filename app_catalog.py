@@ -64,10 +64,14 @@ def _run_mdfind(timeout=10):
 
 
 def _app_folders():
-    """User-added folders from prefs (app_folders list of paths)."""
+    """User-added folders from prefs (app_folders list of paths).
+
+    Reads the shared com.heyjev.preferences suite so CLI and app agree.
+    Symlinks resolved via realpath; Finder alias files are NOT resolved.
+    """
     try:
-        from Foundation import NSUserDefaults
-        raw = NSUserDefaults.standardUserDefaults().arrayForKey_("app_folders")
+        from model_settings import PREFS
+        raw = PREFS.arrayForKey_("app_folders")
         if raw is None:
             return []
         return [str(x) for x in list(raw)]
@@ -151,7 +155,7 @@ def _scan(roots=None, _running="auto", _spotlight="auto", _folders="auto"):
             for app_path in lines:
                 if app_path.endswith(".app"):
                     _add(app_path)
-        # User-added folders: aliases/symlinks resolved via realpath and
+        # User-added folders: symlinks resolved via realpath and
         # must stay inside a real folder; missing folders skipped.
         folders = (_app_folders() if _folders == "auto" else _folders)
         for folder in folders or []:

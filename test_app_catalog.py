@@ -182,7 +182,7 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(apps, [])
         self.assertEqual(ac.last_source_misses(), {"mdfind": "unavailable"})
 
-    def test_user_folder_alias_and_missing(self):
+    def test_user_folder_symlink_and_missing(self):
         _make_app(self.tmp, "Extra/Bar.app", "com.ex.bar", "Bar")
         link = os.path.join(self.tmp, "LinkDir")
         try:
@@ -196,6 +196,24 @@ class CatalogTest(unittest.TestCase):
         self.assertEqual(apps[0]["path"],
                          os.path.realpath(
                              os.path.join(self.tmp, "Extra/Bar.app")))
+
+    def test_app_folders_reads_shared_prefs_suite(self):
+        import model_settings
+        from unittest.mock import patch
+        _make_app(self.tmp, "Extra/Bar.app", "com.ex.bar", "Bar")
+
+        class FakePrefs:
+            def arrayForKey_(self, key):
+                assert key == "app_folders"
+                return [self.folder]
+
+        prefs = FakePrefs()
+        prefs.folder = os.path.join(self.tmp, "Extra")
+        with patch.object(model_settings, "PREFS", prefs):
+            self.assertEqual(ac._app_folders(), [prefs.folder])
+            apps = ac._scan([], _running=[], _spotlight=[],
+                            _folders="auto")
+            self.assertEqual([a["name"] for a in apps], ["Bar"])
 
     def test_refresh_returns_count(self):
         p = _make_app(self.tmp, "Sub/Foo.app", "com.ex.foo", "Foo")

@@ -482,14 +482,22 @@ class Floor:
     def locked(self):
         return self.lock.locked()
 
-    def start_recording(self):
-        """-> an ownership token, or None when the floor is taken."""
+    def start_recording(self, isolated=False):
+        """-> an ownership token, or None when the floor is taken. isolated: transcript-only capture, the owner's
+        audio never feeds wake segmentation. Set with the capture, cleared only by this owner's stop or a drop."""
         with self.state:
             if self.rec.on or not self.lock.acquire(blocking=False):
                 return None
             self.owner = object()
+            if isolated:
+                self._clear_wake()
+                self.rec.isolated = True
             self.rec.start()
             return self.owner
+
+    def _clear_wake(self):
+        self.rec._reset_segment()
+        drain(self.rec.segments)
 
     def stop_recording(self, token):
         """-> the audio, or None when `token` does not own the running recording (stale, dropped or someone else's)."""
@@ -498,6 +506,9 @@ class Floor:
                 return None
             self.owner = None
             audio = self.rec.stop()
+            if getattr(self.rec, "isolated", False) is True:  # leftovers go before the floor is free for the wake worker
+                self._clear_wake()
+                self.rec.isolated = False
             self.lock.release()
             return audio
 
@@ -506,6 +517,7 @@ class Floor:
         with self.state:
             was = self.rec.on
             self.owner = None
+            self.rec.isolated = False
             self.rec.invalidate()
             if was:
                 self.lock.release()
@@ -676,17 +688,12 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
             return reply({"error": STT["blocked"]})
         if not rec.enabled:
             return reply({"error": "Listening is paused. Resume it, then test again."})
-        rec.isolated = True  # no wake segmentation from test audio
-        try:
-            token = floor.start_recording()
-            if token is None:
-                return reply({"error": "Busy right now. Try again in a moment."})
-            emit(notify, "Mic test", f"Say something… ({seconds} seconds)")
-            time.sleep(seconds)
-            audio = floor.stop_recording(token)  # None if a switch or mode change dropped it meanwhile
-        finally:
-            rec.isolated = False
-            drain(rec.segments)
+        token = floor.start_recording(isolated=True)  # isolation belongs to this token, not to the test function
+        if token is None:
+            return reply({"error": "Busy right now. Try again in a moment."})
+        emit(notify, "Mic test", f"Say something… ({seconds} seconds)")
+        time.sleep(seconds)
+        audio = floor.stop_recording(token)  # None if a switch or mode change dropped it meanwhile
         if audio is None or not len(audio):
             emit(notify, "Ready", ready_text(rec.wake))
             return reply({"error": "The test was interrupted or nothing was recorded."})

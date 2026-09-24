@@ -55,7 +55,7 @@ class FakeRecorder:
     """Stands in for the microphone: records the stream state, returns one second of audio from a recording."""
     def __init__(self):
         import queue
-        self.enabled, self.epoch, self.on, self.wake, self.paused = True, 0, False, False, False
+        self.enabled, self.epoch, self.on, self.wake, self.paused, self.isolated = True, 0, False, False, False, False
         self.segments = queue.Queue()
         self.stream = types.SimpleNamespace(running=True)
         self.stream.start = lambda: setattr(self.stream, "running", True)
@@ -64,6 +64,9 @@ class FakeRecorder:
     def invalidate(self):
         self.epoch += 1
         self.on = False
+
+    def _reset_segment(self):
+        pass
 
     def start(self):
         self.on = True
@@ -224,8 +227,52 @@ class MicTestIsolationTests(LoopHarness):
         self.wait(lambda: self.submitted)
         self.assertEqual(self.submitted, [("whisper heard 16000", "voice")])
 
+    def test_second_test_during_first_leaves_its_isolation_alone(self):
+        first = self.start_test()
+        second = self.mic_test()  # Settings closed and reopened: another request lands mid-test
+        self.assertIn("Busy", second["error"])
+        self.assertTrue(self.rec.on and self.rec.isolated)  # the first test still owns an isolated capture
+        self.assertEqual(first.get(timeout=5)["text"], "apple heard 16000")
+        self.assertFalse(self.rec.isolated)
+
+    def test_stale_test_does_not_clear_a_newer_tests_isolation(self):
+        import queue
+        import time
+        old = self.start_test()
+        self.controls.put(("transcription", "apple"))  # reload drops the old test's capture
+        self.wait(lambda: not self.rec.on and not siri.STT["switching"])
+        time.sleep(0.15)  # the new test starts late enough that the old one finishes while it is still recording
+        new = queue.Queue()
+        self.controls.put(("mic_test", new.put))
+        self.wait(lambda: self.rec.on)
+        self.assertIn("interrupted", old.get(timeout=5)["error"])
+        self.assertTrue(self.rec.on and self.rec.isolated)  # the stale finish touched nothing
+        self.assertEqual(new.get(timeout=5)["text"], "apple heard 16000")
+        self.assertFalse(self.rec.isolated)
+        self.assertEqual(self.submitted, [])
+
 
 class RecorderIsolationTests(unittest.TestCase):
+    def test_stop_clears_wake_leftovers_before_the_floor_frees(self):
+        import numpy as np
+        rec, seen = FakeRecorder(), []
+        floor = siri.Floor(rec)
+        inner = floor.lock
+
+        class Lock:  # records the recorder's state at the moment the floor is handed back
+            acquire, locked = inner.acquire, inner.locked
+
+            def release(self):
+                seen.append((rec.isolated, rec.segments.qsize()))
+                inner.release()
+        floor.lock = Lock()
+        token = floor.start_recording(isolated=True)
+        self.assertTrue(rec.isolated)
+        rec.segments.put(np.ones(10, dtype="float32"))  # a phrase segmented in the release gap
+        floor.stop_recording(token)
+        self.assertEqual(seen, [(False, 0)])
+        self.assertIsNone(floor.stop_recording(token))  # stale token: no effect
+
     def test_isolated_capture_skips_wake_segmentation(self):
         import queue
         import numpy as np

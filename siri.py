@@ -3,12 +3,15 @@ import os, re, sys, json, time, queue, random, argparse, subprocess, tempfile, t
 import numpy as np, requests, sounddevice as sd, soundfile as sf
 from dotenv import load_dotenv
 from pynput import keyboard
-from secrets_store import get_secret
+from secrets_store import get_secret, get_setting, missing_secrets
 
 load_dotenv()
 TS_KEY = get_secret("TYPESAFE_API_KEY")
+JEV_OR_KEY = get_secret("JEV_OPENROUTER_API_KEY")
 FISH_KEY = get_secret("FISH_AUDIO_API_KEY")
 OR_KEY = get_secret("OPENROUTER_API_KEY")
+JEV_PROVIDER = get_setting("JEV_PROVIDER")
+ANSWER_PROVIDER = get_setting("ANSWER_PROVIDER")
 VOICE_ID = "9a9cf47702da476aa4629e2506d4a857"
 PTT_KEY = keyboard.Key.alt_r
 SAMPLE_RATE = 16000
@@ -22,10 +25,13 @@ WAKE_WINDOW = 6.0
 
 
 def reload_keys():
-    global TS_KEY, FISH_KEY, OR_KEY
+    global TS_KEY, JEV_OR_KEY, FISH_KEY, OR_KEY, JEV_PROVIDER, ANSWER_PROVIDER
     TS_KEY = get_secret("TYPESAFE_API_KEY")
+    JEV_OR_KEY = get_secret("JEV_OPENROUTER_API_KEY")
     FISH_KEY = get_secret("FISH_AUDIO_API_KEY")
     OR_KEY = get_secret("OPENROUTER_API_KEY")
+    JEV_PROVIDER = get_setting("JEV_PROVIDER")
+    ANSWER_PROVIDER = get_setting("ANSWER_PROVIDER")
 
 # --------------------------------------------------------------------------- Jev
 QUESTIONS = {
@@ -81,8 +87,12 @@ SPLIT_QUESTIONS = split_questions()
 
 def jev(text, questions=None):
     t = time.time()
-    r = requests.post("https://api.typesafe.ai/v1/systemone", json={"model": "jev-latest", "state": text, "questions": questions or QUESTIONS},
-                      headers={"Authorization": f"Bearer {TS_KEY}"}, timeout=30)
+    if JEV_PROVIDER == "openrouter":
+        url, model, key = "https://openrouter.ai/api/alpha/decisions", "typesafe/jev-1.13", JEV_OR_KEY
+    else:
+        url, model, key = "https://api.typesafe.ai/v1/systemone", "jev-latest", TS_KEY
+    r = requests.post(url, json={"model": model, "state": text, "questions": questions or QUESTIONS},
+                      headers={"Authorization": f"Bearer {key}"}, timeout=30)
     r.raise_for_status()
     j = r.json()
     ans = {}
@@ -335,7 +345,7 @@ def run_timer(action, text):
             return ("timer_unclear", {})
         label = parse_reminder(text)
         t = add_timer(secs, label)
-        if label and OR_KEY:
+        if label and ANSWER_PROVIDER == "openrouter" and OR_KEY:
             threading.Thread(target=prepare_reminder, args=(t, text), daemon=True).start()
         print(f"  timer: {secs}s" + (f" -> {label!r}" if label else ""))
         return ("reminder_set" if label else "timer_set", {})
@@ -424,7 +434,7 @@ def decide(ans):
     if cat == "chit_chat" and cconf >= GATE:
         return ("reply", "chit_chat")
     if cat == "information_request" and cconf >= GATE:
-        return ("llm", None)
+        return ("llm", None) if ANSWER_PROVIDER == "openrouter" else ("reply", "info")
     if cat == "unclear" and cconf >= GATE:
         return ("clarify", None)
     if ans["compound"][0] and ans["compound"][1] >= GATE:
@@ -432,7 +442,7 @@ def decide(ans):
     a = pick_action(ans)
     if a:
         return ("actions", [a])
-    return ("llm", None) if cat == "information_request" else ("clarify", None)
+    return (("llm", None) if ANSWER_PROVIDER == "openrouter" else ("reply", "info")) if cat == "information_request" else ("clarify", None)
 
 
 def pick_action(ans):
@@ -784,8 +794,9 @@ def main():
         from assistant_ui import run_app
         run_app()
         return
-    if not TS_KEY or not FISH_KEY:
-        sys.exit("need TYPESAFE_API_KEY and FISH_AUDIO_API_KEY in Keychain or .env")
+    missing = missing_secrets()
+    if missing:
+        sys.exit("need " + ", ".join(missing) + " in Keychain or .env")
     if args.text:
         handle(args.text)
         return

@@ -12,6 +12,7 @@ from AppKit import (
     NSMenu,
     NSMenuItem,
     NSButton,
+    NSPopUpButton,
     NSColor,
     NSEvent,
     NSEventMaskFlagsChanged,
@@ -34,7 +35,7 @@ from AppKit import (
     NSWindowStyleMaskTitled,
 )
 from Foundation import NSObject, NSTimer, NSUserDefaults
-from secrets_store import KEY_NAMES, get_secret, missing_secrets, save_secret
+from secrets_store import KEY_NAMES, get_secret, get_setting, missing_secrets, save_secret
 
 
 BASE_HEIGHT, ROW = 154, 24
@@ -219,38 +220,50 @@ class AppDelegate(NSObject):
         if getattr(self, "settings_sheet", None):
             return
         sheet = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-            NSMakeRect(0, 0, 400, 250), NSWindowStyleMaskTitled, NSBackingStoreBuffered, False
+            NSMakeRect(0, 0, 440, 430), NSWindowStyleMaskTitled, NSBackingStoreBuffered, False
         )
         content = sheet.contentView()
-        content.addSubview_(label("API keys", NSMakeRect(22, 204, 360, 30), 20))
-        content.addSubview_(label("Saved in your Mac Keychain. Existing keys stay hidden.",
-                                  NSMakeRect(23, 182, 360, 20), 12, NSColor.secondaryLabelColor()))
+        content.addSubview_(label("Providers and API keys", NSMakeRect(22, 383, 390, 30), 20))
+        content.addSubview_(label("Saved in Keychain. Existing keys stay hidden.",
+                                  NSMakeRect(23, 361, 390, 20), 12, NSColor.secondaryLabelColor()))
+
+        content.addSubview_(label("Jev decisions", NSMakeRect(23, 288, 130, 22), 13))
+        self.jev_provider = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(165, 285, 245, 26), False)
+        self.jev_provider.addItemsWithTitles_(["OpenRouter", "TypeSafe direct"])
+        self.jev_provider.selectItemAtIndex_(0 if get_setting("JEV_PROVIDER") == "openrouter" else 1)
+        content.addSubview_(self.jev_provider)
+
+        content.addSubview_(label("Deeper answers", NSMakeRect(23, 149, 130, 22), 13))
+        self.answer_provider = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(165, 146, 245, 26), False)
+        self.answer_provider.addItemsWithTitles_(["Disabled", "OpenRouter (Claude Haiku)"])
+        self.answer_provider.selectItemAtIndex_(0 if get_setting("ANSWER_PROVIDER") == "disabled" else 1)
+        content.addSubview_(self.answer_provider)
 
         field_names = (
-            ("TypeSafe", "TYPESAFE_API_KEY"),
-            ("Fish Audio", "FISH_AUDIO_API_KEY"),
-            ("OpenRouter", "OPENROUTER_API_KEY"),
+            ("Voice: Fish Audio", "FISH_AUDIO_API_KEY", 326),
+            ("Jev: OpenRouter", "JEV_OPENROUTER_API_KEY", 244),
+            ("Jev: TypeSafe", "TYPESAFE_API_KEY", 207),
+            ("Answer key", "OPENROUTER_API_KEY", 108),
         )
         self.key_fields = {}
-        for index, (title, key_name) in enumerate(field_names):
-            y = 136 - index * 40
-            content.addSubview_(label(title, NSMakeRect(23, y + 3, 84, 22), 13))
-            field = NSSecureTextField.alloc().initWithFrame_(NSMakeRect(108, y, 270, 26))
+        for title, key_name, y in field_names:
+            content.addSubview_(label(title, NSMakeRect(23, y + 3, 137, 22), 13))
+            field = NSSecureTextField.alloc().initWithFrame_(NSMakeRect(165, y, 245, 26))
             field.setBezelStyle_(1)  # rounded
             field.setFocusRingType_(1)
             field.setPlaceholderString_("Already configured" if get_secret(key_name) else "Paste key")
             content.addSubview_(field)
             self.key_fields[key_name] = field
 
-        self.settings_message = label("", NSMakeRect(23, 20, 180, 20), 11, NSColor.systemRedColor())
+        self.settings_message = label("", NSMakeRect(23, 61, 390, 20), 11, NSColor.systemRedColor())
         content.addSubview_(self.settings_message)
         save = NSButton.buttonWithTitle_target_action_("Save", self, "saveSettings:")
-        save.setFrame_(NSMakeRect(298, 12, 82, 32))
+        save.setFrame_(NSMakeRect(328, 18, 82, 32))
         save.setKeyEquivalent_("\r")
         content.addSubview_(save)
         if not missing_secrets():
             cancel = NSButton.buttonWithTitle_target_action_("Cancel", self, "closeSettings:")
-            cancel.setFrame_(NSMakeRect(210, 12, 86, 32))
+            cancel.setFrame_(NSMakeRect(240, 18, 86, 32))
             cancel.setKeyEquivalent_("\x1b")
             content.addSubview_(cancel)
 
@@ -258,7 +271,8 @@ class AppDelegate(NSObject):
         NSApp.activateIgnoringOtherApps_(True)
         self.panel.makeKeyAndOrderFront_(None)
         self.panel.beginSheet_completionHandler_(sheet, None)
-        sheet.makeFirstResponder_(self.key_fields["TYPESAFE_API_KEY"])
+        first_key = (missing_secrets() or ["FISH_AUDIO_API_KEY"])[0]
+        sheet.makeFirstResponder_(self.key_fields[first_key])
 
     def closeSettings_(self, _sender):
         if getattr(self, "settings_sheet", None):
@@ -272,11 +286,15 @@ class AppDelegate(NSObject):
                 value = self.key_fields[key_name].stringValue()
                 if value:
                     save_secret(key_name, value)
-            still_missing = missing_secrets()
+            jev_provider = ("openrouter", "typesafe")[self.jev_provider.indexOfSelectedItem()]
+            answer_provider = ("disabled", "openrouter")[self.answer_provider.indexOfSelectedItem()]
+            still_missing = missing_secrets(jev_provider, answer_provider)
             if still_missing:
                 names = ", ".join(name.replace("_API_KEY", "").replace("_", " ").title() for name in still_missing)
                 self.settings_message.setStringValue_(f"Still needed: {names}")
                 return
+            save_secret("JEV_PROVIDER", jev_provider)
+            save_secret("ANSWER_PROVIDER", answer_provider)
             from siri import reload_keys
             reload_keys()
             self.closeSettings_(None)

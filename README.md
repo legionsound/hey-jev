@@ -2,10 +2,10 @@
 
 A voice assistant for your Mac. Say "Hey Jev" or hold right Option, say a thing, it does it and answers back.
 
-- **Jev** (TypeSafe) makes every decision in one call, $0.00004 per request
+- **Jev** (OpenRouter or TypeSafe direct) makes every decision in one call, about $0.00004 per request
 - **Fish Audio S2.1 Pro** speaks every reply, with emotion tags like `[chuckling]` and `[sighing]`
 - **Whisper** (local, faster-whisper) turns your voice into text
-- An LLM only wakes up when Jev says you asked a question, not a command
+- An optional LLM only wakes up when Jev says you asked a question, not a command
 
 **Mac only.** Works on macOS Sequoia and Tahoe. It controls the Mac through AppleScript and the Keychain, so it won't run on Windows or Linux.
 
@@ -15,17 +15,16 @@ Open or quit apps, Mac volume up / down / mute / set, Spotify volume, play / pau
 
 Timers and reminders: "set a timer for 5 minutes", "remind me in 20 minutes to call Mum", "how long is left?", "cancel the timer". Each one counts down live in the window, and she tells you when it's done.
 
-Anything that isn't a command ("who wrote Hamlet") goes to Claude Haiku via OpenRouter and gets spoken back.
+With deeper answers enabled, questions such as "who wrote Hamlet" go to Claude Haiku via OpenRouter. Otherwise the app gives a scripted reply.
 
 ## What you need
 
 - A Mac
 - Python 3 (tested on 3.14, see below if you don't have it)
 - The Spotify desktop app, for the music commands
-- Three API keys:
-  - **TypeSafe (Jev):** [https://typesafe.ai](https://typesafe.ai)
-  - **Fish Audio:** [https://fish.audio/?fpr=henryk](https://fish.audio/?fpr=henryk). Sign in, then create a key on the API keys page in your account. You don't need a paid plan or API credit: the `s2.1-pro-free` model this app uses is free on the API until the end of November 2026.
-  - **OpenRouter (optional):** [https://openrouter.ai](https://openrouter.ai), only used to answer questions
+- **Voice:** a [Fish Audio](https://fish.audio/) API key. The app currently uses Fish for all spoken replies.
+- **Jev decisions:** choose either an [OpenRouter](https://openrouter.ai/) API key (no TypeSafe account needed) or a direct [TypeSafe](https://typesafe.ai/) API key.
+- **Deeper answers (optional):** a separate OpenRouter key for Claude Haiku. Disable deeper answers to run without it. The same OpenRouter credential may be entered for both roles, but the app stores and uses them separately.
 
 ### Don't have Python?
 
@@ -46,7 +45,7 @@ If that prints a version, you're set. If not, pick one:
 git clone https://github.com/henryklunaris/hey-jev.git
 cd hey-jev
 python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+.venv/bin/python -m pip install -r requirements.txt setuptools py2app
 .venv/bin/python setup.py py2app -A
 open "dist/Hey Jev - Fish Audio.app"
 ```
@@ -55,7 +54,7 @@ The py2app line builds the app bundle in alias mode, so it runs the code straigh
 
 First launch:
 
-1. The Keys panel opens. Paste your three keys, they're saved in your Mac Keychain. Change them any time with the **Keys…** button.
+1. The Keys panel opens. Choose the Jev provider and whether to enable deeper answers. Enter the keys required for those choices. They are saved in your Mac Keychain. Change them any time with **Keys…**.
 2. Whisper downloads its `small.en` model (about 250MB), one time.
 3. macOS will ask for **Microphone** access. Say yes.
 4. Add "Hey Jev - Fish Audio" (or your terminal, if you run from the terminal) under **System Settings > Privacy & Security > Accessibility**, or key presses are ignored.
@@ -92,7 +91,7 @@ Useful for seeing the Jev trace (every question, answer and confidence per turn)
 .venv/bin/python siri.py --ui          # same as the app, but shows as "Python" in the Dock
 ```
 
-Keys can also go in a `.env` file in this folder (`TYPESAFE_API_KEY`, `FISH_AUDIO_API_KEY`, `OPENROUTER_API_KEY`). A key in `.env` takes priority over the one saved in the Keychain.
+Keys can also go in a `.env` file in this folder: `FISH_AUDIO_API_KEY` for voice, `JEV_OPENROUTER_API_KEY` or `TYPESAFE_API_KEY` for Jev, and `OPENROUTER_API_KEY` for optional deeper answers. Set `JEV_PROVIDER=openrouter|typesafe` and `ANSWER_PROVIDER=disabled|openrouter` to choose routes from the terminal. A `.env` value takes priority over Keychain. By default, Jev uses TypeSafe if a direct TypeSafe key already exists, otherwise OpenRouter; deeper answers default to enabled only if their OpenRouter key already exists.
 
 ## How it works
 
@@ -110,7 +109,7 @@ Below 0.65 confidence it asks you to say it again, twice in a row and it gives u
 - **Fish Audio:** $0. The `s2.1-pro-free` model string on the API is free until the end of November 2026. You don't need to top up API credits. (Their MCP and web playground bill your plan credits instead, this app doesn't use those.) After November the paid `s2.1-pro` is $15 per million characters, and the cached replies mean a normal day of use is a few cents.
 - **Jev:** $0.042 per million input tokens, output free. One command is about $0.00004, a two part command about $0.00011.
 - **Whisper:** free, runs on your Mac.
-- **OpenRouter (questions only):** Claude Haiku, about $0.0002 per answer.
+- **OpenRouter deeper answers (if enabled):** Claude Haiku, about $0.0002 per answer.
 
 ## Troubleshooting
 

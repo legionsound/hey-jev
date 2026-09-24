@@ -289,7 +289,7 @@ class WakePhraseLiveTests(LoopHarness):
         self.assertEqual(self.submitted, [])
 
     def test_invalid_phrase_keeps_the_old_one(self):
-        self.controls.put(("wake_phrase", "Hi", []))
+        self.controls.put(("wake_phrase", "hey <jev>", []))  # "Hi" is a valid short choice now
         self.wait(lambda: any(s == "Wake phrase not changed" for s, _ in self.events))
         self.assertEqual(siri.WAKE.phrase, "Hey Jev")
 

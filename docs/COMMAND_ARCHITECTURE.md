@@ -206,3 +206,7 @@ Johnny can choose his own spoken wake phrase in Settings. This is proposed, not 
 - Explain practical limits beside the field: very short/common phrases trigger more easily in conversation or media; unusual names can be misheard; a distinctive multiword phrase is generally easier to distinguish. Do not prohibit a short choice merely because it is less reliable. This remains transcript matching, not a trained always-on wake-word detector, and it does not promise an accuracy rate before Johnny tests his chosen phrase.
 
 Small acceptance check: default phrase, one custom phrase, punctuation/case, no partial-word match, phrase-only follow-up and live change rejecting queued old-phrase work. Johnny then tries his own phrase in his room and confirms that push-to-talk still works. No generative planner or general browser control is needed for this feature.
+
+## Capability and effort map
+
+See [CAPABILITY_EFFORT_MAP.md](CAPABILITY_EFFORT_MAP.md) for reusable atomic controls, current/proposed status, prototype versus robust effort tiers, permissions, reliability ceilings, Johnny's trials and an optional two-builder/integrator work split. It keeps the Jev-classifier/Python-harness boundary and does not authorize implementation to resume.

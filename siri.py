@@ -176,6 +176,8 @@ def line_for(result):
             return say_line("split_please")
         if detail == "bad_percent":
             return say_line("bad_percent")
+        if detail == "unsupported_browser":
+            return "[clear throat] I can only open websites in Safari or Chrome."
         if detail == "too_many_steps":
             return say_line("too_many")
         misses += 1

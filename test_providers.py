@@ -65,5 +65,29 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(planner.plan("what is the capital of France", lambda _: ans, can_answer=False), ("reply", "info"))
         self.assertEqual(planner.plan("what is the capital of France", lambda _: ans, can_answer=True), ("answer", None))
 
+class AnswerClockTests(unittest.TestCase):
+    def test_answers_know_the_local_time(self):
+        import datetime
+        import siri
+        sent = {}
+
+        class R:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"choices": [{"message": {"content": "It's 7:35."}}], "usage": {}}
+
+        def post(url, headers=None, json=None, timeout=None, allow_redirects=None):
+            sent.update(json)
+            return R()
+        with patch.object(siri.requests, "post", post), patch.object(siri, "answer_settings", lambda: {"model": "m"}):
+            siri.ask_llm("what time is it")
+        system = sent["messages"][0]["content"]
+        now = datetime.datetime.now().astimezone()
+        self.assertIn(now.strftime("%A"), system)
+        self.assertIn(now.strftime("%Y"), system)
+
+
 if __name__ == "__main__":
     unittest.main()

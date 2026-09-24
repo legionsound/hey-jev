@@ -121,7 +121,7 @@ class LoopHarness(unittest.TestCase):
                 super().__init__()
                 test_self.rec = self
         self.patches = [patch.object(siri, "load_transcriber", load), patch.object(siri, "Recorder", Rec),
-                        patch.object(siri, "make_engine", lambda *a, **k: eng),
+                        patch.object(siri, "make_engine", lambda *a, **k: getattr(self, "engine", None) or eng),
                         patch.object(siri, "start_bridge", lambda *a: types.SimpleNamespace(stop=lambda: None)),
                         patch.object(siri, "transcription_backend", lambda: "apple"),
                         patch.object(siri, "wake_settings", lambda: ("Hey Jev", [])),
@@ -325,6 +325,73 @@ class WakePhraseLiveTests(LoopHarness):
         self.wait(lambda: self.submitted)
         self.assertEqual(len(self.submitted), 1)
         self.assertIn("open Notes", repr(self.submitted[0]))
+
+
+class VoiceStopTests(unittest.TestCase):
+    def test_stop_words(self):
+        for said in ["stop", "Stop.", "stop that", "Cancel!", "never mind", "Nevermind"]:
+            self.assertTrue(siri.is_stop(said), said)
+        for said in ["stop the music", "stop Spotify", "cancel my timer", "don't stop"]:
+            self.assertFalse(siri.is_stop(said), said)
+
+    def fake(self, active):
+        import types
+        calls = {"cancel": [], "submit": []}
+        eng = types.SimpleNamespace(active=lambda: list(active),
+                                    cancel=lambda rid: calls["cancel"].append(rid) or {"id": rid},
+                                    submit=lambda t, src: calls["submit"].append(t) or {"state": "busy", "id": "n"})
+        return eng, calls
+
+    def test_stop_cancels_what_is_running_and_queued_without_submitting(self):
+        eng, calls = self.fake(["a", "b"])
+        with patch.object(siri, "say", lambda *a: None), patch.object(siri.diagnostics, "record", lambda *a, **k: None):
+            siri.turn(eng, "stop", None)
+        self.assertEqual(calls, {"cancel": ["a", "b"], "submit": []})
+
+    def test_stop_with_nothing_running_is_an_ordinary_command(self):
+        eng, calls = self.fake([])
+        with patch.object(siri, "say", lambda *a: None), patch.object(siri.diagnostics, "record", lambda *a, **k: None):
+            siri.turn(eng, "stop", None)
+        self.assertEqual(calls, {"cancel": [], "submit": ["stop"]})  # pauses music, as before
+
+
+class VoiceStopLoopTests(LoopHarness):
+    """The real voice loop and a real engine: a request waiting on its confirmation is stopped by voice."""
+
+    def setUp(self):
+        import engine as engine_mod
+        import actions
+        self.plan = patch.object(engine_mod.planner, "plan", lambda text, *a, **k: (
+            "steps", [{"clause": text, "action": "slow", "args": {}}]))
+        self.plan.start()
+        self.runs, self.shown = [], []
+        slow = actions.entry("quit", actions.plain, lambda t, d: self.runs.append(t), None, "nothing", 2)
+        self.engine = engine_mod.Engine(lambda c: {}, policy=lambda: {"quit": "ask"}, ask=self.shown.append,
+                                        actions={"slow": slow})
+        self.engine.spoke_first = set()
+        super().setUp()
+        self.apple_ready = True
+        self.controls.put(("transcription", "apple"))
+        self.wait(lambda: siri.STT["blocked"] is None and not siri.STT["switching"])
+
+    def tearDown(self):
+        super().tearDown()
+        self.plan.stop()
+
+    def test_hey_jev_stop_cancels_a_request_that_is_still_running(self):
+        import numpy as np
+        self.controls.put(("mode", "wake"))
+        self.wait(lambda: self.rec.wake)
+        with patch.object(siri, "say", lambda *a: None):
+            self.heard = "Hey Jev quit Notes"
+            self.rec.segments.put(np.ones(16000, dtype="float32"))
+            self.wait(lambda: any(self.shown))  # waiting on its confirmation: running, holding nothing
+            first = self.engine.active()[0]
+            self.assertFalse(siri.ENGINE is None)
+            self.heard = "Hey Jev stop"
+            self.rec.segments.put(np.ones(16000, dtype="float32"))  # heard while the first is still running
+            self.wait(lambda: self.engine.status(first)["state"] == "cancelled")
+        self.assertEqual(self.runs, [])  # the confirmed-never step did nothing
 
 
 class RecorderIsolationTests(unittest.TestCase):

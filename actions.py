@@ -172,7 +172,7 @@ def set_volume(t, deadline):
 
 def volume_step(delta):
     def run(t, deadline):
-        t["value"] = max(0, min(100, get_volume(deadline) + delta))
+        t["value"] = max(0, min(100, get_volume(deadline) + t.get("delta", delta)))
         set_volume(t, deadline)
     return run
 
@@ -217,7 +217,7 @@ def spotify_step(delta):
     def run(t, deadline):
         if not spotify_running(deadline):
             raise Failed("Spotify is not running")
-        t["value"] = max(0, min(100, get_spotify_volume(deadline) + delta))
+        t["value"] = max(0, min(100, get_spotify_volume(deadline) + t.get("delta", delta)))
         set_spotify_volume(t, deadline)
     return run
 

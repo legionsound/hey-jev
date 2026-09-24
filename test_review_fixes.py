@@ -385,18 +385,28 @@ class PercentVolumeTests(unittest.TestCase):
         return planner.plan(text, lambda c: answers(**{"volume_action": ("set", 0.9), **over}))
 
     def test_spoken_percent_sets_exact_value(self):
-        for text, n in [("set volume to 40 percent", 40), ("set the volume to 40%", 40), ("volume to seventy-five percent", 75),
+        for text, n in [("set volume to 40 percent", 40), ("set volume to one hundred percent", 100), ("set the volume to 40%", 40), ("volume to seventy-five percent", 75),
                         ("set volume to a hundred percent", 100), ("set volume to 0%", 0)]:
             kind, steps = self.plan(text)
             self.assertEqual((kind, steps[0]["action"], steps[0]["args"]), ("steps", "volume.set", {"level": f"{n}%", "percent": n}), text)
             self.assertEqual(actions.level_value(steps[0]["args"]), n)
 
-    def test_up_to_a_percent_is_a_set_but_up_by_is_not(self):
+    def test_up_to_a_percent_is_a_set_and_up_by_is_relative(self):
         self.assertEqual(self.plan("turn it up to 60%", volume_action=("up", 0.9))[1][0]["action"], "volume.set")
-        self.assertEqual(self.plan("turn it up by 10 percent", volume_action=("up", 0.9))[1][0]["action"], "volume.up")
+        step = self.plan("turn it up by ten percent", volume_action=("up", 0.9))[1][0]
+        self.assertEqual((step["action"], step["args"]), ("volume.up", {"delta": 10}))
+        step = self.plan("turn it down by 15%", volume_action=("down", 0.9))[1][0]
+        self.assertEqual((step["action"], step["args"]), ("volume.down", {"delta": -15}))
 
-    def test_out_of_range_and_named_levels_fall_back(self):
-        self.assertEqual(self.plan("set volume to 150 percent")[1][0]["args"], {"level": "medium"})
+    def test_invalid_percent_clarifies_instead_of_guessing(self):
+        for text in ["set volume to -10 percent", "set volume to 12.5 percent", "set volume to two hundred percent",
+                     "set volume to one hundred and five percent", "set volume to 150 percent", "set volume to minus ten percent",
+                     "set volume to 1,000 percent", "set volume by 10 percent"]:
+            self.assertEqual(self.plan(text), ("clarify", "bad_percent"), text)
+        self.assertEqual(self.plan("open Spotify, then set volume to 12.5 percent"), ("clarify", "bad_percent"))
+
+    def test_named_levels_unchanged(self):
+        self.assertEqual(self.plan("set volume to quiet", volume_level=("quiet", 0.9))[1][0]["args"], {"level": "quiet"})
         self.assertEqual(actions.level_value({"level": "quiet"}), 25)
 
     def test_spotify_percent_and_describe(self):

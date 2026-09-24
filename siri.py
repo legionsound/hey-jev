@@ -122,6 +122,7 @@ REPLIES = {
     "clarify": ["[clear throat] Sorry, say that again?", "Hm, one more time?"],
     "give_up": ["[sighing] I'm not sure what you mean. Try saying it differently?"],
     "split_please": ["[clear throat] Say that as one thing, then the next."],
+    "bad_percent": ["[clear throat] Volume goes from 0 to 100 percent, in whole numbers. Try again?"],
     "too_many": ["[sighing] That's a lot at once. Five steps at most, please."],
     "unsupported": ["[chuckling] I know what you want, I just can't do that one yet."],
     "failed": ["[sighing] That didn't work.", "Hm, that didn't go through."],
@@ -173,6 +174,8 @@ def line_for(result):
         detail = result.get("detail")
         if detail == "compound_unsplit":
             return say_line("split_please")
+        if detail == "bad_percent":
+            return say_line("bad_percent")
         if detail == "too_many_steps":
             return say_line("too_many")
         misses += 1

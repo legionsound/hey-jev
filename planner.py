@@ -69,28 +69,45 @@ def app_name(clause):
     return m[1].strip(" .,!?") if m else ""
 
 
-NUM_WORDS = {w: i for i, w in enumerate("zero one two three four five six seven eight nine ten eleven twelve thirteen "
-                                         "fourteen fifteen sixteen seventeen eighteen nineteen".split())}
-NUM_WORDS.update({w: 10 * i for i, w in enumerate("twenty thirty forty fifty sixty seventy eighty ninety".split(), 2)})
-PERCENT = re.compile(r"\b((?:\d{1,3})|(?:(?:a |one )?hundred)|(?:[a-z]+(?:[\s-][a-z]+)?))\s*(?:%|percent\b|per cent\b)", re.I)
+UNITS = {w: i for i, w in enumerate("zero one two three four five six seven eight nine ten eleven twelve thirteen "
+                                     "fourteen fifteen sixteen seventeen eighteen nineteen".split())}
+TENS = {w: 10 * i for i, w in enumerate("twenty thirty forty fifty sixty seventy eighty ninety".split(), 2)}
+# Everything that can be part of a spoken number, so the match takes the whole phrase, never just its tail.
+NUM_WORD = r"(?:" + "|".join([*UNITS, *TENS, "a", "and", "hundred", "thousand", "minus", "negative", "point"]) + r")"
+PERCENT = re.compile(r"(?:[-+\u2212]\s*)?(?:\d[\d.,]*|" + NUM_WORD + r"(?:[\s-]+" + NUM_WORD + r")*)\s*(?:%|\bper\s*cent\b)", re.I)
+
+
+def words_value(words):
+    """Plain whole numbers only: "seventy five", "a hundred", "one hundred and five". None for anything else."""
+    total, cur, seen = 0, 0, False
+    for w in words:
+        if w in UNITS or w in TENS:
+            cur, seen = cur + UNITS.get(w, TENS.get(w)), True
+        elif w == "hundred":
+            cur, seen = (cur or 1) * 100, True
+        elif w == "thousand":
+            total, cur, seen = total + (cur or 1) * 1000, 0, True
+        elif w not in ("a", "and"):
+            return None  # minus, negative, point
+    return total + cur if seen else None
 
 
 def percent(clause):
-    """ "40%", "40 percent", "forty five percent" -> 0..100. None when absent, out of range, or a change "by" an amount."""
+    """None when no percent is spoken, else (value or None when invalid, relative). Valid = whole number 0..100.
+    The whole number phrase is parsed: "-10", "12.5", "two hundred" and "one hundred and five" are invalid, not 10/5/100/5."""
     m = PERCENT.search(clause)
-    if not m or re.search(r"\bby\s*$", clause[:m.start()], re.I):
+    if not m:
         return None
-    words = m[1].lower().replace("-", " ").split()
-    if words[0].isdigit():
-        n = int(words[0])
-    elif words[-1] == "hundred":
-        n = 100
+    phrase = re.sub(r"\s*(?:%|per\s*cent)$", "", m[0], flags=re.I).strip().lower()
+    words = re.split(r"[\s-]+", phrase)
+    while words and words[0] in ("a", "and") and words[1:2] != ["hundred"]:
+        words.pop(0)  # "to a" / "and" before the number are not part of it
+    relative = bool(re.search(r"\bby\s*$", clause[:m.start()], re.I))
+    if re.fullmatch(r"\d+", phrase):
+        n = int(phrase)
     else:
-        words = words[-2:] if len(words) == 2 and words[0] in NUM_WORDS and words[0].endswith("ty") else words[-1:]
-        if any(w not in NUM_WORDS for w in words):
-            return None
-        n = sum(NUM_WORDS[w] for w in words)
-    return n if 0 <= n <= 100 else None
+        n = None if re.search(r"\d", phrase) else words_value(words)  # signs, decimals, "1,5"
+    return (n if n is not None and 0 <= n <= 100 else None, relative)
 
 
 def step_for(ans, target, clause):
@@ -112,10 +129,16 @@ def step_for(ans, target, clause):
     if target == "volume":
         scope, scope_conf = ans["volume_scope"]
         spotify = scope == "spotify" and (scope_conf >= 0.5 or re.search(r"\bspotify\b", clause, re.I))
+        kind = 'spotify_volume' if spotify else 'volume'
         pct = percent(clause) if act in ("set", "up", "down") else None
-        if pct is not None:  # an exact number beats Jev's five-word scale: "turn it up to 60%" is a set
-            return (conf, f"{'spotify_volume' if spotify else 'volume'}.set", {"level": f"{pct}%", "percent": pct})
-        return (conf, f"{'spotify_volume' if spotify else 'volume'}.{act}", {"level": ans["volume_level"][0]})
+        if pct is not None:  # a spoken number beats Jev's five-word scale
+            n, relative = pct
+            if n is None or relative and act == "set":
+                return (conf, "clarify", "bad_percent")  # never swap in a guessed level
+            if relative:  # "up by 10 percent": move by exactly that much
+                return (conf, f"{kind}.{act}", {"delta": n if act == "up" else -n})
+            return (conf, f"{kind}.set", {"level": f"{n}%", "percent": n})  # "up to 60%" is a set
+        return (conf, f"{kind}.{act}", {"level": ans["volume_level"][0]})
     return (conf, f"{target}.{act}", {})
 
 
@@ -145,6 +168,8 @@ def judge(ans, clause, can_answer=False):
     if ans["compound"][0] and ans["compound"][1] >= GATE:
         return ("clarify", "compound_unsplit")  # say it as "X, then Y"
     s = pick(ans, clause)
+    if s and s[1] == "clarify":
+        return ("clarify", s[2])
     if not s:
         return ("answer", None) if can_answer and cat == "information_request" else ("clarify", "no_action")
     return ("step", {"clause": clause, "action": s[1], "args": s[2]})

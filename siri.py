@@ -6,7 +6,7 @@ import os, re, sys, json, time, queue, random, argparse, subprocess, threading, 
 import requests
 from dotenv import load_dotenv
 from secrets_store import get_secret, get_setting, missing_secrets
-from model_settings import answer_payload, answer_settings, confirm_policy
+from model_settings import answer_payload, answer_settings, confirm_policy, transcription_backend
 import diagnostics
 import planner
 import timers
@@ -533,7 +533,36 @@ def runtime_facts():
         pass
     return {"revision": rev, "dirty": dirty, "source": here, "python": sys.version.split()[0],
             "executable": sys.executable, "bundle": os.environ.get("RESOURCEPATH"), "jev_provider": JEV_PROVIDER,
-            "answer_provider": ANSWER_PROVIDER, "answer_model": answer_settings().get("model")}
+            "answer_provider": ANSWER_PROVIDER, "answer_model": answer_settings().get("model"),
+            "transcription": transcription_backend()}
+
+
+ACTIVE_BACKEND = None  # the transcription backend this process started with; Settings shows restart-required on mismatch
+
+
+def load_transcriber(backend, notify):
+    """-> (transcribe(audio, prompt) -> (text, ms), blocked reason or None). Never falls back to another backend:
+    an unusable Apple selection disables listening with its reason; typed commands and jevctl still work."""
+    if backend == "apple":
+        try:
+            import speech_apple
+        except ImportError:
+            return None, "Apple dictation isn't installed in this build. Choose Local Whisper in Settings."
+        state, reason = speech_apple.status("en-US")
+        if state != "ready":
+            return None, f"Apple dictation isn't ready: {reason} Open Settings, Transcription."
+        emit(notify, "Starting", "Starting Apple dictation…")
+        return speech_apple.AppleTranscriber("en-US").transcribe, None
+    from faster_whisper import WhisperModel
+    print("loading whisper...")
+    emit(notify, "Starting", "Loading Whisper…")
+    model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+
+    def transcribe(audio, prompt):
+        t = time.time()
+        segs, _ = model.transcribe(audio, language="en", beam_size=1, vad_filter=True, initial_prompt=prompt)
+        return " ".join(s.text.strip() for s in segs).strip(), int((time.time() - t) * 1000)
+    return transcribe, None
 
 
 def start_bridge(eng, notify):
@@ -552,7 +581,6 @@ def start_bridge(eng, notify):
 
 def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, ask=None):
     global ENGINE, BRIDGE
-    from faster_whisper import WhisperModel
     ENGINE = make_engine(notify, ask)
     diagnostics.init(ENGINE.instance)
     diagnostics.record(None, "startup", "starting", **runtime_facts())
@@ -561,13 +589,13 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
     except Exception as exc:
         diagnostics.record(None, "startup", "failed", error=repr(exc))
         raise
+    global ACTIVE_BACKEND
     try:
-        print("loading whisper...")
-        emit(notify, "Starting", "Loading Whisper…")
-        model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+        ACTIVE_BACKEND = transcription_backend()
+        transcribe_with, blocked = load_transcriber(ACTIVE_BACKEND, notify)
         rec = Recorder()
-        rec.enabled = listening
-        if not listening:
+        rec.enabled = listening and not blocked
+        if not rec.enabled:
             rec.stream.stop()
     except BaseException as exc:  # startup failed: leave no socket or engine behind
         diagnostics.record(None, "startup", "failed", error=repr(exc))
@@ -580,9 +608,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
     armed_until = [0.0]
 
     def transcribe(audio, prompt):
-        t = time.time()
-        segs, _ = model.transcribe(audio, language="en", beam_size=1, vad_filter=True, initial_prompt=prompt)
-        return " ".join(s.text.strip() for s in segs).strip(), int((time.time() - t) * 1000)
+        return transcribe_with(audio, prompt)
 
     def run_turn(text, stt_ms, epoch):
         with hold():
@@ -651,6 +677,9 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
             emit(notify, "Ready", ready_text(rec.wake))
 
     def start_recording():
+        if blocked:
+            emit(notify, "Dictation unavailable", blocked)
+            return
         if rec.enabled and not rec.wake and floor.start_recording():
             print("\n[listening]", end="", flush=True)
             emit(notify, "Listening", "Release right Option when you’re done")
@@ -672,7 +701,10 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
     threading.Thread(target=warm_cache, daemon=True).start()
     threading.Thread(target=wake_loop, daemon=True).start()
     set_mode(mode)
-    diagnostics.record(None, "startup", "ready", mode=mode, listening=listening, log=diagnostics.path)
+    diagnostics.record(None, "startup", "ready", mode=mode, listening=rec.enabled, log=diagnostics.path,
+                       transcription=ACTIVE_BACKEND, blocked=blocked)
+    if blocked:
+        emit(notify, "Dictation unavailable", blocked)
     print("ready. ctrl+c to quit.")
     if controls is not None:
         while True:
@@ -680,6 +712,9 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
             if isinstance(command, tuple) and command[0] == "mode":
                 set_mode(command[1])
             elif isinstance(command, tuple) and command[0] == "listening":
+                if blocked:  # the selected backend is not usable: never claim to listen
+                    emit(notify, "Dictation unavailable", blocked)
+                    continue
                 rec.enabled = bool(command[1])
                 floor.drop_recording()
                 armed_until[0] = 0

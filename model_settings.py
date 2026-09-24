@@ -148,3 +148,18 @@ def confirm_policy():
 
 def save_confirm_policy(policy):
     PREFS.setObject_forKey_(json.dumps({k: v for k, v in policy.items() if v in ("ask", "auto")}), "confirm_policy")
+
+
+BACKENDS = ("whisper", "apple")
+
+
+def transcription_backend():
+    """ "whisper" (local faster-whisper, default) or "apple" (Apple on-device Speech). Takes effect at next start."""
+    saved = PREFS.stringForKey_("transcription_backend")
+    return saved if saved in BACKENDS else "whisper"
+
+
+def save_transcription_backend(backend):
+    if backend not in BACKENDS:
+        raise ValueError(f"Unknown transcription backend: {backend}")
+    PREFS.setObject_forKey_(backend, "transcription_backend")

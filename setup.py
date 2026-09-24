@@ -17,6 +17,7 @@ setup(
             "LSUIElement": False,
             "NSHighResolutionCapable": True,
             "NSMicrophoneUsageDescription": "Hey Jev listens for your commands.",
+            "NSSpeechRecognitionUsageDescription": "Hey Jev can turn your voice into text on this Mac with Apple dictation.",
             "NSAppleEventsUsageDescription": "Hey Jev controls Spotify, volume and dark mode for you.",
         },
     }},

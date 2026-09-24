@@ -39,7 +39,8 @@ from AppKit import NSPopover, NSViewController
 from Foundation import NSObject, NSTimer, NSUserDefaults
 from actions import EFFECT_LABELS, EFFECTS
 from model_settings import (PREFS, PARAMETERS, answer_settings, cached_models, confirm_policy, fetch_models,
-                            save_answer_settings, save_confirm_policy, validate_parameters)
+                            save_answer_settings, save_confirm_policy, save_transcription_backend,
+                            transcription_backend, validate_parameters, BACKENDS)
 import voice_output
 from secrets_store import KEY_NAMES, get_secret, get_setting, missing_secrets, save_secret
 
@@ -352,8 +353,9 @@ class AppDelegate(NSObject):
         content = sheet.contentView()
         tabs = NSTabView.alloc().initWithFrame_(NSMakeRect(18, 80, 644, 520))
         content.addSubview_(tabs)
-        providers, answers, confirms = (NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 610, 480)) for _ in range(3))
-        for title, view in (("Providers & keys", providers), ("Deeper answers", answers), ("Confirmations", confirms)):
+        providers, answers, confirms, hearing = (NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 610, 480)) for _ in range(4))
+        for title, view in (("Providers & keys", providers), ("Deeper answers", answers), ("Confirmations", confirms),
+                            ("Transcription", hearing)):
             item = NSTabViewItem.alloc().initWithIdentifier_(title)
             item.setLabel_(title)
             item.setView_(view)
@@ -425,6 +427,26 @@ class AppDelegate(NSObject):
             popup.selectItemAtIndex_(0 if policy[effect] == "ask" else 1)
             popup.setAccessibilityLabel_(f"{EFFECT_LABELS[effect]} confirmation")
             self.policy_popups[effect] = popup
+        hearing.addSubview_(label("Transcription", NSMakeRect(24, 429, 560, 30), 22))
+        hearing.addSubview_(label("What turns your voice into text. Typed and jevctl commands don't use it.",
+                                  NSMakeRect(24, 400, 575, 22), 12, NSColor.secondaryLabelColor()))
+        hearing.addSubview_(label("Backend", NSMakeRect(24, 352, 160, 24), 13))
+        self.backend_popup = self._popup(hearing, ["Local Whisper", "Apple on-device"], NSMakeRect(194, 349, 385, 28),
+                                         "backendChanged:")
+        self.backend_popup.selectItemAtIndex_(BACKENDS.index(transcription_backend()))
+        self.backend_status = label("", NSMakeRect(24, 305, 575, 22), 12)
+        self.backend_next = label("", NSMakeRect(24, 280, 575, 22), 12, NSColor.secondaryLabelColor())
+        self.backend_restart = label("", NSMakeRect(24, 255, 575, 22), 12, NSColor.systemOrangeColor())
+        for view in (self.backend_status, self.backend_next, self.backend_restart):
+            hearing.addSubview_(view)
+        self.allow_button = NSButton.buttonWithTitle_target_action_("Allow Apple dictation", self, "allowAppleSpeech:")
+        self.allow_button.setFrame_(NSMakeRect(24, 205, 200, 32))
+        hearing.addSubview_(self.allow_button)
+        hearing.addSubview_(label("Apple dictation runs only on this Mac. If on-device recognition isn't available,",
+                                  NSMakeRect(24, 60, 575, 20), 11, NSColor.secondaryLabelColor()))
+        hearing.addSubview_(label("it stays off and says why. It never sends your voice to Apple or switches backends by itself.",
+                                  NSMakeRect(24, 40, 575, 20), 11, NSColor.secondaryLabelColor()))
+        self._show_backend()
         self.settings_message = label("", NSMakeRect(25, 48, 630, 24), 12, NSColor.systemRedColor())
         content.addSubview_(self.settings_message)
         for title, action, x in (("Cancel", "closeSettings:", 457), ("Save", "saveSettings:", 556)):
@@ -440,6 +462,48 @@ class AppDelegate(NSObject):
         NSApp.activateIgnoringOtherApps_(True)
         if get_secret("OPENROUTER_API_KEY"):
             self.refreshModels_(None)
+
+    @objc.python_method
+    def _show_backend(self):
+        """Status of the selected backend, what to do next, and whether a restart is needed to use it."""
+        chosen = BACKENDS[self.backend_popup.indexOfSelectedItem()]
+        self.allow_button.setHidden_(True)
+        if chosen == "whisper":
+            status, nxt = "Local Whisper: runs on this Mac. Loads when Hey Jev starts.", ""
+        else:
+            try:
+                import speech_apple
+                state, reason = speech_apple.status("en-US")
+            except ImportError:
+                state, reason = "missing_bindings", "Apple Speech support isn't installed in this build."
+            status = "Apple on-device: ready." if state == "ready" else f"Apple on-device: not ready. {reason}"
+            nxt = {"not_determined": "Click Allow Apple dictation, then approve the macOS prompt.",
+                   "denied": "Turn on Hey Jev in System Settings, Privacy & Security, Speech Recognition.",
+                   "restricted": "Speech recognition is restricted on this Mac.",
+                   }.get(state, "" if state == "ready" else "Listening stays off with this choice until it's ready.")
+            self.allow_button.setHidden_(state != "not_determined")
+        self.backend_status.setStringValue_(status)
+        self.backend_next.setStringValue_(nxt)
+        import siri
+        active = siri.ACTIVE_BACKEND
+        self.backend_restart.setStringValue_(
+            "Restart required: Hey Jev is using " + ("Local Whisper" if active == "whisper" else "Apple on-device")
+            + " until you quit and reopen it." if active and active != chosen else "")
+
+    def backendChanged_(self, _sender):
+        self._show_backend()
+
+    def allowAppleSpeech_(self, _sender):
+        try:
+            import speech_apple
+            speech_apple.request_access(
+                lambda *_: self.performSelectorOnMainThread_withObject_waitUntilDone_("speechAccessDone:", None, False))
+        except Exception as exc:
+            self.backend_next.setStringValue_(f"Couldn't ask for access: {exc}")
+
+    def speechAccessDone_(self, _payload):
+        if getattr(self, "settings_sheet", None):
+            self._show_backend()
 
     @objc.python_method
     def _popup(self, parent, titles, frame, action=None):
@@ -480,6 +544,7 @@ class AppDelegate(NSObject):
             save_secret("ANSWER_PROVIDER", answer_provider)
             save_answer_settings(self.selected_model, values, self.selected_metadata)
             save_confirm_policy({e: ("ask", "auto")[p.indexOfSelectedItem()] for e, p in self.policy_popups.items()})
+            save_transcription_backend(BACKENDS[self.backend_popup.indexOfSelectedItem()])
             from siri import reload_keys
             reload_keys()
             self.closeSettings_(None)

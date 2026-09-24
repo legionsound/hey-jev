@@ -1,6 +1,6 @@
-# Engine contract v1
+# Engine contract v1.1
 
-Status: design for review, 2026-09-24. Supersedes the v0 draft posted in Buzz. Implements the foundation in `COMMAND_ARCHITECTURE.md`; where this file is more specific, this file wins. Nothing here is built yet.
+Status: design for review, 2026-09-24. v1.1 amends v1 after review. Supersedes the v0 draft posted in Buzz. Implements the foundation in `COMMAND_ARCHITECTURE.md`; where this file is more specific, this file wins. Nothing here is built yet.
 
 ## Shape
 
@@ -24,13 +24,13 @@ One engine inside the running app. Voice and `jevctl` both hand it text; it plan
     "effect": "open",          # policy category, see Confirmation
     "resolve": resolve_app,    # args -> ("target", {...}) | ("choices", [...]) | ("none", reason). Deterministic.
     "run": run_app_open,       # (target, deadline) -> None. Raises on definite failure.
-    "verify": verify_app_open, # (target) -> ("done" | "wait" | "failed", facts). Polled until deadline.
+    "verify": verify_app_open, # (target, deadline) -> ("done" | "wait" | "failed", facts). Polled until deadline.
     "proves": "a running app with the resolved bundle id and path",
     "timeout": 10,
 }
 ```
 
-`verify` may be `None` only where no readback exists (lock, sleep). Every native call is a subprocess run with `timeout=deadline - now`, so the worker kills it at the deadline and never leaves a detached call that can still act. No background threads issue effects.
+`verify` may be `None` only where no readback exists (lock, sleep). Every native call in `run` and `verify` is a subprocess with `timeout=deadline - now`. At the deadline the worker kills and reaps its own subprocess and reports `unknown`. Killing `osascript` or `open` does not recall an Apple Event already delivered to another app, so the effect may still happen later; the engine never claims external work stopped.
 
 ## Step outcome
 
@@ -45,13 +45,20 @@ One engine inside the running app. Voice and `jevctl` both hand it text; it plan
 | `declined` | Ask-first action cancelled or not confirmed within 60 s. |
 | `skipped` | An earlier step did not complete. |
 
-Every step carries `action`, `state`, `target`, `facts`, `detail`. The worker stops at the first step that is not `completed` or `unverified`; the rest are `skipped`.
+Every step carries `action`, `state`, `target`, `facts`, `detail`. The worker stops at the first step that is not `completed`, including `unverified`; the rest are `skipped`.
 
 ## Request outcome
 
-`queued`, `running` (in progress, not success), then one terminal state: `completed`, `partial` (some steps done, then a stop), `failed`, `needs_clarification`, `declined`, `unknown`, `cancelled` (removed while queued), `expired` (queued over 30 s), `busy` (queue full, never queued).
+`queued`, `running` (in progress, not success), then one terminal state: `completed`, `partial`, `failed`, `unverified`, `unknown`, `unsupported`, `needs_clarification`, `declined`, `cancelled`, `expired` (queued over 30 s), `busy` (queue or ledger full, never queued).
 
-Every response lists all steps in order, the per-launch `instance` id, and for a stop after earlier steps, `remaining`: the clause texts not yet run. Callers resubmit only `remaining`, never the whole command.
+- `partial`: at least one step `completed`, then a stop. `stopped_state` carries the exact state of the stopping step.
+- Single-step or first-step stops use that step's state as the request state.
+- `cancelled`: cancelled while queued, while awaiting confirmation, or between steps. Completed steps stay listed as completed.
+
+Every response lists all steps in order and the per-launch `instance` id. On a stop:
+
+- `uncertain_step`: index and state of a dispatched step that ended `unknown` or `unverified`. Never resubmittable.
+- `not_started`: clause texts that were never touched. Only these may be resubmitted, and only by a caller who knows they do not depend on the uncertain or failed step. Never resubmit the whole command.
 
 ## Planning
 
@@ -65,21 +72,23 @@ Every response lists all steps in order, the per-launch `instance` id, and for a
 Each action has an `effect` category: `open`, `navigate`, `media`, `volume`, `display`, `timer`, `quit`, `lock`, `sleep`. A user setting maps each category to **Ask first** or **Automatic**. Defaults: Ask first for `quit`, `lock`, `sleep`; Automatic for the rest.
 
 - The engine enforces the policy for every source. Source (`voice`, `cli`) is set by the entry point, never read from a request, and is display metadata only.
-- An Ask-first step blocks the worker and opens a menu-bar popover naming the concrete action and target, with Confirm and Cancel. The pending decision is bound to that request id and step.
-- On Confirm the engine re-resolves the target; if it changed or vanished the step fails with `target_changed`. Cancel or 60 s timeout gives `declined`.
+- An Ask-first step blocks the worker and opens a menu-bar popover naming the concrete action and target, with Confirm and Cancel. The pending decision is one record bound to that request id and step.
+- Confirm, popover Cancel, request `cancel` and the 60 s timeout all consume that record with one compare-and-set under the engine lock. The first wins; any later Confirm is a no-op and closes the popover. Request `cancel` gives request state `cancelled`; popover Cancel or timeout gives `declined`.
+- After a Confirm wins, the engine re-resolves the target before dispatch; if it changed or vanished the step fails with `target_changed`.
 - No request field can confirm, skip policy or supply a target handle.
 
 ## Ledger and replay
 
 - Request ids are reserved under one lock before enqueue. Same id and same text returns the existing status. Same id, different text: `id_conflict`.
 - Queued and running entries are never evicted. Full results are kept 10 minutes; after that the id keeps a small record (text hash, terminal state) for the rest of the app run, so a reused id never runs again in this run.
+- Id records are capped at 10,000 per app run. When full, new ids get `busy` with detail `ledger_full`; old records are never dropped to make room. Restart clears it.
 - After app restart the `instance` changes and old ids are unknown: `unknown_outcome`, which never means safe to retry.
 - `jevctl` never resubmits. On wait timeout it prints the last known status and exits.
 
 ## Verification per adapter
 
 - `app.open`: `open -b <bundle id>` (path when duplicates exist), then poll running apps for that bundle id and path.
-- `url.open` (Safari, Chrome): open a new tab via AppleScript and remember that tab. Poll that tab's URL. `done` when scheme-insensitive host (ignoring `www.`) matches and the path starts with the requested path. A redirect to another host ends as `unverified` with the observed URL. Page content and load state are not checked.
+- `url.open` (Safari, Chrome), after milestone 1: open a new tab via AppleScript and remember that tab. Poll that tab's URL. `done` only on an exact match after normalizing: lowercase host with one leading `www.` ignored, http and https treated alike, one trailing slash ignored, same path, same query parameters as a set, fragment ignored. Anything else, including redirects, ends `unverified` with the observed URL. Page content and load state are not checked.
 - `url.open` (other browsers): `open -b <browser> <url>`, `unverified` with `{"opened_with": bundle_id}`.
 - Volume, Spotify volume, dark mode, media: read the value back after setting it.
 - `app.quit`: poll until the bundle id is no longer running.

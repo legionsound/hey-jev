@@ -98,3 +98,22 @@ Acceptance checks:
 ## Implementation evidence
 
 Pending. Record built, tested and unverified outcomes separately before handoff.
+
+## Architecture recommendation
+
+**Near term: keep Python and use native AppKit through PyObjC.** `NSStatusItem`, native controls and `NSPopover` can provide a polished compact menu experience with a separate settings window. PyObjC calls the same native framework; Python does not impose a visual quality ceiling. Use a native dropdown for this iteration and keep controls compact. A custom popover is possible if interaction testing shows the menu is too constrained. Do not rewrite the working voice engine merely to change its presentation.
+
+**Long term: prefer a SwiftUI/AppKit shell with a separate Python engine if this becomes a maintained, distributed macOS product.** SwiftUI `MenuBarExtra` with window style and a `Settings` scene make the desired utility structure idiomatic. AppKit remains available for finer control. A narrow local command/status interface can later connect that shell to the existing Whisper/Jev/Fish engine. First stabilize that boundary; do not port model inference and provider logic just to obtain SwiftUI views.
+
+| Concern | Python + native AppKit | SwiftUI/AppKit shell + Python engine |
+| --- | --- | --- |
+| UI polish | Native views, menus and popovers; manual layout and callback code need care | Declarative state/layout and tooling make iteration easier; polish still needs design/testing |
+| macOS permissions | Current bundle identity and microphone/Accessibility/Automation grants can be retained | Shell/helper identity and ownership of microphone/automation must be designed; a new signed binary may prompt again |
+| Packaging | Existing alias bundle is local-development packaging, not a self-contained signed release | Native shell is straightforward to sign, but shipping/versioning the Python runtime and engine still takes work |
+| Background audio/voice | Existing recorder, Whisper and Fish remain intact; native playback can be used directly | Keep engine off the main actor; choose explicit ownership of capture/playback and lifecycle |
+| Maintenance | Fewest moving parts now; PyObjC signatures and manual view state are less ergonomic | Clear typed UI/state and Xcode tools; an IPC protocol plus two languages adds operational surface |
+| Migration risk | Low, preserves tested routes and keys | Moderate/high until helper startup, crash recovery, permissions and upgrades are tested |
+
+SwiftUI is easier to maintain for a larger native utility, not a technical prerequisite for a BetterDisplay-style experience. A full Swift engine rewrite is not recommended without evidence that Python startup, distribution or runtime costs dominate. The proposed local bridge is useful now and can inform a future engine boundary, but must not grow into a speculative framework in this overhaul.
+
+Apple references: https://developer.apple.com/documentation/appkit/nsstatusitem ; https://developer.apple.com/documentation/appkit/nspopover ; https://developer.apple.com/documentation/swiftui/menubarextra ; https://developer.apple.com/documentation/swiftui/settings .

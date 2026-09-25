@@ -1,4 +1,6 @@
 """Native playback with live voice gain, independent of system volume."""
+import json
+import re
 import threading
 import time
 from AppKit import NSSound
@@ -8,6 +10,48 @@ _lock = threading.RLock()
 _play_lock = threading.Lock()
 _sound = None
 _owner = None  # who started the current sound, so a sample's Stop never cuts off Jev's own speech
+
+
+# Performance cues each voice provider understands, as written in reply lines ("[chuckling] There you go").
+CUES = {"fish": ["chuckling", "laughing", "sighing", "cheerful", "clear throat"]}
+CUE_MODES = ("all", "some", "none")
+_TAG = re.compile(r"\[([a-z][a-z ]*)\]\s*")
+
+
+def cues(provider="fish"):
+    """{"mode": "all" | "some" | "none", "on": [cue, ...]}: which cues this provider's voice performs.
+    Default all (the lines as written). "some" performs only the cues listed in "on"."""
+    try:
+        raw = json.loads(PREFS.stringForKey_("voice_cues") or "{}").get(provider) or {}
+        mode = raw.get("mode") if raw.get("mode") in CUE_MODES else "all"
+        on = [c for c in raw.get("on", []) if c in CUES.get(provider, [])]
+    except (ValueError, TypeError, AttributeError):
+        mode, on = "all", []
+    return {"mode": mode, "on": on if mode == "some" else list(CUES.get(provider, [])) if mode == "all" else []}
+
+
+def set_cues(provider, mode, on=()):
+    """Save one provider's choice; other providers' choices are kept."""
+    if mode not in CUE_MODES:
+        raise ValueError(f"mode must be one of {CUE_MODES}")
+    known = CUES.get(provider, [])
+    try:
+        allp = json.loads(PREFS.stringForKey_("voice_cues") or "{}")
+        allp = allp if isinstance(allp, dict) else {}
+    except ValueError:
+        allp = {}
+    allp[provider] = {"mode": mode, "on": [c for c in on if c in known]}
+    PREFS.setObject_forKey_(json.dumps(allp), "voice_cues")
+
+
+def with_cues(text, provider="fish"):
+    """The line as this provider should hear it: cues switched off are removed. "all" leaves it untouched."""
+    c = cues(provider)
+    if c["mode"] == "all":
+        return text
+    keep = set(c["on"])
+    out = _TAG.sub(lambda m: m.group(0) if m.group(1) in keep else "", text)
+    return re.sub(r"\s{2,}", " ", out).strip() or text.strip()
 
 
 def volume():

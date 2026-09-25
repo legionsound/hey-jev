@@ -341,13 +341,13 @@ def prepare_reminder(t, said):
                                     '{"label": "2 to 4 word name for the task, e.g. Call Sam", '
                                     '"alert": "one short friendly sentence the assistant says out loud when the time is up, '
                                     'speaking to the user, e.g. Hey, it\'s time to give Sam a call."}. '
-                                    "The alert may start with one tag from [cheerful] [chuckling] [sighing], or none. No markdown."},
+                                    + cue_rule().replace("You may start", "The alert may start") + "No markdown."},
                                     {"role": "user", "content": said}], reminder=True), timeout=30, allow_redirects=False)
         r.raise_for_status()
         raw = r.json()["choices"][0]["message"]["content"]
         data = json.loads(raw[raw.index("{"):raw.rindex("}") + 1])
         t["label"] = data.get("label") or t["label"]
-        fetch_tts(data["alert"])  # cache the audio now
+        fetch_tts(voice_output.with_cues(data["alert"], "fish"))  # cache the audio now, as it will be spoken
         t["line"] = data["alert"]
         print(f"\n  reminder ready: {t['label']!r} -> {t['line']!r}")
     except Exception as e:
@@ -371,13 +371,19 @@ def now_line():
     return f"It is now {now.strftime('%A, %B %-d, %Y, %-I:%M %p')} ({now.tzname()}) on the user's Mac."
 
 
+def cue_rule():
+    """The answer model may use only the cues the user left on (speak() strips any others anyway)."""
+    on = [c for c in voice_output.cues("fish")["on"] if c != "clear throat"]
+    return (f"You may start with exactly one tag from: {' '.join(f'[{c}]' for c in on)}, or none. " if on
+            else "Never use bracketed tags. ")
+
+
 def ask_llm(text):
     t = time.time()
     r = requests.post("https://openrouter.ai/api/v1/chat/completions",
                       headers={"Authorization": f"Bearer {OR_KEY}"},
                       json=answer_payload([{"role": "system", "content": "You are a voice assistant. Answer in one short spoken sentence, no markdown. "
-                                          "You may start with exactly one tag from: [chuckling] [laughing] [sighing] [cheerful], or none. "
-                                          + now_line()},
+                                          + cue_rule() + now_line()},
                                          {"role": "user", "content": text}]), timeout=30, allow_redirects=False)
     r.raise_for_status()
     j = r.json()
@@ -486,7 +492,7 @@ def play_sample(op, hold):
 def speak(text):
     if voice_output.muted() or voice_output.volume() == 0:
         return 0
-    path, ms, cached = fetch_tts(text)
+    path, ms, cached = fetch_tts(voice_output.with_cues(text, "fish"))
     voice_output.play(path)
     return ms
 
@@ -501,7 +507,7 @@ def warm_cache():
             if voice_output.muted():
                 return
             try:
-                made += 0 if fetch_tts(line)[2] else 1
+                made += 0 if fetch_tts(voice_output.with_cues(line, "fish"))[2] else 1
             except Exception as e:
                 print(f"  cache miss for {line!r}: {e}")
     if made:

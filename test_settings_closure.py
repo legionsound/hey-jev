@@ -332,6 +332,16 @@ class TeachJevTests(Base):
         self.assertEqual(self.d.settings_message.stringValue(), "Added 1 spelling. Save to apply.")
         self.assertIsNone(self.d.teach)
 
+    def test_close_after_results_keeps_nothing_heard(self):
+        self.run_takes([{"text": "Hey Jazz"}, {"text": "Hey Jazz"}, {"text": "Hey Jev"}, {"text": "Hey Jev"},
+                        {"text": "Hey Jev"}])
+        self.assertEqual([a for _, a in self.d.teach_boxes], ["Hey Jazz"])
+        self.d.teachClose_(None)
+        self.assertEqual((self.d.teach, self.d.teach_sheet, self.d.teach_boxes), (None, None, []))
+        for name in ("teach_status", "teach_list", "teach_add", "teach_close"):
+            self.assertIsNone(getattr(self.d, name))
+        self.assertEqual(self.d.alias_field.stringValue(), "")  # nothing was added without a tick
+
     def test_all_matched(self):
         self.run_takes([{"text": "Hey Jev"}] * 5)
         self.assertEqual(self.d.teach_status.stringValue(), "Hey Jev already hears you: 5 of 5 takes matched.")

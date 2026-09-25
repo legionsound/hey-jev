@@ -1359,6 +1359,8 @@ class AppDelegate(NSObject):
         self.teach = None
         sheet = getattr(self, "teach_sheet", None)
         self.teach_sheet = None
+        self.teach_boxes = []  # recognized spellings go with the sheet; only ones added to the form remain
+        self.teach_status = self.teach_list = self.teach_add = self.teach_close = None
         if sheet is not None:
             if getattr(self, "settings_sheet", None):
                 self.settings_sheet.endSheet_(sheet)

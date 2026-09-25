@@ -1083,6 +1083,18 @@ class PickTests(unittest.TestCase):
         v = self.run_pick({"noun": "video", "ordinal": 65}, self.big_page())
         self.assertEqual((v["state"], self.presses), ("failed", []))
 
+    def test_the_named_video_presses_only_when_exactly_one_matches(self):
+        g = self.grid()
+        v = self.run_pick({"noun": "video", "kind": "B", "ordinal": 0}, g,
+                          answer=lambda ls: [(l == "Video B", 0.95) for l in ls])
+        self.assertEqual((v["state"], self.presses), ("completed", [g.items[2].ref]))
+
+    def test_two_named_matches_ask_which(self):
+        v = self.run_pick({"noun": "video", "kind": "A or B", "ordinal": 0}, self.grid(),
+                          answer=lambda ls: [(l in ("Video A", "Video B"), 0.95) for l in ls])
+        self.assertEqual(self.presses, [])
+        self.assertNotEqual(v["state"], "completed")
+
     def test_the_third_video_counts_rows_then_columns(self):
         g = self.grid()
         v = self.run_pick({"noun": "video", "ordinal": 3}, g)

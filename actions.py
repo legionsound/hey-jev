@@ -1057,7 +1057,7 @@ def resolve_screen_pick(args):
         # PICK_MAX is the true third; "last" and "nearest" need the whole page, so a cut page refuses those.
         pool = reading_order(pool)
         cut = len(pool) > PICK_MAX
-        if cut and ("where" in args or args.get("ordinal", 1) == -1):
+        if cut and ("where" in args or args.get("ordinal", 1) in (-1, 0)):
             return ("none", f"too many things on screen to find the {'last' if 'where' not in args else 'right'} "
                             f"{noun}; scroll closer first")
         pool = pool[:PICK_MAX]
@@ -1078,7 +1078,11 @@ def resolve_screen_pick(args):
     else:
         ordered = reading_order(group)
         k = args.get("ordinal", 1)
-        if k == -1:
+        if k == 0:  # "the Full Tilt video": exactly one, else ask which
+            if len(ordered) > 1:
+                return ("choices", [{"name": f"{i.label} ({_where(i, snap.window_frame)})"} for i in ordered[:4]])
+            chosen = ordered[0]
+        elif k == -1:
             chosen = ordered[-1]
         elif isinstance(k, int) and 1 <= k <= len(ordered):
             chosen = ordered[k - 1]

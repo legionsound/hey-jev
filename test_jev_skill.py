@@ -98,6 +98,17 @@ class PlannerTests(unittest.TestCase):
             self.assertEqual(planner.pick({"target": ("app", 0.3)}, "louder")[1], "volume.up")
 
 
+class QualifiedPickTests(unittest.TestCase):
+    def test_words(self):
+        cases = {"Click on the full tilt video": {"noun": "video", "kind": "full tilt", "ordinal": 0},
+                 "play the Daft Punk song": {"noun": "song", "kind": "Daft Punk", "ordinal": 0},
+                 "open the top result": {"noun": "result", "ordinal": 1}}
+        for said, want in cases.items():
+            self.assertEqual(planner.pick_args(said), want, said)
+        for said in ["click the save button", "click the Settings tab", "click the video"]:
+            self.assertIsNone(planner.pick_args(said), said)
+
+
 class SecretTests(unittest.TestCase):
     def test_key_value_never_in_argv(self):
         with patch.object(secrets_store.subprocess, "run") as run:

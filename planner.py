@@ -408,9 +408,11 @@ PICK = re.compile(r"^\W*(?:please\s+)?(?:click|press|tap|open|play|select|choose
 
 def pick_args(clause):
     """"the third video", "the last result", "the video in the bottom-right": {"noun", "ordinal" | "where"}, or None.
-    Plain "click the video" with neither an ordinal nor a place isn't a pick: it names one thing."""
+    Plain "click the video" with neither an ordinal nor a place isn't a pick: it names one thing. "the Full Tilt
+    video" (a qualifier, no ordinal) is ordinal 0: the one such video, pressed only if exactly one is on screen."""
     m = PICK.match(clause)
-    if not m or not (m["ord"] or m["v"]):
+    content = m and m["noun"].lower() not in ("link", "tab", "button", "row", "item")  # "the Save button" names one control
+    if not m or not (m["ord"] or m["v"] or (m["q"] and content)):
         return None
     out = {"noun": m["noun"].lower()}
     if m["q"]:
@@ -418,6 +420,11 @@ def pick_args(clause):
     if m["ord"]:
         o = m["ord"].lower()
         out["ordinal"] = -1 if o == "last" else ORDINALS.get(o) or int(re.match(r"\d+", o).group())
+    if not m["ord"] and not m["v"]:
+        pos = {"top": 1, "bottom": -1}.get(out.get("kind", "").lower())  # "the top result" is a place, not a kind
+        if pos:
+            del out["kind"]
+        out["ordinal"] = pos or 0
     if m["v"]:
         out["where"] = m["v"].lower() + ("-" + m["h"].lower() if m["h"] else "")
     if m["app"]:

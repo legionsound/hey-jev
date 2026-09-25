@@ -338,19 +338,30 @@ def update_inspect_hud(win, view):
             sub.setStringValue_(hud_text(view))
 
 
-# What "Show what Jev sees" says when it can't see everything. Accessibility and Screen Recording are granted
-# separately, so each names its own switch; a switch already shown on can belong to an older unsigned build.
+# What "Show what Jev sees" says when a read comes up short. Accessibility and Screen Recording are separate
+# permissions, each with its own pane; only what this read observed is reported.
 INSPECT_STATUS = {
-    "ax_missing": ("ax", "Accessibility is off for Hey Jev, so it can't see buttons or fields.\n\nTurn on Hey Jev in "
-                   "Privacy & Security → Accessibility. Already on? Select Hey Jev, click −, add it again."),
-    "screen_missing": ("screen", "Screen Recording is off for Hey Jev, so it can't read text on screen. Buttons and "
-                       "fields still work.\n\nTurn on Hey Jev in Privacy & Security → Screen & System Audio "
-                       "Recording, then quit and reopen Hey Jev."),
-    "screen_restart": ("screen", "Screen Recording is still off for this run of Hey Jev. Buttons and fields still "
-                       "work.\n\nJust turned it on? Quit and reopen Hey Jev: macOS applies it after a restart. Already "
-                       "on before? Select Hey Jev, click −, add it again, then quit and reopen."),
+    "ax_missing": ("ax", "Accessibility isn't allowed for Hey Jev, so it can't see buttons or fields.\n\nTurn on "
+                   "Hey Jev in Privacy & Security → Accessibility, then press Recheck."),
+    "screen_missing": ("screen", "Screen Recording isn't allowed for Hey Jev, so it can't read text on screen. "
+                       "Buttons and fields still work.\n\nTurn on Hey Jev in Privacy & Security → Screen & System "
+                       "Audio Recording, then press Recheck."),
+    "ocr_failed": (None, "Hey Jev sees buttons and fields but couldn't read the text on screen this time "
+                   "({reason}). It keeps trying."),
     "failed": (None, "Hey Jev couldn't read this window ({reason}). It keeps trying."),
 }
+RELAUNCH_HINT = ("Still off after you turned it on? macOS may apply Screen Recording only after Hey Jev restarts: "
+                 "quit and reopen Hey Jev, then check again.")
+
+
+def present(win):
+    """Put a window on screen without taking focus. Tests replace this so no window appears."""
+    win.orderFrontRegardless()
+
+
+def begin_sheet(parent, sheet):
+    """Attach a sheet. Tests replace this so no sheet appears."""
+    parent.beginSheet_completionHandler_(sheet, None)
 
 
 def status_panel(target):
@@ -368,22 +379,28 @@ def status_panel(target):
     text.setPreferredMaxLayoutWidth_(348)
     text.setIdentifier_("status")
     content.addSubview_(text)
-    for x, title, action, ident in ((196, "Open Settings", "openPermissionSettings:", "open"),
-                                    (286, "Recheck", "recheckInspect:", "recheck")):
+    for x, w, title, action, ident in ((16, 120, "I turned it on", "permissionEnabled:", "enabled"),
+                                       (190, 96, "Open Settings", "openPermissionSettings:", "open"),
+                                       (290, 74, "Recheck", "recheckInspect:", "recheck")):
         b = NSButton.buttonWithTitle_target_action_(title, target, action)
-        b.setFrame_(NSMakeRect(x, 12, 86 if ident == "recheck" else 90, 28))
+        b.setFrame_(NSMakeRect(x, 12, w, 28))
         b.setIdentifier_(ident)
         content.addSubview_(b)
     return panel
 
 
-def update_status_panel(panel, status, reason=""):
+def update_status_panel(panel, status, reason="", said_enabled=False):
+    """said_enabled: the user pressed "I turned it on" while Screen Recording still reads off. Only then is
+    restarting suggested; it's a possibility, not something Hey Jev can detect."""
     pane, message = INSPECT_STATUS[status]
+    relaunch = status == "screen_missing" and said_enabled
     for sub in panel.contentView().subviews():
         if sub.identifier() == "status":
-            sub.setStringValue_(message.format(reason=reason or "unknown"))
+            sub.setStringValue_(RELAUNCH_HINT if relaunch else message.format(reason=reason or "unknown"))
         elif sub.identifier() == "open":
             sub.setHidden_(pane is None)
+        elif sub.identifier() == "enabled":
+            sub.setHidden_(status != "screen_missing" or relaunch)
 
 
 class AppDelegate(NSObject):
@@ -1450,7 +1467,7 @@ class AppDelegate(NSObject):
         for view in (self.teach_add, self.teach_close):
             content.addSubview_(view)
         self.teach_sheet = panel
-        self.settings_sheet.beginSheet_completionHandler_(panel, None)
+        begin_sheet(self.settings_sheet, panel)
 
     @objc.python_method
     def _teach_next(self):
@@ -1777,6 +1794,12 @@ class AppDelegate(NSObject):
             import screen
             AppKit.NSWorkspace.sharedWorkspace().openURL_(AppKit.NSURL.URLWithString_(screen.SETTINGS_PANES[pane]))
 
+    def permissionEnabled_(self, _sender):
+        self.said_enabled = True
+        if getattr(self, "status_panel", None) is not None:
+            update_status_panel(self.status_panel, self.inspect_status, "", True)
+        self.recheckInspect_(None)
+
     def recheckInspect_(self, _sender):
         ins = getattr(self, "inspector", None)
         if ins is not None and ins.running:
@@ -1787,6 +1810,8 @@ class AppDelegate(NSObject):
     def show_status(self, view):
         """The panel stays up while inspection is on and something is missing; it goes when all is well or off."""
         status = (view or {}).get("status", "ok")
+        if status != getattr(self, "inspect_status", None):
+            self.said_enabled = False  # a new state starts from what's observed
         self.inspect_status = status
         if status not in INSPECT_STATUS:
             if getattr(self, "status_panel", None) is not None:
@@ -1798,8 +1823,8 @@ class AppDelegate(NSObject):
             self.status_panel.setFrameTopLeftPoint_(NSMakePoint(
                 screen_frame.origin.x + (screen_frame.size.width - 380) / 2,
                 screen_frame.origin.y + screen_frame.size.height - 20))
-        update_status_panel(self.status_panel, status, view.get("reason", ""))
-        self.status_panel.orderFrontRegardless()
+        update_status_panel(self.status_panel, status, view.get("reason", ""), getattr(self, "said_enabled", False))
+        present(self.status_panel)
 
     def showInspect_(self, view):
         """Paint on the main thread, only if this view's generation is still current: a callback queued before the

@@ -47,15 +47,12 @@ class Numbering:
         return snap
 
 
-def status_of(exc=None, snap=None, read_started=0.0):
-    """What the status panel says: ok | ax_missing | screen_missing | screen_restart | failed. Screen Recording asked
-    for before this read and still off means this run can't see it: macOS applies that grant only after a relaunch."""
+def status_of(exc=None, snap=None):
+    """What the status panel says, from what this read observed: ok | ax_missing | screen_missing | ocr_failed |
+    failed. Controls still show with screen_missing and ocr_failed; only the on-screen text is missing."""
     if exc is not None:
         return "ax_missing" if str(exc) == "accessibility_permission" else "failed"
-    if snap.ocr == "no_permission":
-        asked = screen._asked.get("screen")
-        return "screen_missing" if asked is None or asked >= read_started else "screen_restart"
-    return "ok"
+    return {"no_permission": "screen_missing", "failed": "ocr_failed", "timed_out": "ocr_failed"}.get(snap.ocr, "ok")
 
 
 def evidence():
@@ -143,7 +140,7 @@ class Inspector:
             self.numbering.apply(snap)
             version = screen.remember(snap)
         return {"gen": gen, "version": version, "app": snap.app, "at": observed_at,
-                "status": status_of(snap=snap, read_started=t0),
+                "status": status_of(snap=snap), "reason": snap.ocr,
                 "ms": round((time.monotonic() - t0) * 1000), "complete": snap.walk_complete, "truncated": snap.truncated,
                 "items": [{**i.public(), "shared": id(i) in shared_ids,
                            "field": i.role in task.FIELD_ROLES or i.secure} for i in snap.items]}

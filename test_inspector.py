@@ -303,14 +303,10 @@ class PermissionStatusTests(unittest.TestCase):
         s = snap([item("Save")])
         self.assertEqual(inspector.status_of(screen.Unavailable("accessibility_permission")), "ax_missing")
         self.assertEqual(inspector.status_of(screen.Unavailable("no frontmost app")), "failed")
-        self.assertEqual(inspector.status_of(snap=s), "ok")
-        s.ocr = "no_permission"
-        with patch.object(screen, "_asked", {}):
-            self.assertEqual(inspector.status_of(snap=s, read_started=5.0), "screen_missing")
-        with patch.object(screen, "_asked", {"screen": 6.0}):  # asked during this read: macOS prompt just shown
-            self.assertEqual(inspector.status_of(snap=s, read_started=5.0), "screen_missing")
-        with patch.object(screen, "_asked", {"screen": 1.0}):  # asked earlier this run, still off: needs relaunch
-            self.assertEqual(inspector.status_of(snap=s, read_started=5.0), "screen_restart")
+        for ocr, status in (("ok", "ok"), ("off", "ok"), ("no_permission", "screen_missing"),
+                            ("failed", "ocr_failed"), ("timed_out", "ocr_failed")):
+            s.ocr = ocr
+            self.assertEqual(inspector.status_of(snap=s), status, ocr)
 
     def test_a_failed_read_keeps_its_reason_and_status(self):
         def no_ax(deadline):
@@ -321,11 +317,14 @@ class PermissionStatusTests(unittest.TestCase):
     def test_without_screen_recording_the_controls_still_show(self):
         s = snap([item("Save")])
         s.ocr = "no_permission"
-        with patch.object(screen, "remember", lambda sn: 1), patch.object(screen, "_asked", {"screen": 0.0}):
-            ins = inspector.Inspector(lambda v: None, observe=lambda d: s)
-            ins.gen = 1
-            view = ins.refresh(1)
-        self.assertEqual((view["status"], [i["label"] for i in view["items"]]), ("screen_restart", ["Save"]))
+        ins = inspector.Inspector(lambda v: None, observe=lambda d: s)
+        ins.gen = 1
+        for ocr, status in (("no_permission", "screen_missing"), ("timed_out", "ocr_failed")):
+            s.ocr = ocr
+            with patch.object(screen, "remember", lambda sn: 1):
+                view = ins.refresh(1)
+            self.assertEqual((view["status"], view["reason"], [i["label"] for i in view["items"]]),
+                             (status, ocr, ["Save"]))  # the controls stay
 
     def test_recheck_reads_now_not_at_the_next_tick(self):
         reads = []
@@ -345,27 +344,34 @@ class PermissionStatusTests(unittest.TestCase):
         d = assistant_ui.AppDelegate.alloc().init()
         d.inspector = inspector.Inspector(lambda v: None)
         d.inspector.current = lambda gen: True
+        d.inspector.gen = 0  # not running: Recheck is a no-op here
+        presented = []
 
         def shown():
             subs = {v.identifier(): v for v in d.status_panel.contentView().subviews()}
-            return d.status_panel.isVisible(), subs["status"].stringValue(), subs["open"].isHidden()
-        d.showInspect_({"gen": 1, "status": "ax_missing", "reason": "accessibility_permission", "items": []})
-        visible, text, open_hidden = shown()
-        self.assertTrue(visible and "Accessibility" in text and not open_hidden)
-        d.showInspect_({"gen": 1, "status": "screen_restart", "app": "Pad", "at": time.time(), "ms": 1,
-                        "complete": True, "items": [{"n": 1, "source": "ax", "role": "AXButton", "label": "Save",
-                                                     "frame": [10, 10, 80, 30], "pressable": True, "shared": True,
-                                                     "field": False}]})
-        visible, text, _ = shown()
-        self.assertTrue(visible and "Screen Recording" in text and "quit and reopen" in text)
-        self.assertIsNotNone(d.inspect_window)  # the controls still paint underneath
-        d.showInspect_({"gen": 1, "status": "failed", "reason": "no frontmost app", "items": []})
-        visible, text, open_hidden = shown()
-        self.assertTrue(visible and "no frontmost app" in text and open_hidden)  # no switch to open for this
+            return subs["status"].stringValue(), subs["open"].isHidden(), subs["enabled"].isHidden()
+        with patch.object(assistant_ui, "present", presented.append):  # nothing appears on screen
+            d.showInspect_({"gen": 1, "status": "ax_missing", "reason": "accessibility_permission", "items": []})
+            text, open_hidden, enabled_hidden = shown()
+            self.assertTrue("Accessibility" in text and not open_hidden and enabled_hidden)
+            d.showInspect_({"gen": 1, "status": "screen_missing", "reason": "no_permission", "items": []})
+            text, open_hidden, enabled_hidden = shown()
+            self.assertTrue("Screen Recording" in text and not open_hidden and not enabled_hidden)
+            self.assertNotIn("reopen", text)  # restarting is only suggested once the user says it's on
+            d.permissionEnabled_(None)
+            d.showInspect_({"gen": 1, "status": "screen_missing", "reason": "no_permission", "items": []})
+            text, _, enabled_hidden = shown()
+            self.assertTrue("quit and reopen" in text and enabled_hidden)
+            d.showInspect_({"gen": 1, "status": "ocr_failed", "reason": "timed_out", "items": []})
+            text, open_hidden, _ = shown()
+            self.assertTrue("timed_out" in text and open_hidden)  # no switch to open for this
+            d.showInspect_({"gen": 1, "status": "screen_missing", "reason": "no_permission", "items": []})
+            self.assertNotIn("reopen", shown()[0])  # a new state starts from what's observed
+            d.showInspect_({"gen": 1, "status": "failed", "reason": "no frontmost app", "items": []})
+            self.assertIn("no frontmost app", shown()[0])
+        self.assertEqual(len(presented), 6)
         d.showInspect_({"gen": 1, "status": "ok", "items": []})
-        self.assertFalse(d.status_panel.isVisible())
-        d.showInspect_({"gen": 1, "status": "ax_missing", "items": []})
-        d.showInspect_({})  # inspection switched off
+        self.assertEqual(d.inspect_status, "ok")
         self.assertFalse(d.status_panel.isVisible())
 
     def test_every_message_fits_the_panel(self):
@@ -375,8 +381,9 @@ class PermissionStatusTests(unittest.TestCase):
         panel = assistant_ui.status_panel(None)
         text = next(v for v in panel.contentView().subviews() if v.identifier() == "status")
         for status in assistant_ui.INSPECT_STATUS:
-            assistant_ui.update_status_panel(panel, status, "no frontmost app")
-            self.assertLessEqual(text.fittingSize().height, text.frame().size.height, status)
+            for said in (False, True):
+                assistant_ui.update_status_panel(panel, status, "no frontmost app", said)
+                self.assertLessEqual(text.fittingSize().height, text.frame().size.height, status)
 
     def test_evidence_reports_both_permissions_and_the_signature(self):
         ev = inspector.evidence()

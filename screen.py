@@ -290,7 +290,7 @@ def _actions(element):
 
 
 
-_asked = {}  # permission -> monotonic time its macOS prompt was shown, this run
+_asked = set()  # permissions whose macOS prompt was already shown this run
 
 # Where each permission lives in System Settings. Kept separate: they're granted separately.
 SETTINGS_PANES = {"ax": "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
@@ -304,7 +304,7 @@ def trusted():
     if AS.AXIsProcessTrusted():
         return True
     if "ax" not in _asked:
-        _asked["ax"] = time.monotonic()
+        _asked.add("ax")
         AS.AXIsProcessTrustedWithOptions({AS.kAXTrustedCheckOptionPrompt: True})
     return False
 
@@ -421,7 +421,7 @@ def read_text(pid, frame, deadline):
     import Quartz
     if not Quartz.CGPreflightScreenCaptureAccess():
         if "screen" not in _asked:
-            _asked["screen"] = time.monotonic()
+            _asked.add("screen")
             Quartz.CGRequestScreenCaptureAccess()  # macOS's own prompt, once per run; text reading waits for it
         raise Unavailable("no_permission")
     wid = _cg_window_id(pid, frame)

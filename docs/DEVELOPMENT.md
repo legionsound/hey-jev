@@ -27,10 +27,10 @@ Alias mode: the bundle runs the code straight from this folder, so
 pulling new code + restarting the app is enough. Rebuild only if the
 folder moves.
 
-Optional: keep permissions across rebuilds. The build is signed ad hoc,
-so macOS ties Accessibility and Screen Recording to that exact build and
-a rebuild needs them granted again. Signing with your own certificate
-makes the grant stick (list yours with
+Optional: sign with your own certificate. The default build is signed
+ad hoc, so its code identity can change on every rebuild. If macOS
+permissions seem to stop matching a rebuilt app, signing with a stable
+identity is one thing to try (untested as a fix; list yours with
 `security find-identity -v -p codesigning`):
 
 ```bash

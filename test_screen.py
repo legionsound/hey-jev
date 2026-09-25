@@ -525,7 +525,7 @@ class PermissionTests(unittest.TestCase):
 
             def AXIsProcessTrustedWithOptions(self, opts):
                 prompts.append(opts)
-        with patch.object(screen, "_AS", lambda: NoAX()), patch.object(screen, "_asked", {}):
+        with patch.object(screen, "_AS", lambda: NoAX()), patch.object(screen, "_asked", set()):
             self.assertFalse(screen.trusted())
             self.assertFalse(screen.trusted())
         self.assertEqual(prompts, [{"prompt": True}])

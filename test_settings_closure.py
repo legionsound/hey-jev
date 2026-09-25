@@ -34,7 +34,8 @@ class Base(unittest.TestCase):
                         patch.object(assistant_ui, "app_folders", lambda: []),
                         patch.object(assistant_ui, "wake_settings", lambda: ("Hey Jev", [])),
                         patch.object(voice_output, "cues", lambda provider="fish": self.saved_cues),
-                        patch.object(voice_output, "set_cues", MagicMock())]
+                        patch.object(voice_output, "set_cues", MagicMock()),
+                        patch.object(assistant_ui, "begin_sheet", lambda parent, sheet: None)]  # no sheet on screen
         self.saved_cues = {"mode": "all", "on": list(voice_output.CUES["fish"])}
         for p in self.patches:
             p.start()

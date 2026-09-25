@@ -30,6 +30,14 @@
 - Optional Screen Recording lets Vision OCR read on-screen text that
   Accessibility does not expose. It never makes OCR-only text pressable:
   OCR-only items stay `not_a_control`.
+- Switch already on but Hey Jev still says it's off: the switch can
+  belong to an older build (unsigned builds change identity on every
+  rebuild). Select Hey Jev, click −, add it again. Screen Recording
+  also needs Hey Jev quit and reopened. "Show what Jev sees" shows
+  which one is missing, with Open Settings and Recheck; each toggle-on
+  and Recheck logs both permissions and the code signature to
+  `requests.jsonl` (stage `permissions`). See DEVELOPMENT.md to sign
+  local builds so grants survive rebuilds.
 - "Click 4" refused with `screen_changed`: the window changed while you
   spoke. Re-open "Show what Jev sees" and say the number again.
 - Clicks over Hey Jev's own windows, the overlay, or menus are refused

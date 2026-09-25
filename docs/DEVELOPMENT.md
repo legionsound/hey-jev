@@ -27,6 +27,16 @@ Alias mode: the bundle runs the code straight from this folder, so
 pulling new code + restarting the app is enough. Rebuild only if the
 folder moves.
 
+Optional: keep permissions across rebuilds. The build is signed ad hoc,
+so macOS ties Accessibility and Screen Recording to that exact build and
+a rebuild needs them granted again. Signing with your own certificate
+makes the grant stick (list yours with
+`security find-identity -v -p codesigning`):
+
+```bash
+codesign --force --deep --sign "Apple Development: you@example.com (TEAMID)" "dist/Hey Jev.app"
+```
+
 `jevctl` talks to the running app over the bridge socket:
 
 ```bash

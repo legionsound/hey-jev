@@ -177,6 +177,23 @@ class PageOnlyTests(unittest.TestCase):
             got = actions.resolve_screen_pick({"noun": "tab", "ordinal": 1})
         self.assertEqual((got[0], got[1]["label"]), ("target", "Inbox"))
 
+    def test_qualified_chrome_picks_still_count_the_whole_window(self):
+        # Astra: "click the first YouTube tab" needs Jev for "YouTube" but is still the browser's tab strip
+        for noun, role in (("tab", "AXRadioButton"), ("button", "AXButton"), ("item", "AXButton")):
+            top = NS(source="ax", pressable=True, enabled=True, from_value=False, role=role, label="YouTube",
+                     frame=(10, 10, 150, 30), token="t", secure=False)
+            inpage = NS(source="ax", pressable=True, enabled=True, from_value=False, role=role, label="YouTube stats",
+                        frame=(10, 200, 100, 30), token="p", secure=False)
+            snap_ = page([top, inpage])
+            snap_.window_ref = object()
+            with patch.object(actions.screen, "observe", lambda **k: snap_), \
+                    patch.object(actions.screen, "page_frame", lambda win, d: (0, 80, 500, 420)), \
+                    patch.object(actions, "CLASSIFY_ITEMS", lambda n, labels: [(True, .99)] * len(labels)), \
+                    patch.object(actions, "describe_cards", lambda pool, s, f: [f"“{i.label}”" for i in pool]), \
+                    patch.object(actions, "_live", lambda i: True):
+                got = actions.resolve_screen_pick({"noun": noun, "kind": "YouTube", "ordinal": 1})
+            self.assertEqual((got[0], got[1]["label"]), ("target", "YouTube"), noun)
+
 
 class PageKeyDeadlineTests(unittest.TestCase):
     def run_key(self, focus_delay, budget):

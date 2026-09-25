@@ -1167,7 +1167,7 @@ def resolve_screen_pick(args):
     pool = [i for i in snap.items if _live(i) and not i.from_value]
     bare = noun
     roles = ROLE_NOUNS.get(noun, "jev") if not args.get("kind") else "jev"  # a qualified noun is Jev's to judge
-    if roles == "jev" or noun in ("link", "row"):  # content: "the first video" counts the page, never the
+    if ROLE_NOUNS.get(noun, "jev") == "jev" or noun in ("link", "row"):  # the bare noun decides; content: "the first video" counts the page, never the
         try:  # browser's tabs named after videos; "the first tab" or "button" still means the whole window
             page = screen.page_frame(snap.window_ref, deadline) if getattr(snap, "window_ref", None) is not None else None
         except (screen.TimedOut, screen.Wedged):

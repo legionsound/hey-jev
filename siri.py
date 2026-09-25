@@ -110,6 +110,18 @@ def choose_control(spoken, labels):
     return (ids.index(pick) if pick in ids else None), conf
 
 
+def task_jev(state, questions):
+    """One Jev decision for a multi-step task. -> {name: (choice, confidence)}"""
+    from engine import current_rid
+    try:
+        ans, ms, cost = jev(state, questions)
+    except Exception as exc:
+        diagnostics.record(current_rid(), "task_jev", "error", error=repr(exc))
+        raise
+    print(f"  jev task: {ms}ms ${cost:.6f} " + ", ".join(f"{k}={v} {c:.2f}" for k, (v, c) in ans.items()))
+    return ans
+
+
 def classify(clause):
     from engine import current_rid
     try:
@@ -215,6 +227,17 @@ def line_for(result):
     state, steps = result["state"], result.get("steps", [])
     if state != "needs_clarification":
         misses = 0
+    if steps and steps[0]["action"] == "task.run":
+        why = steps[0].get("detail") or result.get("detail") or ""
+        n = sum(1 for s in steps[1:] if s["state"] == "completed")
+        did = f" after {n} step{'s' if n != 1 else ''}" if n else ""
+        if state == "completed":
+            return f"[cheerful] Done{did}. I checked it's on screen."
+        if state == "declined":
+            return say_line("declined")
+        if state == "cancelled":
+            return f"Stopped{did}."
+        return f"[clear throat] I stopped{did}: {why}."
     if state == "answered":
         return result.get("say") or say_line(result.get("reply") or "info")
     if state == "completed":
@@ -428,6 +451,7 @@ def make_engine(notify=None, ask=None, show=None):
                  threshold=lambda: float("inf") if tiebreak_threshold() >= 100 else tiebreak_threshold() / 100,
                  answer=answer if ANSWER_PROVIDER == "openrouter" else None, on_event=on_event)
     eng.spoke_first = spoke_first
+    eng.task_jev = task_jev
     eng.hold = contextlib.nullcontext  # the voice loop sets the floor's hold once the microphone exists
     return eng
 

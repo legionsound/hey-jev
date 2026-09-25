@@ -398,6 +398,27 @@ def _numbers_one(items):
     return win
 
 
+DRAFT_H = 132  # the confirmation's box for written text
+
+
+def draft_box(text, frame):
+    """Read-only, selectable, scrolling: every character of a written draft can be read before it's typed."""
+    scroll = AppKit.NSScrollView.alloc().initWithFrame_(frame)
+    scroll.setHasVerticalScroller_(True)
+    scroll.setBorderType_(AppKit.NSBezelBorder)
+    size = scroll.contentSize()
+    view = AppKit.NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, size.width, size.height))
+    view.setEditable_(False)
+    view.setSelectable_(True)
+    view.setFont_(NSFont.systemFontOfSize_(13))
+    view.setTextContainerInset_((4, 4))
+    view.textContainer().setWidthTracksTextView_(True)
+    view.setVerticallyResizable_(True)
+    view.setString_(text)
+    scroll.setDocumentView_(view)
+    return scroll
+
+
 CURSOR_TRAVEL = 0.35  # seconds the Jev cursor takes to reach a target
 CURSOR_LINGER = 1.8  # seconds it stays after its last move, then fades
 CURSOR_SIZE = 34
@@ -2363,8 +2384,12 @@ class AppDelegate(NSObject):
         import screen
         screen.set_handoff(self.confirm_prior.processIdentifier() if self.confirm_prior is not None else None)
         self.confirm_token = pending["token"]
-        view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 320, 118))
-        view.addSubview_(label(pending["text"] + "?", NSMakeRect(16, 72, 290, 30), 16))
+        draft = pending.get("draft")
+        extra = DRAFT_H + 8 if draft else 0  # written text gets its own scrolling box, shown whole
+        view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 320, 118 + extra))
+        view.addSubview_(label(pending["text"] + "?", NSMakeRect(16, 72 + extra, 290, 30), 16))
+        if draft:
+            view.addSubview_(draft_box(draft, NSMakeRect(16, 76, 290, DRAFT_H)))
         who = {"cli": "Typed command (jevctl)", "claude": "Claude Code asks", "codex": "Codex asks"}.get(
             pending.get("source"), "Voice command")
         view.addSubview_(label(who + " · cancels itself in 60 s", NSMakeRect(16, 50, 290, 20), 11,

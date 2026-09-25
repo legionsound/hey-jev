@@ -74,6 +74,37 @@ class ConsequenceTests(unittest.TestCase):
         v = self.run_press("Archive", policy={"risky": "auto"})  # Johnny turned risky asks off: honoured
         self.assertEqual((self.calls, v["state"], len(fake.presses)), ([], "completed", 1))
 
+    def test_a_slow_check_is_bounded_and_asks(self):
+        import time
+        fake = FakeScreen(self, [item(1, "Archive")])
+        slow = lambda *a: (time.sleep(2), 0.0)[1]
+        with patch.object(engine, "CONSEQUENCE_TIMEOUT", 0.2):
+            step = {"clause": "click Archive", "action": "screen.press", "args": {"label": "Archive"}}
+            with patch.object(planner, "plan", lambda *a, **k: ("steps", [step])):
+                eng = Engine(lambda _: {}, policy=lambda: {**actions.DEFAULT_POLICY, "click": "auto"})
+                eng.consequence = slow
+                t = time.monotonic()
+                v = eng.wait(eng.submit("click Archive", "cli")["id"], 10)
+        self.assertLess(time.monotonic() - t, 1.0)  # not the 2 s the call takes
+        self.assertEqual((v["state"], fake.presses), ("declined", []))
+        self.assertIn("timeout", v["steps"][0]["facts"]["consequence"]["error"])
+
+    def test_stop_during_the_check_ends_the_step_at_once(self):
+        import threading, time
+        fake = FakeScreen(self, [item(1, "Archive")])
+        started = threading.Event()
+        step = {"clause": "click Archive", "action": "screen.press", "args": {"label": "Archive"}}
+        with patch.object(planner, "plan", lambda *a, **k: ("steps", [step])):
+            eng = Engine(lambda _: {}, policy=lambda: {**actions.DEFAULT_POLICY, "click": "auto"})
+            eng.consequence = lambda *a: (started.set(), time.sleep(2), 0.0)[2]
+            rid = eng.submit("click Archive", "cli")["id"]
+            started.wait(5)
+            t = time.monotonic()
+            eng.cancel(rid)
+            v = eng.wait(rid, 10)
+        self.assertLess(time.monotonic() - t, 0.5)
+        self.assertEqual((v["steps"][0]["state"], fake.presses), ("skipped", []))
+
     def test_only_presses_and_return_get_the_check(self):
         self.assertEqual(engine.CONSEQUENCE_ACTIONS, ("screen.press", "screen.pick", "screen.submit"))
 
@@ -108,6 +139,21 @@ class TaskConsequenceTests(unittest.TestCase):
         self.assertEqual(len(self.asked), 1)  # task start was automatic; the Merge click asked
 
 
+    def test_app_switch_during_the_cursor_glide_stops_the_task_press(self):
+        b = self.titem(1, "Next")
+        fake = self.Screen(self, [self.tsnap([b]), self.tsnap([b])])
+        answers = iter([{"kind": ("press_item", 0.9), "item": ("i0", 0.9)}, {"kind": ("done", 0.9)}])
+        plan = [{"clause": "take over: go on", "action": "task.run", "args": {"goal": "go on"}}]
+        with patch.object(planner, "plan", lambda *a, **k: ("steps", plan)):
+            eng = Engine(lambda _: {}, policy=lambda: {**actions.DEFAULT_POLICY, "task": "auto"})
+            eng.task_jev = lambda state, q: next(answers)
+            eng.consequence = lambda *a: 0.0
+            eng.point = lambda target, wait: setattr(fake, "front", 999)  # another app came forward mid-glide
+            v = eng.wait(eng.submit("take over: go on", "cli")["id"], 20)
+        self.assertEqual(fake.presses, [])
+        self.assertNotEqual(v["steps"][-1]["state"], "completed")
+
+
 class ComposeWordsTests(unittest.TestCase):
     def test_writing_openings(self):
         cases = {"write a reply saying I'll be late": {"compose": "a reply saying I'll be late"},
@@ -120,7 +166,8 @@ class ComposeWordsTests(unittest.TestCase):
             self.assertEqual(planner.direct(said), ("screen.type", args), said)
 
     def test_literal_typing_and_other_commands_are_untouched(self):
-        for said in ("write hello", 'write "a note" into the Name field', "type a quick note", "reply all",
+        for said in ("write a reply saying hi into", "write a reply saying hi into the", "draft a note in",
+                     "write hello", 'write "a note" into the Name field', "type a quick note", "reply all",
                      "click reply", "draft it", "answer with yes"):
             self.assertIsNone(planner.compose_args(said), said)
         self.assertEqual(planner.type_args("write hello"), {"text": "hello"})
@@ -165,9 +212,13 @@ class ComposeTests(unittest.TestCase):
         self.assertEqual((context["app"], context["field"]), ("Pad", "the selected field"))
 
     def test_the_confirmation_shows_the_draft_and_exactly_that_draft_is_typed(self):
-        v, asked = self.say("write a reply saying I'll be late", policy=dict(actions.DEFAULT_POLICY), decide=True)
+        self.reply = "word " * 399 + "END"  # near the 2,000 limit: all of it must be reviewable
+        pend = []
+        eng = Engine(lambda _: {}, policy=lambda: dict(actions.DEFAULT_POLICY),
+                     ask=lambda p: p and (pend.append(p), eng.decide(p["token"], True)))
+        v = eng.wait(eng.submit("write a reply saying I'll be late", "cli")["id"], 10)
         self.assertEqual(len(self.wrote), 1)  # the re-check after OK reuses the draft: never a second, unseen one
-        self.assertIn(self.reply, asked[0])
+        self.assertEqual((pend[0]["draft"], pend[0]["text"]), (self.reply, "Type this into the selected field in Pad"))
         self.assertEqual((v["state"], self.inserts), ("completed", [self.reply]))
 
     def test_no_writer_or_a_failing_one_stops_and_types_nothing(self):
@@ -211,6 +262,15 @@ class ComposeTests(unittest.TestCase):
         self.facts["secure"] = True
         v, _ = self.say("write a reply saying I'll be late")
         self.assertEqual((v["steps"][0]["detail"], self.wrote, self.inserts[1:]), ("password_field", [], []))
+
+
+class DraftBoxTests(unittest.TestCase):
+    def test_the_whole_draft_is_in_the_box(self):
+        import assistant_ui
+        text = "line " * 399 + "END"
+        box = assistant_ui.draft_box(text, assistant_ui.NSMakeRect(0, 0, 290, assistant_ui.DRAFT_H))
+        self.assertEqual(box.documentView().string(), text)
+        self.assertFalse(box.documentView().isEditable())
 
 
 class CursorTests(unittest.TestCase):

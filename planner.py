@@ -398,6 +398,8 @@ def compose_args(clause):
         rest, field = rest[:f.start()], (f["f1"] or f["f2"]).strip(" .,!?")
         if field.lower() in ("", "the", "a", "an"):
             return None
+    elif re.search(r"\s(?:into|in)(?:\s+the)?[\s.!?]*$", rest, re.I):
+        return None  # "... into": an unfinished field phrase, as for typing: never guess the field
     rest = rest.strip(" .")
     if len(rest.split()) < 2:
         return None  # "draft it": nothing to write about

@@ -893,18 +893,18 @@ def resolve_screen_type(args):
     if facts["window"] != snap.window_token:
         return ("none", "field is in another window")
     if writing:
-        text = _compose(args["compose"], snap, label)
-        if not text.startswith("ok:"):
+        ok, text = _compose(args["compose"], snap, label)
+        if not ok:
             return ("none", text)
-        text = args["text"] = text[3:]
+        args["text"] = text
     return ("target", {**_field_target(snap, ref, facts, label), "text": text})
 
 
 def _compose(request, snap, label):
-    """"ok:<text>" or a plain reason. The writer sees the request, the app, the field's name and the names on screen
+    """(True, text) or (False, plain reason). The writer sees the request, the app, the field's name and the names on screen
     (shown text, never what's typed in a field); its text is checked like typed text before it can reach the field."""
     if COMPOSE is None:
-        return "writing text isn't available in this copy of Hey Jev"
+        return False, "writing text isn't available in this copy of Hey Jev"
     seen, used = [], 0
     for i in snap.items:
         if i.role in EDITABLE_ROLES or i.secure or not i.label:  # what's typed in fields stays out
@@ -918,13 +918,13 @@ def _compose(request, snap, label):
         text = COMPOSE(request, context, min(COMPOSE_TIMEOUT, RESOLVE_UNTIL - time.monotonic())
                        if RESOLVE_UNTIL is not None else COMPOSE_TIMEOUT)
     except Exception as exc:
-        return str(exc) or "couldn't write that"
+        return False, str(exc) or "couldn't write that"
     if not isinstance(text, str) or not text.strip():
-        return "the writer came back empty"
+        return False, "the writer came back empty"
     text = text.strip()
     if len(text) > 2000:
-        return "what it wrote was too long to type"
-    return "ok:" + text
+        return False, "what it wrote was too long to type"
+    return True, text
 
 
 def run_screen_type(t, deadline):
@@ -1564,6 +1564,7 @@ def describe(action, target):
             "timer.check": "Read out the time left",
             "screen.list": "Read what's on screen", "screen.press": "Click “{label}” in {app}",
             "screen.type": "Type “{text}” into {field} in {app}",
+            "screen.type.draft": "Type this into {field} in {app}",
             "screen.submit": "Press Return in the selected field in {app}",
             "task.run": "Work on: {goal} (up to {steps} steps)",
             "screen.pick": "Click “{label}” in {app}", "screen.scroll": "Scroll {direction} in {app}", "pointer.click": "Click where the pointer is, in {app}"}.get(action, action.replace(".", ": ").replace("_", " "))

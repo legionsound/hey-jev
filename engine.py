@@ -20,6 +20,7 @@ ANSWER_WINDOW = 45.0  # seconds a "which one?" stays answerable
 PENDING_WAIT = 10.0  # how long a new dispatch waits for an earlier, still-outstanding effect before refusing
 CONSEQUENCE_ACTIONS = ("screen.press", "screen.pick", "screen.submit")  # presses whose label list can miss an effect
 CONSEQUENCE_GATE = 0.5  # provisional, uncalibrated (jev skill). It can only add a question, never remove one
+CONSEQUENCE_TIMEOUT = 8.0  # longest the engine waits for that check; a later answer is ignored and the step asks
 POINT_WAIT = 0.6  # longest a dispatch waits for the Jev cursor to reach its target
 _local = threading.local()
 
@@ -597,10 +598,14 @@ class Engine:
         risky = target.get("confirm") and policy.get("risky", "ask") == "ask"
         asks = forced or risky or (policy.get(action["effect"], "ask") == "ask" and not covered)
         if not asks and act in CONSEQUENCE_ACTIONS and policy.get("risky", "ask") == "ask" and self.consequence:
-            asks = risky = self._consequential(rec, step, target)
+            got = self._consequential(rec, step, target, until)
+            if got == "cancelled":
+                self._set(step, state="skipped")
+                return "cancelled"
+            asks = risky = got
         if asks:
             t = time.monotonic()
-            verdict = self._confirm(rec, step, target, until)
+            verdict = self._confirm(rec, step, target, until, draft=act == "screen.type" and "compose" in args)
             diagnostics.record(rec["id"], "confirm", verdict, (time.monotonic() - t) * 1000, step=step["index"],
                                prompt="<screen control>" if step["action"].startswith("screen.")
                                else describe(step["action"], target), forced=forced)
@@ -626,6 +631,13 @@ class Engine:
         if not settled:  # an earlier step's effect is still out: nothing overtakes it
             self._set(step, state="failed", detail="an earlier action hasn't finished")
             return "failed"
+        if self.point and screen_step and isinstance(target.get("frame"), list):
+            try:  # feedback only: a cursor that can't draw never holds up or changes the action
+                self.point(target, min(POINT_WAIT, max(0.0, until - time.monotonic())) if until else POINT_WAIT)
+            except Exception:
+                pass
+        # the time limit and the task's foreground/window/field check come after the cursor wait, so nothing that
+        # changed while it glided is acted on
         if until is not None and time.monotonic() >= until:
             self._set(step, state="failed", detail="time limit")
             return "failed"
@@ -633,11 +645,6 @@ class Engine:
         if why:
             self._set(step, state="failed", detail=why)
             return "failed"
-        if self.point and screen_step and isinstance(target.get("frame"), list):
-            try:  # feedback only: a cursor that can't draw never holds up or changes the action
-                self.point(target, min(POINT_WAIT, max(0.0, until - time.monotonic())) if until else POINT_WAIT)
-            except Exception:
-                pass
         with self.lock:  # dispatch boundary: a cancel that lands before this line stops the step, after it cannot
             if rec["cancel"]:
                 step["state"] = "skipped"
@@ -653,12 +660,20 @@ class Engine:
                            target=loggable(step["action"], target))
         return state
 
-    def _consequential(self, rec, step, target):
+    def _consequential(self, rec, step, target, until=None):
         """Jev's second look at a press no rule flagged and no setting asks about: would it send, delete, buy, share
-        or similar? True (ask first) at CONSEQUENCE_GATE, and on any failure: a failed check is never a "no"."""
+        or similar? True (ask first) at CONSEQUENCE_GATE, and on any failure or timeout: a failed check is never a
+        "no". The call is bounded by CONSEQUENCE_TIMEOUT and a task's deadline, and a stop wins: -> "cancelled"."""
         t = time.monotonic()
+        end = t + CONSEQUENCE_TIMEOUT if until is None else min(t + CONSEQUENCE_TIMEOUT, until)
         try:
-            p = self.consequence(step["clause"], step["action"], target)
+            how, p = self._ask_jev(rec, end, self.consequence, step["clause"], step["action"], target)
+            if how == "cancelled":
+                diagnostics.record(rec["id"], "consequence", "cancelled", (time.monotonic() - t) * 1000,
+                                   step=step["index"])
+                return "cancelled"
+            if how != "ok":
+                raise RuntimeError(how if p is None else f"{how}: {p}")
             if isinstance(p, bool) or not isinstance(p, (int, float)) or not 0 <= p <= 1:
                 raise ValueError(f"bad probability {p!r}")
             verdict, facts = p >= CONSEQUENCE_GATE, {"p_yes": round(float(p), 3), "gate": CONSEQUENCE_GATE}
@@ -737,7 +752,7 @@ class Engine:
         facts = {"tiebreak": {"score": round(float(score), 3), "threshold": need}}
         return (dict(choices[i]) if score >= need else None), facts
 
-    def _confirm(self, rec, step, target, until=None):
+    def _confirm(self, rec, step, target, until=None, draft=False):
         if not self.ask:
             return "no_confirmation_ui"
         with self.lock:
@@ -745,6 +760,8 @@ class Engine:
                 return "cancelled"
             p = {"token": uuid.uuid4().hex, "id": rec["id"], "step": step["index"], "decision": None,
                  "text": describe(step["action"], target), "source": rec["source"]}
+            if draft:  # written text: the pop-down shows all of it, not a line cut short
+                p.update(text=describe("screen.type.draft", target), draft=target.get("text") or "")
             self.pending = p
             step["state"] = "awaiting_confirmation"
         self.ask(dict(p))

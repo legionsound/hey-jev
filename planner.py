@@ -373,7 +373,11 @@ def pick(ans, clause, inherited_browser=None):
     if SUBMIT_WORDS.match(clause):  # Return in the selected field: exact words only, never inferred
         return (ans["target"][1], "screen.submit", {})
     if UI_WORDS.search(clause):
-        return step_for(ans, "screen", clause)
+        s = step_for(ans, "screen", clause)
+        if s is None and re.match(r"^\W*(?:please\s+)?(?:click|tap|double[\s-]click)\b", clause, re.I):
+            args = press_args(clause)  # "tap X" names its own action: Jev's screen_action score isn't needed
+            s = (ans["target"][1], "screen.press", args) if args else None
+        return s
     target, tconf = ans["target"]
     s = step_for(ans, target, clause, inherited_browser) if tconf >= 0.5 else None
     if s is None:
@@ -419,6 +423,10 @@ def plan(text, classify, can_answer=False):
         return ("clarify", "invalid_recipe")
     except Exception:
         pass
+    import task
+    goal = task.goal_of(text)
+    if goal:  # an explicit task opening: Jev drives it step by step, nothing is split or classified here
+        return ("steps", [{"clause": text, "action": "task.run", "args": {"goal": goal}}])
     clauses = split_clauses(text)
     if not clauses:
         return ("clarify", "empty")

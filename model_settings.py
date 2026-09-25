@@ -77,6 +77,15 @@ def save_apple_model(value):
     PREFS.setObject_forKey_(value, "apple_model")
 
 
+def show_cursor():
+    """The Jev cursor: a second, click-through pointer that glides to each control before Hey Jev acts. Default on."""
+    return PREFS.objectForKey_("show_cursor") is None or bool(PREFS.boolForKey_("show_cursor"))
+
+
+def save_show_cursor(on):
+    PREFS.setBool_forKey_(bool(on), "show_cursor")
+
+
 AGENTS = ("claude", "codex")  # agent sessions that can answer: Claude Code, Codex
 
 

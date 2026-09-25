@@ -836,11 +836,19 @@ def _field_target(snap, ref, facts, label):
             "element": screen.token(ref), "role": facts["role"], "label": label, "frame": facts["frame"]}
 
 
+COMPOSE = None  # set by the app: (request, context) -> text, written on this Mac. Raises with a plain reason
+COMPOSE_TIMEOUT = 25.0
+COMPOSE_CONTEXT = 3000  # characters of on-screen names given to the writer; it runs on this Mac, nothing is sent
+
+
 def resolve_screen_type(args):
     """The named field, or the focused one, as an exact element: editable, enabled, not a password field, and
-    accepting inserted text. The text itself is the user's own words, taken literally."""
+    accepting inserted text. The text is the user's own words, taken literally, or ("compose") text Apple's
+    on-device model writes for that field once the field is known. Written text is kept in args, so the re-check
+    after a confirmation types exactly what was shown, never a second draft."""
     text = args.get("text")
-    if not isinstance(text, str) or not text or len(text) > 2000:
+    writing = text is None and isinstance(args.get("compose"), str) and args["compose"].strip()
+    if not writing and (not isinstance(text, str) or not text or len(text) > 2000):
         return ("none", "no text to type")
     deadline = resolve_deadline()
     try:
@@ -884,7 +892,39 @@ def resolve_screen_type(args):
         return ("none", "not_a_text_field")
     if facts["window"] != snap.window_token:
         return ("none", "field is in another window")
+    if writing:
+        text = _compose(args["compose"], snap, label)
+        if not text.startswith("ok:"):
+            return ("none", text)
+        text = args["text"] = text[3:]
     return ("target", {**_field_target(snap, ref, facts, label), "text": text})
+
+
+def _compose(request, snap, label):
+    """"ok:<text>" or a plain reason. The writer sees the request, the app, the field's name and the names on screen
+    (shown text, never what's typed in a field); its text is checked like typed text before it can reach the field."""
+    if COMPOSE is None:
+        return "writing text isn't available in this copy of Hey Jev"
+    seen, used = [], 0
+    for i in snap.items:
+        if i.role in EDITABLE_ROLES or i.secure or not i.label:  # what's typed in fields stays out
+            continue
+        if used + len(i.label) > COMPOSE_CONTEXT:
+            break
+        seen.append(i.label)
+        used += len(i.label) + 1
+    context = {"app": snap.app, "field": label or "the selected field", "on_screen": seen}
+    try:
+        text = COMPOSE(request, context, min(COMPOSE_TIMEOUT, RESOLVE_UNTIL - time.monotonic())
+                       if RESOLVE_UNTIL is not None else COMPOSE_TIMEOUT)
+    except Exception as exc:
+        return str(exc) or "couldn't write that"
+    if not isinstance(text, str) or not text.strip():
+        return "the writer came back empty"
+    text = text.strip()
+    if len(text) > 2000:
+        return "what it wrote was too long to type"
+    return "ok:" + text
 
 
 def run_screen_type(t, deadline):
@@ -1413,7 +1453,7 @@ def loggable(action, value):
         return value
     out = {}
     for k, v in value.items():
-        if k in ("label", "window", "text", "field") and isinstance(v, str):
+        if k in ("label", "window", "text", "field", "compose") and isinstance(v, str):
             out[k] = f"<{len(v)} chars>"
         elif k == "items" and isinstance(v, list):
             out[k] = len(v)

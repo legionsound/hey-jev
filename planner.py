@@ -379,8 +379,36 @@ POINTER = re.compile(r"^\W*(?:please\s+)?(?P<how>double[\s-]?|right[\s-]?|left[\
                      r"[\s.!?]*$", re.I)  # not "click it/that/there": those can name something already discussed
 
 
+# Text for Apple's on-device model to write, then typed like any other text: "write a reply saying I'll be late",
+# "draft a quick thank-you note in the message field", "reply saying sounds good". "write hello" and anything quoted
+# stay literal (type_args): only these openings ask for writing.
+COMPOSE = re.compile(r"^\W*(?:please\s+)?(?:(?:draft|compose)\s+(?:me\s+)?|write\s+(?:me\s+)?(?=(?:a|an|some)\s)|"
+                     r"(?=(?:reply|respond)\b.*?\b(?:saying|with|to\s+(?:say|tell|ask))\b))(?P<rest>.+)$", re.I)
+
+
+def compose_args(clause):
+    """{"compose": what to write, "field": name or absent}, or None. A trailing "in/into the X field" names the
+    field, as for typing; the rest is the request for the writer, kept whole."""
+    m = COMPOSE.match(clause)
+    if not m or QUOTED.match(m["rest"]):
+        return None
+    rest, field = m["rest"], None
+    f = FIELD_TAIL.search(rest)
+    if f:
+        rest, field = rest[:f.start()], (f["f1"] or f["f2"]).strip(" .,!?")
+        if field.lower() in ("", "the", "a", "an"):
+            return None
+    rest = rest.strip(" .")
+    if len(rest.split()) < 2:
+        return None  # "draft it": nothing to write about
+    return {"compose": rest, **({"field": field} if field else {})}
+
+
 def direct(clause):
     """Commands whose words say exactly what to do, with nothing for Jev to choose: -> (action, args) or None."""
+    c = compose_args(clause)
+    if c:
+        return ("screen.type", c)
     m = SCROLL.match(clause)
     if m:
         amt = (m["amt"] or "").lower()

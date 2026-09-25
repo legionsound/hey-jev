@@ -37,6 +37,7 @@ You decide what needs your OK. Each kind of action (opening apps, quitting apps,
 | Timers | "set a timer for 5 minutes", "remind me in 20 minutes to call Sam", "how long is left?", "cancel the timer" |
 | Web | "go to github.com", "go to YouTube", "search Google for rock and roll", "open github.com in Safari" |
 | Screen | "what can I click?", "click Share", "click 4", "type hello into the search field", "press return", "scroll down", "play the video by Frame Set" |
+| Writing | "write a reply saying I'll be late", "draft a thank-you note in the message field". Apple's on-device model writes it, then it's typed into the field. |
 | Tasks | "take over: …" or "work on: …" gives Jev a goal to work through step by step in the current app |
 | Questions | "who wrote Hamlet?", "what time is it?" (optional; you choose who answers) |
 | Chaining | "pause Spotify, then open Slack". Up to five steps joined with "then", "after that" or ", and". A bare "and" never splits a request, so "play rock and roll" stays one thing. |
@@ -52,6 +53,10 @@ Say "stop" at any point to cancel what's running and everything queued behind it
 Choose Show what Jev sees from the menu bar and Hey Jev draws a number on every button, link, tab and field it can find in every visible window, including windows behind the front one. Say "click 4" and it presses number 4 in whatever window that number belongs to. You can also go by name ("click Share"), by position ("the video in the bottom-right"), or by description ("the Full Tilt video").
 
 Controls come from macOS Accessibility, with Apple's on-device text recognition filling in text that Accessibility can't see. Chrome and other Chromium apps ignore Accessibility clicks on page content, so on web pages Hey Jev focuses the control and presses Return instead. The mouse pointer never moves. Anything a window on top is covering is refused rather than clicked blind.
+
+Before each action, a second pointer with a small J glides to the control it's about to use, so you can see what it's doing. Your real mouse stays where you left it. You can turn it off from the menu bar.
+
+If a click or Return would run without asking (because you set clicks to Automatic, or it's a step inside a task), Jev takes a second look first: would this send, delete, buy, share, merge or approve something? If so, Hey Jev asks you before doing it. This check can only add a question, never skip one.
 
 ### Answers
 
@@ -134,6 +139,7 @@ mic ─► Whisper / Apple dictation ─► wake phrase ─► planner ─► en
 - Jev sees the words of each command. For screen commands it sees control names and the text around them, only where Accessibility confirms it's ordinary on-screen text. Nothing is read from inside text fields, and password fields are never read or typed into.
 - Everything Hey Jev says is voiced by Fish Audio, so spoken replies go to Fish. Control names are never spoken aloud.
 - Answers go to whichever provider you picked. Apple's on-device option keeps them on your Mac.
+- Text Hey Jev writes into fields for you is written by Apple's model on your Mac. What's already typed in fields and passwords is never given to it.
 - A diagnostic log at `~/Library/Logs/Hey Jev/requests.jsonl` records each stage of every request, with keys removed. It never leaves your Mac.
 
 ## What it costs

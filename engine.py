@@ -18,6 +18,9 @@ POLL = 0.2
 TIEBREAK_EFFECTS = ("open", "quit")  # app.open / app.quit: the duplicate-app chooser
 ANSWER_WINDOW = 45.0  # seconds a "which one?" stays answerable
 PENDING_WAIT = 10.0  # how long a new dispatch waits for an earlier, still-outstanding effect before refusing
+CONSEQUENCE_ACTIONS = ("screen.press", "screen.pick", "screen.submit")  # presses whose label list can miss an effect
+CONSEQUENCE_GATE = 0.5  # provisional, uncalibrated (jev skill). It can only add a question, never remove one
+POINT_WAIT = 0.6  # longest a dispatch waits for the Jev cursor to reach its target
 _local = threading.local()
 
 
@@ -54,6 +57,8 @@ class Engine:
         self.actions = actions
         self.effect_pending = pending  # an earlier effect that may still land holds every later dispatch
         self.task_jev = None  # (state_text, questions) -> answers: Jev for multi-step tasks, set by the app
+        self.consequence = None  # (clause, action, target) -> yes probability: would this press have a real effect?
+        self.point = None  # (target, wait) -> None: the app's Jev cursor glides to the target, blocking up to wait
         self.instance = uuid.uuid4().hex[:12]
         self.lock = threading.Condition()
         self.ledger = {}  # id -> record
@@ -590,7 +595,10 @@ class Engine:
         forced = picked is not None and action["effect"] == "quit"  # a guessed quit target always asks
         policy = self.policy()
         risky = target.get("confirm") and policy.get("risky", "ask") == "ask"
-        if forced or risky or (policy.get(action["effect"], "ask") == "ask" and not covered):
+        asks = forced or risky or (policy.get(action["effect"], "ask") == "ask" and not covered)
+        if not asks and act in CONSEQUENCE_ACTIONS and policy.get("risky", "ask") == "ask" and self.consequence:
+            asks = risky = self._consequential(rec, step, target)
+        if asks:
             t = time.monotonic()
             verdict = self._confirm(rec, step, target, until)
             diagnostics.record(rec["id"], "confirm", verdict, (time.monotonic() - t) * 1000, step=step["index"],
@@ -625,6 +633,11 @@ class Engine:
         if why:
             self._set(step, state="failed", detail=why)
             return "failed"
+        if self.point and screen_step and isinstance(target.get("frame"), list):
+            try:  # feedback only: a cursor that can't draw never holds up or changes the action
+                self.point(target, min(POINT_WAIT, max(0.0, until - time.monotonic())) if until else POINT_WAIT)
+            except Exception:
+                pass
         with self.lock:  # dispatch boundary: a cancel that lands before this line stops the step, after it cannot
             if rec["cancel"]:
                 step["state"] = "skipped"
@@ -639,6 +652,22 @@ class Engine:
                            detail=step.get("detail"), facts=loggable(step["action"], step.get("facts") or {}),
                            target=loggable(step["action"], target))
         return state
+
+    def _consequential(self, rec, step, target):
+        """Jev's second look at a press no rule flagged and no setting asks about: would it send, delete, buy, share
+        or similar? True (ask first) at CONSEQUENCE_GATE, and on any failure: a failed check is never a "no"."""
+        t = time.monotonic()
+        try:
+            p = self.consequence(step["clause"], step["action"], target)
+            if isinstance(p, bool) or not isinstance(p, (int, float)) or not 0 <= p <= 1:
+                raise ValueError(f"bad probability {p!r}")
+            verdict, facts = p >= CONSEQUENCE_GATE, {"p_yes": round(float(p), 3), "gate": CONSEQUENCE_GATE}
+        except Exception as exc:
+            verdict, facts = True, {"error": str(exc) or type(exc).__name__}
+        diagnostics.record(rec["id"], "consequence", "ask" if verdict else "no", (time.monotonic() - t) * 1000,
+                           step=step["index"], **facts)
+        self._set(step, facts={**(step.get("facts") or {}), "consequence": facts})
+        return verdict
 
     def _settled(self, rec, until=None):
         """Wait up to PENDING_WAIT for any outstanding effect to land. True: clear. False: still out, so this step must

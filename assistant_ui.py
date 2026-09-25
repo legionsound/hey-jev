@@ -50,7 +50,7 @@ from AppKit import (
 from AppKit import NSPopover, NSViewController
 from Foundation import NSObject, NSTimer, NSUserDefaults
 from actions import EFFECT_LABELS, EFFECTS
-from model_settings import (apple_model, save_apple_model, AGENTS, agent_settings, clean_agent_folder, save_agent_settings, PREFS, PARAMETERS, advanced_open, save_advanced_open, voice, save_voice,
+from model_settings import (show_cursor, save_show_cursor, apple_model, save_apple_model, AGENTS, agent_settings, clean_agent_folder, save_agent_settings, PREFS, PARAMETERS, advanced_open, save_advanced_open, voice, save_voice,
                             app_folders, clean_app_folders, save_app_folders, JEV_MODELS, MODEL_ID_RE, jev_model,
                             save_jev_model, FISH_MODELS, fish_model, save_fish_model, WHISPER_SIZES, whisper_model,
                             save_whisper_model, OCR_LEVELS, ocr_level, save_ocr_level, MAX_APP_FOLDERS, TIEBREAK_MAX, TIEBREAK_MIN, answer_settings, cached_models, confirm_policy,
@@ -398,6 +398,47 @@ def _numbers_one(items):
     return win
 
 
+CURSOR_TRAVEL = 0.35  # seconds the Jev cursor takes to reach a target
+CURSOR_LINGER = 1.8  # seconds it stays after its last move, then fades
+CURSOR_SIZE = 34
+
+
+def cursor_window():
+    """The Jev cursor: an accent arrow with a small J badge in a click-through window that screen captures skip. The
+    real pointer never moves."""
+    win = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+        NSMakeRect(0, 0, CURSOR_SIZE, CURSOR_SIZE), 0, 2, False)
+    win.setOpaque_(False)
+    win.setBackgroundColor_(NSColor.clearColor())
+    win.setHasShadow_(True)
+    win.setIgnoresMouseEvents_(True)
+    win.setLevel_(AppKit.NSPopUpMenuWindowLevel)  # above menus and the numbered badges
+    win.setCollectionBehavior_(1 << 0 | 1 << 4)  # all spaces, stationary
+    win.setReleasedWhenClosed_(False)
+    win.setSharingType_(0)  # never captured, so it can't be read back as screen text
+    arrow = NSImageView.alloc().initWithFrame_(NSMakeRect(0, 8, 26, 26))
+    arrow.setImage_(symbol("cursorarrow", 22, 0.4))
+    arrow.setContentTintColor_(NSColor.controlAccentColor())
+    win.contentView().addSubview_(arrow)
+    badge = NSTextField.labelWithString_("J")
+    badge.setFont_(NSFont.boldSystemFontOfSize_(9))
+    badge.setTextColor_(NSColor.whiteColor())
+    badge.setAlignment_(1)
+    badge.setWantsLayer_(True)
+    badge.layer().setBackgroundColor_(NSColor.controlAccentColor().CGColor())
+    badge.layer().setCornerRadius_(7)
+    badge.setFrame_(NSMakeRect(18, 2, 14, 14))
+    win.contentView().addSubview_(badge)
+    return win
+
+
+def cursor_origin(frame):
+    """Window origin that puts the arrow's tip on the centre of an AX frame (top-left, primary display)."""
+    top = AppKit.NSScreen.screens()[0].frame().size.height
+    x, y, w, h = frame
+    return (x + w / 2 - 6, top - (y + h / 2) - CURSOR_SIZE + 4)
+
+
 INSPECT_COLORS = {"press": NSColor.systemBlueColor, "field": NSColor.systemOrangeColor,
                   "ax": NSColor.systemTealColor, "shared": NSColor.systemGrayColor, "local": NSColor.tertiaryLabelColor}
 
@@ -688,7 +729,7 @@ class AppDelegate(NSObject):
         from siri import run_voice_assistant
         try:
             run_voice_assistant(self.notify, self.controls, self.mode, self.listening, ask=self.ask_confirm,
-                                show=self.show_numbers)
+                                show=self.show_numbers, point=self.point_cursor)
         except Exception as exc:
             self.notify("Something went wrong", str(exc))
 
@@ -773,6 +814,9 @@ class AppDelegate(NSObject):
         menu.addItem_(NSMenuItem.separatorItem())
         self.inspect_item = menu.addItemWithTitle_action_keyEquivalent_("Show what Jev sees", "toggleInspect:", "")
         self.inspect_item.setTarget_(self)
+        self.cursor_item = menu.addItemWithTitle_action_keyEquivalent_("Show Jev cursor", "toggleCursor:", "")
+        self.cursor_item.setTarget_(self)
+        self.cursor_item.setState_(int(show_cursor()))
         for title, action in (("Show status", "showMain:"), ("Settings…", "showSettings:")):
             menu.addItemWithTitle_action_keyEquivalent_(title, action, "").setTarget_(self)
         self.menu_only_item = menu.addItemWithTitle_action_keyEquivalent_("Menu bar only", "toggleMenuOnly:", "")
@@ -2247,6 +2291,52 @@ class AppDelegate(NSObject):
             screen.set_displayed(self.inspect_view.get("version"))
         else:
             screen.set_displayed(None)
+
+    @objc.python_method
+    def point_cursor(self, target, wait):
+        """Engine worker thread, just before a screen action: the Jev cursor glides to the target, and the action
+        waits (at most `wait`) until it arrives. Off in the menu: returns at once."""
+        if not show_cursor():
+            return
+        self.performSelectorOnMainThread_withObject_waitUntilDone_("moveCursor:", list(target["frame"]), False)
+        time.sleep(min(wait, CURSOR_TRAVEL + 0.05))
+
+    def moveCursor_(self, frame):
+        win = getattr(self, "cursor_win", None)
+        if win is None:
+            win = self.cursor_win = cursor_window()
+        if not win.isVisible() or win.alphaValue() < 0.99:  # start from the real pointer, where the eye already is
+            at = NSEvent.mouseLocation()
+            win.setFrameOrigin_((at.x - 6, at.y - CURSOR_SIZE + 4))
+            win.setAlphaValue_(1.0)
+            win.orderFrontRegardless()
+        x, y = cursor_origin(frame)
+        end = NSMakeRect(x, y, CURSOR_SIZE, CURSOR_SIZE)
+
+        def glide(ctx):
+            ctx.setDuration_(CURSOR_TRAVEL)
+            ctx.setTimingFunction_(AppKit.CAMediaTimingFunction.functionWithName_("easeInEaseOut"))
+            win.animator().setFrame_display_(end, True)
+        AppKit.NSAnimationContext.runAnimationGroup_completionHandler_(glide, None)
+        if getattr(self, "cursor_timer", None) is not None:
+            self.cursor_timer.invalidate()
+        self.cursor_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            CURSOR_TRAVEL + CURSOR_LINGER, self, "fadeCursor:", None, False)
+
+    def fadeCursor_(self, _timer):
+        self.cursor_timer = None
+        win = getattr(self, "cursor_win", None)
+        if win is None:
+            return
+
+        def fade(ctx):
+            ctx.setDuration_(0.4)
+            win.animator().setAlphaValue_(0.0)
+        AppKit.NSAnimationContext.runAnimationGroup_completionHandler_(fade, lambda: win.alphaValue() < 0.01 and win.orderOut_(None))
+
+    def toggleCursor_(self, _sender):
+        save_show_cursor(not show_cursor())
+        self.cursor_item.setState_(int(show_cursor()))
 
     @objc.python_method
     def ask_confirm(self, pending):

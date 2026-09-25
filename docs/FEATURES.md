@@ -62,6 +62,16 @@ For exact behavior rules see `ENGINE_CONTRACT.md`.
   reach doesn't react and stays `unverified`. A press is verified when the
   control changes, disappears, or changes its name (Pause becomes Play).
   "Click …" is always a click, however odd the name.
+- Writing: "write a/an/some …", "draft …", "compose …", "reply … saying
+  …" ask Apple's on-device model (`heyjev-fm`, on this Mac only) to write
+  the text, given the request, app, field name and shown on-screen names
+  (never field contents or secure fields). The draft is kept in the step,
+  shown in the confirmation, and typed exactly by `screen.type`. No other
+  writer is used. Quoted text and "write hello" stay literal.
+- The Jev cursor (menu bar > Show Jev cursor, on by default): a
+  click-through arrow with a J badge glides to each screen target just
+  before dispatch (the step waits at most 0.6 s for it), then fades. It is
+  excluded from screen captures and never moves the real pointer.
 - `screen.type`: types literal text into a named or focused field via
   `AXSelectedText` (no keystrokes, nothing submitted), replacing the
   current selection. Password fields are
@@ -138,6 +148,12 @@ For exact behavior rules see `ENGINE_CONTRACT.md`.
   maps each to Ask first or Automatic. Ask-first defaults: quit, lock,
   sleep, click, type, submit, task, risky. Reading the screen (`look`)
   has no effect and never asks.
+- Jev's second look: a click or Return that would otherwise run without
+  asking (click or submit Automatic, or covered by a task's OK) is first
+  judged by Jev: would it send, delete, buy, share, merge, approve or
+  similar? At p ≥ 0.5 (uncalibrated), or when the check fails, it asks.
+  It only adds confirmations, and is skipped when `risky` is Automatic.
+  Only the app, the control's role and name, and the request are sent.
 - Risky-labeled controls (buy, send, delete, pay, submit, post, share,
   install, sign out, similar) ask by default — but setting `risky` to
   Automatic overrides this. That list only adds confirmation; it

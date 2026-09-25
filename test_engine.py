@@ -475,3 +475,11 @@ class BridgeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReplyCoverageTests(unittest.TestCase):
+    def test_every_action_has_a_success_line(self):
+        import actions
+        import siri
+        for name in actions.ACTIONS:
+            siri.step_line({"action": name, "target": {}, "facts": {}})  # a KeyError here would crash the turn

@@ -233,7 +233,7 @@ def step_line(step):
     if action == "screen.list":
         line = say_line("screen.list", count=facts.get("count", 0), app=facts.get("app") or "this window")
         return line + (" Allow Screen Recording and I can read the text too." if facts.get("ocr") == "no_permission" else "")
-    if action == "screen.press":
+    if action in ("screen.press", "screen.pick"):
         return say_line("screen.press")  # never the label: speech goes to a remote voice service
     return say_line(action, app=target.get("name") or target.get("app") or "it", level=target.get("level") or "that")
 

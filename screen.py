@@ -547,10 +547,17 @@ def remember(snap):
         LAST = snap
         _shown[snap.version] = snap
         _mapping[snap.version] = mapping(snap)
-        for v in sorted(_shown)[:-KEEP_SHOWN]:
+        # What is on screen now, or was painted recently enough for speech to still refer to it, is never evicted:
+        # the HUD refreshes every second, which would otherwise push out a badge list still showing for 12.
+        now = time.monotonic()
+        pinned = {v for at, v in _displayed if now - at <= PIN_SECONDS} | {_displayed[-1][1]} if _displayed else set()
+        for v in [v for v in sorted(_shown)[:-KEEP_SHOWN] if v not in pinned]:
             del _shown[v]
             _mapping.pop(v, None)
         return snap.version
+
+
+PIN_SECONDS = 60
 
 
 _mapping = {}  # version -> what each number pointed at, so a refresh that changed nothing isn't a change

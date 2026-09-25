@@ -1059,7 +1059,8 @@ class AppDelegate(NSObject):
         self.inspect_window = inspect_window(view) if view and view.get("items") else None
         self.inspect_view = view if self.inspect_window is not None else None
         if self.inspect_window is not None:
-            self.inspect_window.orderFrontRegardless()
+            if not getattr(self, "number_windows", None):  # badges own the numbers while they show: HUD waits
+                self.inspect_window.orderFrontRegardless()
             if getattr(self, "inspect_timer", None) is None:
                 self.inspect_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
                     0.5, self, "inspectTick:", None, True)
@@ -1089,6 +1090,8 @@ class AppDelegate(NSObject):
         self.number_windows = [numbers_window(facts)] if facts.get("items") else []
         for w in self.number_windows:
             w.orderFrontRegardless()
+        if self.number_windows and getattr(self, "inspect_window", None) is not None:
+            self.inspect_window.orderOut_(None)  # one numbered view at a time: the HUD steps aside for the badges
         self.numbers_version = facts.get("version") if self.number_windows else None
         self.publish_displayed()
         if getattr(self, "numbers_timer", None) is not None:
@@ -1100,6 +1103,8 @@ class AppDelegate(NSObject):
         for w in getattr(self, "number_windows", []):
             w.orderOut_(None)
         self.number_windows, self.numbers_version, self.numbers_timer = [], None, None
+        if getattr(self, "inspect_window", None) is not None:
+            self.inspect_window.orderFrontRegardless()  # badges gone: the HUD's numbers are back
         self.publish_displayed()
 
     @objc.python_method

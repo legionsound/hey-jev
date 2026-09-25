@@ -239,8 +239,16 @@ class SpokenNumberTests(unittest.TestCase):
         badge_v = screen.remember(inspector.Numbering().apply(snap([item("Open")], window=object())))
         d.showNumbers_({"version": badge_v, "items": view["items"]})
         self.assertEqual(now(), badge_v)  # badges on top: numbers mean the badges
+        self.assertFalse(d.inspect_window.isVisible())  # only one numbered view shows at a time
+        for _ in range(10):  # the HUD keeps reading every second while the badges show
+            refreshed = screen.remember(inspector.Numbering().apply(snap([item("Other")], window=object())))
+            d.showInspect_({**view, "version": refreshed})
+            self.assertFalse(d.inspect_window.isVisible())
+        self.assertEqual(now(), badge_v)
+        self.assertIsNotNone(screen.shown(badge_v))  # still resolvable after 10 refreshes: pinned while visible
         d.hideNumbers_(None)
-        self.assertEqual(now(), hud_v)  # badges expired: the HUD underneath is back in charge
+        self.assertTrue(d.inspect_window.isVisible())
+        self.assertEqual(now(), refreshed)  # badges expired: the HUD underneath is back in charge
         d.showInspect_({})  # inspection stopped (or an error/empty view cleared it)
         self.assertEqual(now(), "unbound")
         d.showNumbers_({"items": view["items"]})  # badges with no known list

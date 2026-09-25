@@ -746,3 +746,154 @@ def scan_fields(win, node_cap=6000, time_cap=0.5):
             complete = False  # an unreadable subtree could hide a field
     return fields, complete, texts
 
+
+# --------------------------------------------------------------------------- scrolling and the pointer
+SCROLL_STEP = {"little": 0.08, "normal": 0.25, "lot": 0.6}
+
+
+def _all(el, role, cap=3000):
+    out, queue, seen = [], [el], 0
+    while queue and seen < cap:
+        e = queue.pop(0)
+        seen += 1
+        if _attr(e, "AXRole") == role:
+            out.append(e)
+        queue.extend(_children(e))
+    return out
+
+
+def scroll_target(window):
+    """The window's main scrollable view: (kind, element). kind "bar" for a native view with a settable vertical
+    scroll bar, "web" for a web area, or (None, None)."""
+    best = None
+    for area in _all(window, "AXScrollArea"):
+        bar = _attr(area, "AXVerticalScrollBar")
+        f = _frame(area) or (0, 0, 0, 0)
+        if bar is not None and _settable(bar, "AXValue") and (best is None or f[2] * f[3] > best[0]):
+            best = (f[2] * f[3], "bar", bar)
+    if best:
+        return best[1], best[2]
+    webs = _all(window, "AXWebArea")
+    return ("web", webs[0]) if webs else (None, None)
+
+
+def _unit(v):
+    """A scroll bar value only when it's a real one: finite, not a bool, within 0-1."""
+    import math
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and 0 <= v <= 1
+
+
+def scroll_position(kind, el, pick=None):
+    """Scroll evidence. Native: the bar's value, only when it reads as a valid 0-1 number (else None). Web areas
+    expose no scroll position, so there is no evidence to read: None."""
+    if kind != "bar":
+        return None
+    st, v = _read(el, "AXValue")
+    return round(float(v), 4) if st == "ok" and _unit(v) else None
+
+
+def in_window(el, window_token):
+    """Whether this element still belongs to the given window (its AXWindow is that window). Unreadable: no."""
+    st, w = _read(el, "AXWindow")
+    return st == "ok" and w is not None and token(w) == window_token
+
+
+def scroll(kind, el, direction, amount, deadline, guard=None):
+    """-> AX error code (0 sent). A bar moves by a fraction of its range; a web area scrolls the next element beyond
+    the visible edge into view. No pointer movement, no wheel events. guard(): re-checked after all preparation,
+    immediately before the write or action; a reason string stops it with nothing sent (raises Unavailable)."""
+    def check():
+        why = guard() if guard else None
+        if why:
+            raise Unavailable(why)
+
+    def run():
+        AS = _AS()
+        if kind == "bar":
+            import math
+            st, v = _read(el, "AXValue")
+            if st != "ok" or isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) \
+                    or not 0 <= v <= 1:
+                raise Unavailable("can't read the scroll position")  # never write from a guess
+            if (direction == "down" and v >= 1) or (direction == "up" and v <= 0):
+                return AX_NO_VALUE  # already at the edge: nothing is written
+            if not _settable(el, "AXValue"):
+                raise Unavailable("the scroll bar can't be moved")
+            step = SCROLL_STEP.get(amount, 0.25) * (1 if direction == "down" else -1)
+            target = 1.0 if amount == "end" and direction == "down" else 0.0 if amount == "end" else min(1, max(0, v + step))
+            check()
+            return int(AS.AXUIElementSetAttributeValue(el, "AXValue", target))
+        view = _frame(el)
+        if not view:
+            return -1
+        top, height = view[1], view[3]
+        bottom = top + height
+        nodes = [(n, f) for n in _all(el, "AXStaticText", cap=4000) + _all(el, "AXLink", cap=2000) for f in [_frame(n)] if f]
+        page = SCROLL_STEP.get(amount, 0.25) * 3 * height  # "normal" is about three quarters of a screen
+        if direction == "down":
+            beyond = sorted((p for p in nodes if p[1][1] >= bottom), key=lambda p: p[1][1])
+            aim = bottom + page
+        else:
+            beyond = sorted((p for p in nodes if p[1][1] + p[1][3] <= top), key=lambda p: -p[1][1])
+            aim = top - page
+        if not beyond:
+            return AX_NO_VALUE  # nothing further that way: already at the edge
+        pick = beyond[-1][0] if amount == "end" else min(beyond, key=lambda p: abs(p[1][1] - aim))[0]
+        if "AXScrollToVisible" not in _actions(pick):
+            raise Unavailable("that page can't be scrolled this way")
+        check()
+        return int(AS.AXUIElementPerformAction(pick, "AXScrollToVisible"))
+    return bounded(run, deadline, effect=True)
+
+
+def pointer():
+    """The pointer's location, top-left origin points."""
+    import Quartz
+    p = Quartz.CGEventGetLocation(Quartz.CGEventCreate(None))
+    return float(p.x), float(p.y)
+
+
+def app_at(point):
+    """(pid, window number) of the topmost window under a point, or (None, None) when that window is Hey Jev's own,
+    an overlay, a menu or anything but an ordinary window: a click there wouldn't land where the target says."""
+    import Quartz
+    x, y = point
+    opts = Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements
+    for w in Quartz.CGWindowListCopyWindowInfo(opts, Quartz.kCGNullWindowID) or []:  # front to back
+        b = w.get("kCGWindowBounds") or {}
+        if not (b.get("X", 0) <= x < b.get("X", 0) + b.get("Width", 0) and b.get("Y", 0) <= y < b.get("Y", 0) + b.get("Height", 0)):
+            continue
+        if float(w.get("kCGWindowAlpha", 1)) == 0:
+            continue  # fully transparent windows take no clicks
+        if w.get("kCGWindowLayer") != 0 or w.get("kCGWindowOwnerPID") == os.getpid():
+            return None, None  # covered by an overlay, a menu or our own window
+        return int(w["kCGWindowOwnerPID"]), int(w["kCGWindowNumber"])
+    return None, None
+
+
+def click_at(point, button, double, deadline, expect=None):
+    """A real mouse click exactly at `point`, where the user's pointer is. Immediately before each press the pointer
+    must still be there and `expect` (pid, window number) still the topmost window under it; otherwise the click stops
+    (raises Moved, with the events already posted). A press that went down is always released, never left held."""
+    def run():
+        import Quartz
+        down, up, btn = ((Quartz.kCGEventLeftMouseDown, Quartz.kCGEventLeftMouseUp, Quartz.kCGMouseButtonLeft)
+                         if button == "left" else
+                         (Quartz.kCGEventRightMouseDown, Quartz.kCGEventRightMouseUp, Quartz.kCGMouseButtonRight))
+        posted = 0
+        for n in (1, 2) if double else (1,):
+            here = pointer()  # checked before each press; a press already down is always released
+            if (round(here[0]), round(here[1])) != (round(point[0]), round(point[1])) or \
+                    (expect is not None and app_at(here) != tuple(expect)):
+                raise Moved(posted)
+            for kind in (down, up):
+                e = Quartz.CGEventCreateMouseEvent(None, kind, point, btn)
+                Quartz.CGEventSetIntegerValueField(e, Quartz.kCGMouseEventClickState, n)
+                Quartz.CGEventPost(Quartz.kCGHIDEventTap, e)
+                posted += 1
+        return 0
+    return bounded(run, deadline, effect=True)
+
+
+class Moved(Exception):
+    """The pointer or the window under it changed during a click. args[0]: events already posted."""

@@ -201,6 +201,8 @@ REPLIES = {
     "screen.press": ["Clicked it.", "[cheerful] Done, clicked."],
     "screen.type": ["Typed it.", "[cheerful] Typed."],
     "screen.submit": ["Pressed return.", "Return pressed."],
+    "screen.scroll": ["Scrolled.", "There."],
+    "pointer.click": ["Clicked.", "Click."],
     "timer.cancel": ["Timer cancelled.", "[sighing] Fine, no timer then."],
     "timers_cancel": ["All timers cancelled.", "Cleared them all."],
     "timer_none": ["[chuckling] There's no timer running."],
@@ -317,6 +319,8 @@ def line_for(result):
         line = say_line(why)
     else:
         line = say_line("failed")
+    if stop and (stop.get("detail") or "").startswith("already at the "):
+        line = stop["detail"][0].upper() + stop["detail"][1:] + "."
     if stop and "accessibility_permission" in (stop.get("detail") or ""):
         line = "I need Accessibility access for that. Turn on Hey Jev in System Settings, Privacy and Security, Accessibility."
     if done:

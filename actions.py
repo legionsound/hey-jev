@@ -796,6 +796,151 @@ def verify_screen_submit(t, deadline):
     return ("unverified", {"delivered": True, "observed": observed, "why": "Return was sent; the field itself did not change"})
 
 
+_scrolled = {}  # id(target) -> position before
+
+
+def resolve_screen_scroll(args):
+    """The frontmost window's main scrollable view. A named app ("in Chrome") must be the one in front."""
+    deadline = resolve_deadline()
+    try:
+        snap = screen.observe(ocr=False, deadline=deadline)
+        wanted = (args.get("app") or "").strip().lower()
+        if wanted and wanted not in snap.app.lower() and wanted not in {"the browser", "browser", "this page", "the page",
+                                                                         "page", "here", "this", "it"}:
+            return ("none", "that app isn't in front")
+        kind, el = screen.bounded(lambda: screen.scroll_target(snap.window_ref), deadline)
+    except (screen.Unavailable, screen.TimedOut, screen.Wedged) as exc:
+        return ("none", f"can't read the screen: {exc}")
+    if kind is None:
+        return ("none", "nothing here scrolls")
+    return ("target", {"pid": snap.pid, "started": snap.started, "app": snap.app, "window": snap.window_token,
+                       "element": screen.token(el), "how": kind, "direction": args.get("direction", "down"),
+                       "amount": args.get("amount", "normal")})
+
+
+def _same_front(t, deadline):
+    """The target's app is still in front, the same process, with the same window: checked right before an effect,
+    after any wait or confirmation, Automatic included."""
+    if screen.frontmost()[0] != t["pid"] or screen.process_start(t["pid"], deadline) != t["started"]:
+        return "another app is in front now"
+    if screen.current_window(t["pid"], deadline) != t["window"]:
+        return "the window changed"
+    return None
+
+
+def run_screen_scroll(t, deadline):
+    ref = screen.element_for(t.get("element"))
+    if ref is None:
+        raise Failed("unknown view")
+
+    def guard():
+        """Right before the write: same app in front, same process and window, and this view still in it."""
+        why = _same_front(t, deadline)
+        if why:
+            return why
+        if not screen.in_window(ref, t["window"]):
+            return "that view isn't in the window any more"
+        return None
+    try:
+        before = screen.bounded(lambda: screen.scroll_position(t["how"], ref), deadline) if t["how"] == "bar" else None
+    except (screen.Unavailable, screen.TimedOut, screen.Wedged) as exc:
+        raise Failed(f"screen read failed before scrolling: {exc}")
+    if t["how"] == "bar" and before is None:
+        raise Failed("can't read the scroll position")
+    try:
+        err = screen.scroll(t["how"], ref, t["direction"], t["amount"], deadline, guard=guard)
+    except screen.Unavailable as exc:
+        raise Failed(str(exc))  # every check happens before anything is written
+    except screen.Wedged as exc:
+        raise Failed(str(exc))
+    except screen.TimedOut as exc:
+        raise Uncertain(f"the app did not answer in time ({exc})")
+    if err == screen.AX_NO_VALUE:
+        raise Failed("already at the " + ("bottom" if t["direction"] == "down" else "top") if t["how"] == "bar"
+                     else "nothing further to scroll to that I can see")
+    if err in AX_GONE:
+        raise Failed(f"the view refused to scroll (AX error {err})")
+    if err != 0:
+        raise Uncertain(f"AX error {err} after scrolling")
+    _scrolled[id(t)] = (before, time.monotonic(), ref)
+
+
+def verify_screen_scroll(t, deadline):
+    """Native: done only when the bar's valid 0-1 value changed. Web areas expose no scroll position, so a web
+    scroll is reported as sent and never as checked: layout moving is not proof of scrolling."""
+    before, at, ref = _scrolled.get(id(t), (None, 0, None))
+    if t["how"] != "bar":
+        _scrolled.pop(id(t), None)
+        return ("unverified", {"delivered": True, "why": "this page doesn't report its scroll position"})
+    after = screen.bounded(lambda: screen.scroll_position("bar", ref), deadline)
+    if before is not None and after is not None and after != before:
+        _scrolled.pop(id(t), None)
+        return ("done", {"moved": True})
+    if time.monotonic() - at < SETTLE:
+        return ("wait", {})
+    _scrolled.pop(id(t), None)
+    return ("unverified", {"delivered": True, "why": "couldn't confirm the view moved"})
+
+
+_clicked = {}  # id(target) -> (signature before, dispatched_at)
+
+
+def resolve_pointer_click(args):
+    """Wherever the pointer is: the ordinary window on top under it, its process, and the exact point."""
+    try:
+        point = screen.pointer()
+        pid, wid = screen.app_at(point)
+        if pid is None:
+            return ("none", "something is covering that spot")
+        app, _ = screen._app_info(pid)
+        started = screen.process_start(pid, time.monotonic() + 1)
+    except Exception as exc:
+        return ("none", f"can't read the pointer: {exc}")
+    return ("target", {"pid": pid, "started": started, "app": app, "window_number": wid,
+                       "point": [round(point[0]), round(point[1])], "button": args.get("button", "left"),
+                       "double": bool(args.get("double")), "confirm": False})
+
+
+def run_pointer_click(t, deadline):
+    point = screen.pointer()
+    if [round(point[0]), round(point[1])] != t["point"] or screen.app_at(point) != (t["pid"], t["window_number"]):
+        raise Failed("the pointer moved")  # after a confirmation, never click somewhere the user didn't approve
+    try:
+        if screen.process_start(t["pid"], deadline) != t["started"]:
+            raise Failed("the app restarted")
+        before = screen.signature(t["pid"], deadline)
+    except (screen.TimedOut, screen.Wedged, screen.Unavailable) as exc:
+        raise Failed(f"screen read failed before clicking: {exc}")
+    _clicked[id(t)] = (before, time.monotonic())
+    try:
+        screen.click_at(tuple(t["point"]), t["button"], t["double"], deadline,
+                        expect=(t["pid"], t["window_number"]))
+    except screen.Moved as exc:
+        if exc.args and exc.args[0]:
+            raise Uncertain("the pointer moved partway through the click")
+        raise Failed("the pointer moved")
+    except screen.Wedged as exc:
+        raise Failed(str(exc))
+    except screen.TimedOut as exc:
+        raise Uncertain(f"the click didn't finish in time ({exc})")
+
+
+def verify_pointer_click(t, deadline):
+    """A click at an arbitrary spot has no postcondition that can be checked: it is always reported as delivered,
+    with whatever changed in that window recorded, and never as done."""
+    before, at = _clicked.get(id(t), (None, 0))
+    if time.monotonic() - at < SETTLE:
+        return ("wait", {})
+    _clicked.pop(id(t), None)
+    try:
+        after = screen.signature(t["pid"], deadline)
+        observed = sorted(k for k in (before or {}) if before.get(k) != after.get(k))
+    except Exception:
+        observed = []
+    return ("unverified", {"delivered": True, "observed": observed,
+                           "why": "clicked; a click at the pointer has nothing specific to check"})
+
+
 def run_screen_list(t, deadline):
     try:
         snap = screen.observe(ocr=True, deadline=deadline)
@@ -873,6 +1018,10 @@ ACTIONS = {
     "screen.list": entry("look", plain, run_screen_list, verify_screen_list, "the list is what was read", 8),
     "screen.press": entry("click", resolve_screen_press, run_screen_press, verify_screen_press,
                           "the window changed after the press; not that the intended result happened", 6),
+    "screen.scroll": entry("scroll", resolve_screen_scroll, run_screen_scroll, verify_screen_scroll,
+                           "the view's scroll position changed", 6),
+    "pointer.click": entry("click", resolve_pointer_click, run_pointer_click, verify_pointer_click,
+                           "the window under the pointer changed; not what the click meant", 6),
     "screen.submit": entry("submit", resolve_screen_submit, run_screen_submit, verify_screen_submit,
                            "the field went away or its text changed; not that anything was sent or accepted", 6),
     "screen.type": entry("type", resolve_screen_type, run_screen_type, verify_screen_type,
@@ -880,14 +1029,14 @@ ACTIONS = {
     "timer.cancel": entry("timer", resolve_timer_cancel, run_timer_cancel, verify_timer_cancel, "the timer left the running list", 2),
 }
 
-EFFECTS = ("open", "navigate", "media", "volume", "display", "timer", "click", "type", "submit", "task", "in_task",
-           "risky", "quit", "lock", "sleep")
+EFFECTS = ("open", "navigate", "media", "volume", "display", "timer", "scroll", "click", "type", "submit", "task",
+           "in_task", "risky", "quit", "lock", "sleep")
 DEFAULT_POLICY = {e: ("ask" if e in ("quit", "lock", "sleep", "click", "type", "submit", "task", "risky") else "auto")
                   for e in EFFECTS}  # in_task "auto": the task's one OK covers its clicks, typing and Return
 DEFAULT_POLICY["look"] = "auto"  # reading the screen has no effect, so it is not a setting
 EFFECT_LABELS = {"open": "Open apps", "navigate": "Open websites", "media": "Music playback", "volume": "Volume",
                  "display": "Dark mode", "timer": "Timers and reminders",
-                 "click": "Click buttons on screen", "type": "Type into fields",
+                 "scroll": "Scroll", "click": "Click buttons on screen", "type": "Type into fields",
                  "submit": "Press Return in fields", "task": "Start multi-step tasks",
                  "in_task": "Each step inside a task", "risky": "Risky buttons (Buy, Send, Delete…)", "quit": "Quit apps",
                  "lock": "Lock screen", "sleep": "Sleep the Mac"}
@@ -928,7 +1077,9 @@ def describe(action, target):
             "screen.list": "Read what's on screen", "screen.press": "Click “{label}” in {app}",
             "screen.type": "Type “{text}” into {field} in {app}",
             "screen.submit": "Press Return in the selected field in {app}",
-            "task.run": "Work on: {goal} (up to {steps} steps)"}.get(action, action.replace(".", ": ").replace("_", " "))
+            "task.run": "Work on: {goal} (up to {steps} steps)",
+            "screen.scroll": "Scroll {direction} in {app}", "pointer.click": "Click where the pointer is, in {app}"}.get(action, action.replace(".", ": ").replace("_", " "))
     return what.format(name=name, url=t.get("url") or "the website", level=level, label=t.get("label") or "that",
                        text=t.get("text") or "", field=f"“{t['label']}”" if t.get("label") else "the selected field",
-                       app=t.get("app") or "the app", goal=t.get("goal") or "this", steps=t.get("steps") or 15)
+                       app=t.get("app") or "the app", goal=t.get("goal") or "this", steps=t.get("steps") or 15,
+                       direction=t.get("direction") or "down")

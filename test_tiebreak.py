@@ -125,6 +125,9 @@ class TiebreakJevTests(unittest.TestCase):
 
     def test_engine_threshold_follows_setting(self):
         with patch.object(self.siri, "tiebreak_threshold", return_value=85):
+            import actions
+            for name in ("CHOOSE", "CLASSIFY_ITEMS", "DESKTOP"):  # make_engine wires the app's globals: put them back
+                self.addCleanup(setattr, actions, name, getattr(actions, name))
             eng = self.siri.make_engine()
             self.assertEqual(eng.threshold(), 0.85)
         with patch.object(self.siri, "tiebreak_threshold", return_value=100):

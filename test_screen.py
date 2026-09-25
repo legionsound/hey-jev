@@ -349,7 +349,7 @@ class DeadlineTests(unittest.TestCase):
         with patch.object(screen, "trusted", lambda: True), \
                 patch.object(screen, "_app_info", lambda pid: ("Pad", "com.pad")), \
                 patch.object(screen, "process_start", lambda pid, d: "start"), \
-                patch.object(screen, "_read_ax", lambda pid, d, cap=None: (object(), (0, 0, 400, 300), "Pad", [ctl],
+                patch.object(screen, "_read_ax", lambda pid, d, cap=None, w=None: (object(), (0, 0, 400, 300), "Pad", [ctl],
                                                                  {id(ctl): (True, False, False)}, False)), \
                 patch.object(screen, "read_text", lambda *a: time.sleep(5)):
             t = time.monotonic()

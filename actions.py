@@ -491,7 +491,7 @@ def resolve_pinned(t):
     """An answer to "which one?": the exact control offered then, only if it is still there, unchanged."""
     deadline = resolve_deadline()
     try:
-        snap = screen.observe(pid=t["pid"], ocr=False, deadline=deadline)
+        snap = _target_window(t, deadline)
     except (screen.Unavailable, screen.TimedOut, screen.Wedged) as exc:
         return ("none", f"can't read the screen: {exc}")
     item = next((i for i in snap.items if i.token == t["element"]), None)
@@ -499,6 +499,16 @@ def resolve_pinned(t):
             or [round(v) for v in item.frame] != t["frame"] or (item.role, item.label) != (t["role"], t["label"])):
         return ("none", "that one isn't on screen anymore")
     return ("target", _screen_target(snap, item))
+
+
+def _target_window(t, deadline):
+    """The target's own window: the app's focused one, else (a background window) that exact window element."""
+    snap = screen.observe(pid=t["pid"], ocr=False, deadline=deadline)
+    if snap.window_token != t["window"]:
+        win = screen.element_for(t["window"])
+        if win is not None:
+            snap = screen.observe(pid=t["pid"], ocr=False, deadline=deadline, window=win)
+    return snap
 
 
 def _live(item):
@@ -631,10 +641,65 @@ def resolve_screen_press(args):
             if got[0] is not None and got[1] >= (INTENT_GATE if intent else CHOOSE_GATE):
                 exact = [named[got[0]]]
     if not exact:
-        return ("none", "nothing on screen does that" if intent else "no control by that name")
+        return _elsewhere(args, snap, deadline) or \
+            ("none", "nothing on screen does that" if intent else "no control by that name")
     if len({i.token for i in exact}) > 1:
         return ("choices", [_choice(snap, i) for i in exact[:4]])
     return ("target", _screen_target(snap, exact[0]))
+
+
+DESKTOP = None  # set by the app: screen.observe_desktop. Unset (tests), only the front window is searched
+
+
+def _elsewhere(args, front, deadline):
+    """Nothing in the front window fits: look in every other visible window (front to back, hidden controls
+    removed). One exact name -> that control; several -> ask, naming each app; none -> Jev's chooser over the
+    cards, each saying which app it's in. -> a resolve result, or None when nothing else fits either."""
+    if DESKTOP is None:
+        return None
+    try:
+        snaps, _skipped = DESKTOP(deadline)
+    except (screen.Unavailable, screen.TimedOut, screen.Wedged):
+        return None
+    others = [s for s in snaps if (s.pid, s.window_token) != (front.pid, front.window_token)]
+    pairs = [(s, i) for s in others for i in s.items if _live(i) and not i.from_value]
+    if not pairs:
+        return None
+    intent = args.get("intent")
+    said = screen._norm(intent or args.get("label"))
+    exact = [] if intent else [(s, i) for s, i in pairs if screen._norm(i.label) == said] or \
+        [(s, i) for s, i in pairs if f" {said} " in f" {screen._norm(i.label)} "]
+    if not exact and CHOOSE:
+        cards = []
+        for s in others:
+            mine = [i for t, i in pairs if t is s]
+            cards += [f"{c}, in {s.app}" for c in describe_cards(mine, s, s.window_frame)]
+        best = None
+        for k in range(0, len(pairs), CHOOSE_MAX):  # every card judged, a batch at a time, the surest pick wins
+            part = cards[k:k + CHOOSE_MAX]
+            try:
+                got = valid_choice(CHOOSE(intent, part, intent=True) if intent
+                                   else CHOOSE(args.get("label", ""), part), len(part))
+            except Exception:
+                got = None
+            if got is None:
+                return ("choices", [])
+            if got[0] is not None and got[1] >= (INTENT_GATE if intent else CHOOSE_GATE):
+                if best is not None:  # two windows each have a sure fit: ask rather than guess
+                    return ("choices", [_choice_in(*pairs[best[0]]), _choice_in(*pairs[k + got[0]])])
+                best = (k + got[0], got[1])
+        exact = [pairs[best[0]]] if best else []
+    if not exact:
+        return None
+    if len(exact) > 1:
+        return ("choices", [_choice_in(s, i) for s, i in exact[:4]])
+    return ("target", _screen_target(*exact[0]))
+
+
+def _choice_in(snap, item):
+    c = _choice(snap, item)
+    c["name"] = f"{item.label} in {snap.app} ({_where(item, snap.window_frame)})"
+    return c
 
 
 def _find(t, deadline):
@@ -643,7 +708,7 @@ def _find(t, deadline):
     if ref is None:
         raise Failed("unknown control")
     try:
-        snap = screen.observe(pid=t["pid"], ocr=False, deadline=deadline)
+        snap = _target_window(t, deadline)
     except (screen.Unavailable, screen.TimedOut, screen.Wedged) as exc:
         raise Failed(f"can't read the screen: {exc}")
     item = next((i for i in snap.items if i.token == t["element"]), None)

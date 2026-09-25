@@ -493,11 +493,11 @@ def merge(controls, texts, window_frame):
     return items
 
 
-def _read_ax(pid, deadline, walk_cap=None):
+def _read_ax(pid, deadline, walk_cap=None, window=None):
     AS = _AS()
     app_el = AS.AXUIElementCreateApplication(pid)
     AS.AXUIElementSetMessagingTimeout(app_el, AX_MESSAGE_TIMEOUT)
-    win = _window(app_el)
+    win = window if window is not None else _window(app_el)
     if win is None:
         raise Unavailable("no window")
     wframe = _frame(win)
@@ -505,7 +505,7 @@ def _read_ax(pid, deadline, walk_cap=None):
         raise Unavailable("window has no frame")
     left = max(0.05, min(walk_cap or ax_walk.AX_TIME_CAP, deadline - time.monotonic()))
     found, _offscreen, truncated = _walk(win, wframe, left)
-    menubar = _attr(app_el, "AXMenuBar")
+    menubar = _attr(app_el, "AXMenuBar") if window is None else None  # a background app's menus aren't showing
     bar = [ax_walk.AxNode(r, l, *f, True, k) for k in (_children(menubar) if menubar is not None else [])
            for r, l, f in [_attrs(k)] if l and f and r == "AXMenuBarItem" and l != "Apple"]
     controls = bar + found
@@ -513,9 +513,10 @@ def _read_ax(pid, deadline, walk_cap=None):
     return win, wframe, _label(win), controls, extra, truncated
 
 
-def observe(pid=None, ocr=True, deadline=None, walk_cap=None):
-    """Read one window under one deadline. Raises Unavailable or TimedOut; never acts. walk_cap: seconds the control
-    walk may take, instead of ax_walk.AX_TIME_CAP."""
+def observe(pid=None, ocr=True, deadline=None, walk_cap=None, window=None):
+    """Read one window under one deadline: the app's focused window, or `window` (an AX window element of that
+    pid). Raises Unavailable or TimedOut; never acts. walk_cap: seconds the control walk may take, instead of
+    ax_walk.AX_TIME_CAP."""
     t0 = time.monotonic()
     deadline = deadline or t0 + 4.0
     if not trusted():
@@ -525,7 +526,7 @@ def observe(pid=None, ocr=True, deadline=None, walk_cap=None):
     else:
         app, bundle = _app_info(pid)
     started = process_start(pid, deadline)
-    win, wframe, title, controls, extra, truncated = bounded(_read_ax, deadline, pid, deadline, walk_cap)
+    win, wframe, title, controls, extra, truncated = bounded(_read_ax, deadline, pid, deadline, walk_cap, window)
     try:
         field_scan = bounded(scan_fields, deadline, win)
     except TimedOut:
@@ -549,6 +550,78 @@ def observe(pid=None, ocr=True, deadline=None, walk_cap=None):
                     {"ax": round((t_ax - t0) * 1000), "ocr": round((time.monotonic() - t_ax) * 1000)},
                     window_ref=win, started=started, field_frames=fields, walk_complete=fields_complete,
                     text_frames=text_frames)
+
+
+def visible_windows():
+    """Ordinary on-screen windows, front to back: [(pid, frame)], Hey Jev's own excluded. From the window server,
+    so it spans every display (negative origins included) and gives the stacking order."""
+    import Quartz
+    opts = Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements
+    out = []
+    for w in Quartz.CGWindowListCopyWindowInfo(opts, Quartz.kCGNullWindowID) or []:
+        b = w.get("kCGWindowBounds") or {}
+        frame = tuple(float(b.get(k, 0)) for k in ("X", "Y", "Width", "Height"))
+        if (w.get("kCGWindowLayer") != 0 or float(w.get("kCGWindowAlpha", 1)) <= 0.05 or frame[2] < 60 or frame[3] < 60
+                or w.get("kCGWindowOwnerPID") == os.getpid()):
+            continue
+        out.append((int(w["kCGWindowOwnerPID"]), frame))
+    return out
+
+
+def _ax_window(pid, frame):
+    """The AX window of `pid` whose frame matches the window server's, or None."""
+    AS = _AS()
+    app_el = AS.AXUIElementCreateApplication(pid)
+    AS.AXUIElementSetMessagingTimeout(app_el, AX_MESSAGE_TIMEOUT)
+    best = None
+    for w in _attr(app_el, "AXWindows") or []:
+        f = _frame(w)
+        if f:
+            d = sum(abs(a - b) for a, b in zip(f, frame))
+            if best is None or d < best[0]:
+                best = (d, w)
+    return best[1] if best and best[0] <= 8 else None
+
+
+def _covered(frame, above):
+    """Whether a control's centre sits under any window stacked above its own."""
+    cx, cy = frame[0] + frame[2] / 2, frame[1] + frame[3] / 2
+    return any(x <= cx < x + w and y <= cy < y + h for x, y, w, h in above)
+
+
+DESKTOP_WINDOWS = 8  # at most this many windows, front first; the rest are reported, never silently dropped
+
+
+def observe_desktop(deadline=None):
+    """Every visible window, front to back, each its own Snapshot (identity, window token, frame), with controls hidden
+    behind a window above removed. -> (snapshots, skipped) where skipped counts windows not read (limit, no AX
+    window, error or time). The front window comes first and is read exactly as observe() reads it."""
+    deadline = deadline or time.monotonic() + 4.0
+    if not trusted():
+        raise Unavailable("accessibility_permission")
+    front_pid = frontmost()[0]
+    wins = visible_windows()
+    snaps, skipped, above = [], 0, []
+    for n, (pid, frame) in enumerate(wins):
+        if n >= DESKTOP_WINDOWS or time.monotonic() >= deadline:
+            skipped += len(wins) - n
+            break
+        try:
+            ax = None if pid == front_pid and not snaps else _ax_window(pid, frame)
+            if ax is None and not (pid == front_pid and not snaps):
+                skipped += 1
+                above.append(frame)
+                continue
+            snap = observe(pid=pid, ocr=False, deadline=deadline, window=ax)
+        except (Unavailable, TimedOut, Wedged):
+            skipped += 1
+            above.append(frame)
+            continue
+        if above:
+            snap.items = [i for i in snap.items if not _covered(i.frame, above)]
+        snaps.append(snap)
+        above.append(frame)
+    return snaps, skipped
 
 
 _shown = {}  # version -> Snapshot, the last few lists put in front of the user

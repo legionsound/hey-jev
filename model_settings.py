@@ -77,6 +77,34 @@ def save_apple_model(value):
     PREFS.setObject_forKey_(value, "apple_model")
 
 
+AGENTS = ("claude", "codex")  # agent sessions that can answer: Claude Code, Codex
+
+
+def agent_settings(name):
+    """Where an agent session runs: {"cwd": folder}. Home unless a saved folder still exists."""
+    import os
+    saved = PREFS.stringForKey_(f"agent_cwd_{name}")
+    return {"cwd": saved if saved and os.path.isdir(saved) else str(Path.home())}
+
+
+def clean_agent_folder(cwd):
+    """-> the real absolute path of an existing folder. Raises ValueError otherwise."""
+    import os
+    real = os.path.realpath(os.path.expanduser(str(cwd or "")))
+    if not cwd or not os.path.isdir(real):
+        raise ValueError(f"Working folder isn't a folder: {cwd}")
+    return real
+
+
+def save_agent_settings(name, cwd):
+    """Save an agent's working folder. -> the stored path."""
+    if name not in AGENTS:
+        raise ValueError("Unknown agent.")
+    real = clean_agent_folder(cwd)
+    PREFS.setObject_forKey_(real, f"agent_cwd_{name}")
+    return real
+
+
 def save_answer_settings(model, values, metadata):
     if metadata.get("id") != model:
         raise ValueError("Refresh models and select a model before saving.")

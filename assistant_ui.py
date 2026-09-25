@@ -50,7 +50,7 @@ from AppKit import (
 from AppKit import NSPopover, NSViewController
 from Foundation import NSObject, NSTimer, NSUserDefaults
 from actions import EFFECT_LABELS, EFFECTS
-from model_settings import (apple_model, save_apple_model, PREFS, PARAMETERS, advanced_open, save_advanced_open, voice, save_voice,
+from model_settings import (apple_model, save_apple_model, AGENTS, agent_settings, clean_agent_folder, save_agent_settings, PREFS, PARAMETERS, advanced_open, save_advanced_open, voice, save_voice,
                             app_folders, clean_app_folders, save_app_folders, JEV_MODELS, MODEL_ID_RE, jev_model,
                             save_jev_model, FISH_MODELS, fish_model, save_fish_model, WHISPER_SIZES, whisper_model,
                             save_whisper_model, OCR_LEVELS, ocr_level, save_ocr_level, MAX_APP_FOLDERS, TIEBREAK_MAX, TIEBREAK_MIN, answer_settings, cached_models, confirm_policy,
@@ -139,8 +139,34 @@ TEACH_TAKES = 5
 OPS = itertools.count(1)  # async Settings operations: ids are never reused, even across window sessions
 GROUP_X, CONTROL_W = 20, 250
 SCREEN_EFFECTS = frozenset({"click", "type", "submit", "scroll", "task", "in_task", "risky"})
-ANSWER_PROVIDERS = ("disabled", "openrouter", "apple")  # order of the Deeper answers popup
+ANSWER_PROVIDERS = ("disabled", "openrouter", "apple", "claude", "codex")  # order of the Deeper answers popup
 APPLE_NAMES = {"on_device": "On this Mac", "private_cloud": "Apple Private Cloud Compute"}
+AGENT_NAMES = {"claude": "Claude Code", "codex": "Codex"}
+
+
+def find_adapter(name):
+    """Path of the agent's ACP adapter on this Mac, or None (also when this build has no agent support)."""
+    try:
+        import acp_client
+        return acp_client.find_adapter(name)
+    except Exception:
+        return None
+
+
+def choose_folder(prompt):
+    """Folder picker. -> path or None. Tests replace this so no panel appears."""
+    panel = AppKit.NSOpenPanel.openPanel()
+    panel.setCanChooseDirectories_(True)
+    panel.setCanChooseFiles_(False)
+    panel.setAllowsMultipleSelection_(False)
+    panel.setPrompt_(prompt)
+    return panel.URL().path() if panel.runModal() == 1 else None  # NSModalResponseOK
+
+
+def show_settings_window(sheet):
+    """Bring Settings forward. Tests replace this so no window appears."""
+    sheet.makeKeyAndOrderFront_(None)
+    NSApp.activateIgnoringOtherApps_(True)
 SETTINGS_PANES = (("providers", "Providers", "key.fill"), ("answers", "Answers", "sparkles"),
                   ("voice", "Voice", "speaker.wave.2.fill"), ("confirm", "Confirmations", "checkmark.shield"),
                   ("apps", "Apps", "square.grid.2x2"), ("transcription", "Transcription", "waveform"))
@@ -713,7 +739,7 @@ class AppDelegate(NSObject):
         self.jev_checked = None  # (source, typed key) the shown result belongs to
         y = form_group(p, 20, "Jev decisions", [("Source", self.jev_provider), ("API key", jev_keys),
                                                 ("Model", jev_models), ("Connection", check_cell)])
-        self.answer_provider = self._popup(None, ["Off", "OpenRouter", "Apple"], NSMakeRect(0, 0, CONTROL_W, 24),
+        self.answer_provider = self._popup(None, ["Off", "OpenRouter", "Apple"] + [AGENT_NAMES[a] for a in AGENTS], NSMakeRect(0, 0, CONTROL_W, 24),
                                            "answerSourceChanged:")
         self.answer_provider.selectItemAtIndex_(ANSWER_PROVIDERS.index(get_setting("ANSWER_PROVIDER")))
         # Apple's models are listed as this Mac reports them; the saved choice shows until the list arrives.
@@ -722,9 +748,20 @@ class AppDelegate(NSObject):
                                        "appleModelChanged:")
         self.apple_popup.setAutoenablesItems_(False)
         self.apple_note = text("", NSMakeRect(0, 0, CONTROL_W, 17), 11, NSColor.secondaryLabelColor())
+        # Claude Code / Codex: the selected agent's working folder and whether its adapter is on this Mac.
+        self.agent_cwd_drafts = {a: agent_settings(a)["cwd"] for a in AGENTS}
+        folder_cell = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, CONTROL_W, 24))
+        self.agent_folder = text("", NSMakeRect(0, 4, CONTROL_W - 86, 17), 13, NSColor.secondaryLabelColor())
+        self.agent_folder.setLineBreakMode_(5)  # truncate in the middle: the folder name stays readable
+        self.agent_choose = NSButton.buttonWithTitle_target_action_("Choose…", self, "chooseAgentFolder:")
+        self.agent_choose.setFrame_(NSMakeRect(CONTROL_W - 78, 0, 78, 24))
+        for view in (self.agent_folder, self.agent_choose):
+            folder_cell.addSubview_(view)
+        self.agent_note = text("", NSMakeRect(0, 0, CONTROL_W, 17), 11, NSColor.secondaryLabelColor())
         y = form_group(p, y, "Deeper answers", [("Provider", self.answer_provider),
                                                 ("OpenRouter key", key_field("OPENROUTER_API_KEY")),
-                                                ("Apple model", self.apple_popup), ("", self.apple_note)])
+                                                ("Apple model", self.apple_popup), ("", self.apple_note),
+                                                ("Working folder", folder_cell), ("", self.agent_note)])
         from_env = [k for k in KEY_NAMES if os.getenv(k)]
         footnote(p, y, "Keys are stored in your Keychain. Leave a field empty to keep the saved key."
                  + (" A .env file is overriding: " + ", ".join(from_env) + "." if from_env else ""))
@@ -972,8 +1009,7 @@ class AppDelegate(NSObject):
         self._display_parameters()
         self._sync_voice_pane()
         sheet.center()
-        sheet.makeKeyAndOrderFront_(None)
-        NSApp.activateIgnoringOtherApps_(True)
+        show_settings_window(sheet)
         if get_secret("OPENROUTER_API_KEY"):
             self.refreshModels_(None)
 
@@ -1059,6 +1095,41 @@ class AppDelegate(NSObject):
         self.key_fields["TYPESAFE_API_KEY"].setHidden_(not typesafe)
         self.key_fields["OPENROUTER_API_KEY"].setEnabled_(self.answer_provider.indexOfSelectedItem() == 1)
         self.apple_popup.setEnabled_(ANSWER_PROVIDERS[self.answer_provider.indexOfSelectedItem()] == "apple")
+        self._show_agent()
+
+    @objc.python_method
+    def _selected_agent(self):
+        chosen = ANSWER_PROVIDERS[self.answer_provider.indexOfSelectedItem()]
+        return chosen if chosen in AGENTS else None
+
+    @objc.python_method
+    def _show_agent(self):
+        """Folder and adapter status for the selected agent only; blank and inactive for other providers."""
+        agent = self._selected_agent()
+        self.agent_choose.setEnabled_(agent is not None)
+        if agent is None:
+            self.agent_folder.setStringValue_("")
+            self.agent_note.setStringValue_("")
+            return
+        cwd = self.agent_cwd_drafts[agent]
+        self.agent_folder.setStringValue_(cwd)
+        self.agent_folder.setToolTip_(cwd)
+        adapter = find_adapter(agent)
+        self.agent_note.setToolTip_(adapter)
+        self.agent_note.setStringValue_(f"Full {AGENT_NAMES[agent]} session: its own tools, hooks and memory." if adapter
+                                        else f"{AGENT_NAMES[agent]} connector (ACP adapter) not found on this Mac.")
+
+    def chooseAgentFolder_(self, _sender):
+        agent = self._selected_agent()
+        path = agent and choose_folder("Choose")
+        if not path:
+            return
+        try:
+            self.agent_cwd_drafts[agent] = clean_agent_folder(path)
+            self.settings_message.setStringValue_("")
+        except ValueError as exc:
+            self.settings_message.setStringValue_(str(exc))
+        self._show_agent()
 
     @objc.python_method
     def _show_backend(self):
@@ -1622,6 +1693,10 @@ class AppDelegate(NSObject):
                                          + (self.apple_models[i].get("reason") or "pick another."))
                     apple_pick = self.apple_models[i]["id"]
                 # list not loaded yet: the saved Apple model stays
+            if answer_provider in AGENTS and not find_adapter(answer_provider):
+                raise ValueError(f"{AGENT_NAMES[answer_provider]} can't answer yet: its connector (ACP adapter) "
+                                 "isn't installed on this Mac.")
+            agent_folders = {a: clean_agent_folder(c) for a, c in self.agent_cwd_drafts.items()}  # checked before writes
             required = ["FISH_AUDIO_API_KEY", "TYPESAFE_API_KEY" if jev_provider == "typesafe" else "JEV_OPENROUTER_API_KEY"]
             if answer_provider == "openrouter":
                 required.append("OPENROUTER_API_KEY")
@@ -1634,6 +1709,9 @@ class AppDelegate(NSObject):
             save_secret("JEV_PROVIDER", jev_provider)
             if apple_pick and apple_pick != apple_model():
                 save_apple_model(apple_pick)
+            for agent, cwd in agent_folders.items():
+                if cwd != agent_settings(agent)["cwd"]:
+                    save_agent_settings(agent, cwd)
             save_secret("ANSWER_PROVIDER", answer_provider)
             save_answer_settings(self.selected_model, values, self.selected_metadata)
             save_confirm_policy({e: ("ask", "auto")[p.indexOfSelectedItem()] for e, p in self.policy_popups.items()})

@@ -48,6 +48,7 @@ class Engine:
         self.classify, self.policy, self.ask, self.answer = classify, policy, ask, answer
         self.tiebreak, self.threshold = tiebreak, threshold
         self.on_event = on_event or (lambda *a: None)
+        self.interrupt_answer = None  # set by the app: stops an answer backend that is blocked mid-request
         self.actions = actions
         self.effect_pending = pending  # an earlier effect that may still land holds every later dispatch
         self.task_jev = None  # (state_text, questions) -> answers: Jev for multi-step tasks, set by the app
@@ -116,6 +117,8 @@ class Engine:
                 self._finish(rec, "cancelled")
             elif rec["state"] == "running":
                 rec["cancel"] = True  # checked before each step and consumes any open confirmation
+                if rec.get("answering") and self.interrupt_answer:
+                    self.interrupt_answer()  # a blocked answer backend is stopped, not waited out
                 if self.pending and self.pending["id"] == rid and self.pending["decision"] is None:
                     self.pending["decision"] = "cancelled"
                 self.lock.notify_all()
@@ -210,12 +213,18 @@ class Engine:
             if kind == "clarify":
                 return self._finish(rec, "needs_clarification", detail=payload)
         if kind == "answer":
+            with self.lock:
+                rec["answering"] = True
             try:
                 said = self.answer(rec["text"])
             except Exception as exc:  # no effect was involved: a definite failure with the provider's reason
                 with self.lock:
+                    if rec["cancel"]:
+                        return self._finish(rec, "cancelled")
                     return self._finish(rec, "failed", error="answer_failed", detail=str(exc)[:300])
             with self.lock:
+                if rec["cancel"]:  # Stop arrived while it was thinking: the late answer is dropped, never spoken
+                    return self._finish(rec, "cancelled")
                 return self._finish(rec, "answered", say=said)
         if len(payload) == 1 and payload[0]["action"] == "task.run":
             return self._task(rec, payload[0])

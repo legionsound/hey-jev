@@ -351,6 +351,8 @@ def line_for(result):
 # --------------------------------------------------------------------------- Timers and reminders
 def prepare_reminder(t, said):
     """While the timer runs, have the LLM write the alert and a short name, and render the audio, so it plays instantly."""
+    if ANSWER_PROVIDER == "apple":
+        return prepare_reminder_apple(t, said)
     if ANSWER_PROVIDER != "openrouter" or not OR_KEY:
         return
     try:
@@ -371,6 +373,20 @@ def prepare_reminder(t, said):
             fetch_tts(voice_output.with_cues(data["alert"], "fish"))  # cache the audio now, as it will be spoken
         t["line"] = data["alert"]
         print(f"\n  reminder ready: {t['label']!r} -> {t['line']!r}")
+    except Exception as e:
+        print(f"\n  reminder prep failed, using the plain line: {e}")
+
+
+def prepare_reminder_apple(t, said):
+    """Apple models name the reminder only; the alert keeps the plain line (no Fish cue tags to follow)."""
+    try:
+        import apple_fm
+        label = apple_fm.ask(model_settings.apple_model(),
+                             "Name the task in this reminder in 2 to 4 words, e.g. Call Sam. Reply with the name only.",
+                             said, max_tokens=20).strip(" .\"'\n")
+        if 0 < len(label) <= 40:
+            t["label"] = label
+            print(f"\n  reminder ready: {t['label']!r}")
     except Exception as e:
         print(f"\n  reminder prep failed, using the plain line: {e}")
 
@@ -400,6 +416,11 @@ def cue_rule():
 
 
 def ask_llm(text):
+    if ANSWER_PROVIDER == "apple":
+        import apple_fm
+        return apple_fm.ask(model_settings.apple_model(),
+                            "You are a voice assistant. Answer in one short spoken sentence, no markdown. "
+                            "Never use bracketed tags. " + now_line(), text)
     t = time.time()
     r = requests.post("https://openrouter.ai/api/v1/chat/completions",
                       headers={"Authorization": f"Bearer {OR_KEY}"},
@@ -580,7 +601,8 @@ def make_engine(notify=None, ask=None, show=None):
 
     def answer(text):
         from engine import current_rid
-        t, model = time.time(), answer_settings().get("model")
+        t = time.time()
+        model = model_settings.apple_model() if ANSWER_PROVIDER == "apple" else answer_settings().get("model")
         try:
             said = ask_llm(text)
         except Exception as exc:
@@ -596,7 +618,10 @@ def make_engine(notify=None, ask=None, show=None):
     actions.CLASSIFY_ITEMS = classify_items
     eng = Engine(classify, policy=confirm_policy, ask=ask, tiebreak=tiebreak,
                  threshold=lambda: float("inf") if tiebreak_threshold() >= 100 else tiebreak_threshold() / 100,
-                 answer=answer if ANSWER_PROVIDER == "openrouter" else None, on_event=on_event)
+                 answer=answer if ANSWER_PROVIDER in ("openrouter", "apple") else None, on_event=on_event)
+    if ANSWER_PROVIDER == "apple":
+        import apple_fm
+        eng.interrupt_answer = apple_fm.interrupt
     eng.spoke_first = spoke_first
     eng.task_jev = task_jev
     eng.hold = contextlib.nullcontext  # the voice loop sets the floor's hold once the microphone exists
@@ -830,7 +855,8 @@ def runtime_facts():
         pass
     return {"revision": rev, "dirty": dirty, "source": here, "python": sys.version.split()[0],
             "executable": sys.executable, "bundle": os.environ.get("RESOURCEPATH"), "jev_provider": JEV_PROVIDER,
-            "answer_provider": ANSWER_PROVIDER, "answer_model": answer_settings().get("model"),
+            "answer_provider": ANSWER_PROVIDER, "answer_model": (model_settings.apple_model() if ANSWER_PROVIDER == "apple"
+                                                          else answer_settings().get("model")),
             "transcription": transcription_backend()}
 
 

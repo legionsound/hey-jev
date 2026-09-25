@@ -9,7 +9,7 @@ load_dotenv()  # so a .env works from the app bundle too, not just the terminal
 
 SERVICE = "com.jevsiri.keys"
 KEY_NAMES = ("TYPESAFE_API_KEY", "JEV_OPENROUTER_API_KEY", "FISH_AUDIO_API_KEY", "OPENROUTER_API_KEY")
-SETTINGS = {"JEV_PROVIDER": ("openrouter", "typesafe"), "ANSWER_PROVIDER": ("disabled", "openrouter")}
+SETTINGS = {"JEV_PROVIDER": ("openrouter", "typesafe"), "ANSWER_PROVIDER": ("disabled", "openrouter", "apple")}
 
 
 def keychain_value(name):

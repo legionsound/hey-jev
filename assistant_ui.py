@@ -50,7 +50,7 @@ from AppKit import (
 from AppKit import NSPopover, NSViewController
 from Foundation import NSObject, NSTimer, NSUserDefaults
 from actions import EFFECT_LABELS, EFFECTS
-from model_settings import (PREFS, PARAMETERS, advanced_open, save_advanced_open, voice, save_voice,
+from model_settings import (apple_model, save_apple_model, PREFS, PARAMETERS, advanced_open, save_advanced_open, voice, save_voice,
                             app_folders, clean_app_folders, save_app_folders, JEV_MODELS, MODEL_ID_RE, jev_model,
                             save_jev_model, FISH_MODELS, fish_model, save_fish_model, WHISPER_SIZES, whisper_model,
                             save_whisper_model, OCR_LEVELS, ocr_level, save_ocr_level, MAX_APP_FOLDERS, TIEBREAK_MAX, TIEBREAK_MIN, answer_settings, cached_models, confirm_policy,
@@ -139,6 +139,8 @@ TEACH_TAKES = 5
 OPS = itertools.count(1)  # async Settings operations: ids are never reused, even across window sessions
 GROUP_X, CONTROL_W = 20, 250
 SCREEN_EFFECTS = frozenset({"click", "type", "submit", "scroll", "task", "in_task", "risky"})
+ANSWER_PROVIDERS = ("disabled", "openrouter", "apple")  # order of the Deeper answers popup
+APPLE_NAMES = {"on_device": "On this Mac", "private_cloud": "Apple Private Cloud Compute"}
 SETTINGS_PANES = (("providers", "Providers", "key.fill"), ("answers", "Answers", "sparkles"),
                   ("voice", "Voice", "speaker.wave.2.fill"), ("confirm", "Confirmations", "checkmark.shield"),
                   ("apps", "Apps", "square.grid.2x2"), ("transcription", "Transcription", "waveform"))
@@ -711,14 +713,24 @@ class AppDelegate(NSObject):
         self.jev_checked = None  # (source, typed key) the shown result belongs to
         y = form_group(p, 20, "Jev decisions", [("Source", self.jev_provider), ("API key", jev_keys),
                                                 ("Model", jev_models), ("Connection", check_cell)])
-        self.answer_provider = self._popup(None, ["Off", "OpenRouter"], NSMakeRect(0, 0, CONTROL_W, 24), "answerSourceChanged:")
-        self.answer_provider.selectItemAtIndex_(0 if get_setting("ANSWER_PROVIDER") == "disabled" else 1)
+        self.answer_provider = self._popup(None, ["Off", "OpenRouter", "Apple"], NSMakeRect(0, 0, CONTROL_W, 24),
+                                           "answerSourceChanged:")
+        self.answer_provider.selectItemAtIndex_(ANSWER_PROVIDERS.index(get_setting("ANSWER_PROVIDER")))
+        # Apple's models are listed as this Mac reports them; the saved choice shows until the list arrives.
+        self.apple_models = []
+        self.apple_popup = self._popup(None, [APPLE_NAMES[apple_model()]], NSMakeRect(0, 0, CONTROL_W, 24),
+                                       "appleModelChanged:")
+        self.apple_popup.setAutoenablesItems_(False)
+        self.apple_note = text("", NSMakeRect(0, 0, CONTROL_W, 17), 11, NSColor.secondaryLabelColor())
         y = form_group(p, y, "Deeper answers", [("Provider", self.answer_provider),
-                                                ("OpenRouter key", key_field("OPENROUTER_API_KEY"))])
+                                                ("OpenRouter key", key_field("OPENROUTER_API_KEY")),
+                                                ("Apple model", self.apple_popup), ("", self.apple_note)])
         from_env = [k for k in KEY_NAMES if os.getenv(k)]
         footnote(p, y, "Keys are stored in your Keychain. Leave a field empty to keep the saved key."
                  + (" A .env file is overriding: " + ", ".join(from_env) + "." if from_env else ""))
         self._sync_key_rows()
+        if get_setting("ANSWER_PROVIDER") == "apple":
+            self._load_apple_models()
 
         # Deeper answers: model, then the advanced request controls.
         current = answer_settings()
@@ -995,6 +1007,48 @@ class AppDelegate(NSObject):
 
     def answerSourceChanged_(self, _sender):
         self._sync_key_rows()
+        if ANSWER_PROVIDERS[self.answer_provider.indexOfSelectedItem()] == "apple" and not self.apple_models:
+            self._load_apple_models()
+
+    @objc.python_method
+    def _load_apple_models(self):
+        """Ask the helper which Apple models this Mac has (a cold helper takes a couple of seconds)."""
+        self.apple_note.setStringValue_("Checking this Mac's Apple models…")
+        def load():
+            import apple_fm
+            try:
+                payload = {"models": apple_fm.models()}
+            except Exception as exc:
+                payload = {"error": str(exc) or "Couldn't check Apple models."}
+            self.performSelectorOnMainThread_withObject_waitUntilDone_("appleModelsLoaded:", payload, False)
+        threading.Thread(target=load, daemon=True).start()
+
+    def appleModelsLoaded_(self, payload):
+        if not getattr(self, "settings_sheet", None):
+            return
+        if "error" in payload:
+            self.apple_note.setStringValue_(payload["error"])
+            return
+        self.apple_models = list(payload["models"])
+        self.apple_popup.removeAllItems()
+        for m in self.apple_models:
+            self.apple_popup.addItemWithTitle_(m["name"] + (" (cloud)" if m.get("remote") else ""))
+            self.apple_popup.lastItem().setEnabled_(bool(m.get("available")))
+        pick = next((i for i, m in enumerate(self.apple_models) if m["id"] == apple_model()), 0)
+        if self.apple_models:
+            self.apple_popup.selectItemAtIndex_(pick)
+        self.appleModelChanged_(None)
+
+    def appleModelChanged_(self, _sender):
+        i = self.apple_popup.indexOfSelectedItem()
+        m = self.apple_models[i] if 0 <= i < len(self.apple_models) else None
+        if m is None:
+            self.apple_note.setStringValue_("No Apple models reported on this Mac." if self.apple_models == [] else "")
+        elif not m.get("available"):
+            self.apple_note.setStringValue_(m.get("reason") or "Not available on this Mac.")
+        else:
+            self.apple_note.setStringValue_("Runs on Apple's servers (Private Cloud Compute)." if m.get("remote")
+                                            else "Runs on this Mac. Can't look things up online.")
 
     @objc.python_method
     def _sync_key_rows(self):
@@ -1004,6 +1058,7 @@ class AppDelegate(NSObject):
         self.key_fields["JEV_OPENROUTER_API_KEY"].setHidden_(typesafe)
         self.key_fields["TYPESAFE_API_KEY"].setHidden_(not typesafe)
         self.key_fields["OPENROUTER_API_KEY"].setEnabled_(self.answer_provider.indexOfSelectedItem() == 1)
+        self.apple_popup.setEnabled_(ANSWER_PROVIDERS[self.answer_provider.indexOfSelectedItem()] == "apple")
 
     @objc.python_method
     def _show_backend(self):
@@ -1557,7 +1612,16 @@ class AppDelegate(NSObject):
             if not all(MODEL_ID_RE.fullmatch(m) for m in jev_models.values()):
                 raise ValueError("Jev model: letters, numbers and . _ : / + - only.")
             jev_provider = ("openrouter", "typesafe")[self.jev_provider.indexOfSelectedItem()]
-            answer_provider = ("disabled", "openrouter")[self.answer_provider.indexOfSelectedItem()]
+            answer_provider = ANSWER_PROVIDERS[self.answer_provider.indexOfSelectedItem()]
+            apple_pick = None
+            if answer_provider == "apple":
+                i = self.apple_popup.indexOfSelectedItem()
+                if self.apple_models and 0 <= i < len(self.apple_models):
+                    if not self.apple_models[i].get("available"):
+                        raise ValueError("That Apple model isn't available on this Mac: "
+                                         + (self.apple_models[i].get("reason") or "pick another."))
+                    apple_pick = self.apple_models[i]["id"]
+                # list not loaded yet: the saved Apple model stays
             required = ["FISH_AUDIO_API_KEY", "TYPESAFE_API_KEY" if jev_provider == "typesafe" else "JEV_OPENROUTER_API_KEY"]
             if answer_provider == "openrouter":
                 required.append("OPENROUTER_API_KEY")
@@ -1568,6 +1632,8 @@ class AppDelegate(NSObject):
                 if value:
                     save_secret(key_name, value)
             save_secret("JEV_PROVIDER", jev_provider)
+            if apple_pick and apple_pick != apple_model():
+                save_apple_model(apple_pick)
             save_secret("ANSWER_PROVIDER", answer_provider)
             save_answer_settings(self.selected_model, values, self.selected_metadata)
             save_confirm_policy({e: ("ask", "auto")[p.indexOfSelectedItem()] for e, p in self.policy_popups.items()})
@@ -1906,6 +1972,8 @@ class AppDelegate(NSObject):
             siri.ENGINE.shutdown()
         if siri and siri.BRIDGE:
             siri.BRIDGE.stop()
+        if "apple_fm" in sys.modules:
+            sys.modules["apple_fm"].shutdown()
         voice_output.configure(mute=None)
         if getattr(self, "global_monitor", None):
             NSEvent.removeMonitor_(self.global_monitor)

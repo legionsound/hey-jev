@@ -65,6 +65,18 @@ def validate_parameters(values, metadata):
     return result
 
 
+def apple_model():
+    """Which of Apple's built-in models answers questions: "on_device" (default) or "private_cloud"."""
+    value = PREFS.stringForKey_("apple_model")
+    return value if value in ("on_device", "private_cloud") else "on_device"
+
+
+def save_apple_model(value):
+    if value not in ("on_device", "private_cloud"):
+        raise ValueError("Unknown Apple model.")
+    PREFS.setObject_forKey_(value, "apple_model")
+
+
 def save_answer_settings(model, values, metadata):
     if metadata.get("id") != model:
         raise ValueError("Refresh models and select a model before saving.")

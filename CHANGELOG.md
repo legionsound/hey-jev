@@ -29,7 +29,7 @@ A ground-up rework of how commands run, plus screen control. Everything a comman
 
 ### Web
 
-- **Websites.** "Go to google.com" opens it and checks the browser actually loaded that address (strict comparison, redirects handled by policy).
+- **Websites.** "Go to google.com" opens it and verifies the result where the browser allows: Chrome checks the tab actually loaded that address (strict comparison, redirects handled by policy); Safari opens a new tab and reports `unverified`.
 - **Site names.** "Go to YouTube" opens the curated site for a name with no dot.
 - **Google search.** "Search Google for …" opens a literal search.
 - **Browser choice.** Naming a browser ("… in Safari") wins; unsupported browsers say which ones work.
@@ -60,7 +60,7 @@ A ground-up rework of how commands run, plus screen control. Everything a comman
 
 ### Settings and window
 
-- Settings rebuilt in the System Settings style, save-gated (Cancel/close discards): panes for Providers, Answers, Voice, Confirmations, Apps and Transcription, in that order.
+- Settings rebuilt in the System Settings style: panes for Providers, Answers, Voice, Confirmations, Apps and Transcription, in that order. Pane edits are save-gated (Cancel/close discards); the status-window voice volume slider and mute button apply immediately.
 - Every model the app uses (Jev, answers, Whisper, Fish voice model, OCR level) is a setting, defaulting to the original values.
 - Status window redesigned with Liquid Glass.
 - Menu bar icon is now a person-speaking symbol.

@@ -9,16 +9,20 @@ setup(
     options={"py2app": {
         "argv_emulation": False,
         "iconfile": "assets/icon.icns",
+        # Function-level imports py2app's static scan can miss: screen.py
+        # imports these lazily (AX control via ApplicationServices,
+        # capture/clicks via Quartz, identity via AppKit/Foundation).
+        "includes": ["Quartz", "ApplicationServices", "AppKit", "Foundation"],
         "plist": {
             "CFBundleName": APP_NAME,
             "CFBundleDisplayName": APP_NAME,
             "CFBundleIdentifier": "com.heyjev.app",
-            "CFBundleShortVersionString": "0.2",
+            "CFBundleShortVersionString": "0.3.0",
             "LSUIElement": False,
             "NSHighResolutionCapable": True,
             "NSMicrophoneUsageDescription": "Hey Jev listens for your commands.",
             "NSSpeechRecognitionUsageDescription": "Hey Jev can turn your voice into text on this Mac with Apple dictation.",
-            "NSAppleEventsUsageDescription": "Hey Jev controls Spotify, volume and dark mode for you.",
+            "NSAppleEventsUsageDescription": "Hey Jev controls Spotify, Safari, Chrome, System Events, volume and dark mode for you.",
         },
     }},
     setup_requires=["py2app"],

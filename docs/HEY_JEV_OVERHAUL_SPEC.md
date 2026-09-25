@@ -1,5 +1,8 @@
 # Hey Jev overhaul
 
+> **Historical note (2026-09-25 release):** this document was written before the build and is kept for context only. Do not extend it. Current behavior is described in [FEATURES.md](FEATURES.md), [ARCHITECTURE.md](ARCHITECTURE.md), and the authoritative [ENGINE_CONTRACT.md](ENGINE_CONTRACT.md).
+
+
 Status: proposed overhaul; Astra owns documentation only, Buzz agents own implementation. Spec branch: `feat/menubar-model-settings`, based on `8c04746`.
 Owner: Johnny's fork, `legionsound/hey-jev`. Actual checkout: `/Users/johnmeyer/Developer/Hey Jev`.
 

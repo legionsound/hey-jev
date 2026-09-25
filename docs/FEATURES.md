@@ -1,0 +1,115 @@
+# Features
+
+What Hey Jev can do in this release, grounded in the code in this folder.
+For exact behavior rules see `ENGINE_CONTRACT.md`.
+
+## Apps (`app_catalog.py`, `actions.py`)
+
+- Opens and quits installed Mac apps, matched against what is actually
+  installed (Applications folders, running apps, Spotlight, plus extra
+  folders from Settings > Apps). Names are never guessed.
+- "Mac whisper" finds MacWhisper (space-insensitive match).
+- Two matching copies: Jev breaks the tie from what is running / opened
+  last, above the Settings confidence slider (default 85%). Below it, or
+  for quit, it asks which.
+- Quit only terminates processes whose bundle path equals the resolved
+  path, and reports honestly when an app will not quit.
+
+## Volume, music, system (`actions.py`)
+
+- Exact system volume ("set volume to 40 percent", relative up/down),
+  mute/unmute, per-app Spotify volume.
+- Spotify play / pause / next / previous via AppleScript.
+- Dark mode on/off (read back after setting), lock screen, sleep the Mac
+  (lock and sleep report `unverified`: there is no readback).
+
+## Web (`url_adapter.py`, `actions.py`)
+
+- "Go to google.com" opens the URL and checks the browser tab actually
+  shows that address (strict comparison after documented normalizations).
+- "Go to YouTube" resolves a dotless name through a curated site map;
+  unknown names are never guessed.
+- "Search Google for …" opens a literal search URL.
+- Naming a browser ("… in Safari") wins. Only Chrome reports a completed
+  load (unique tab id + URL match); Safari opens a new tab and reports
+  `unverified`; other browsers are opened and reported `unverified`.
+  Page content and load state are not checked.
+
+## Screen control (`screen.py`)
+
+- `screen.list`: reads the front window through Accessibility (Apple
+  Vision OCR adds only text lines no control covers). Items carry their
+  source (`ax`, `ocr`, `ax+ocr`), capped at 60, numbered in reading order.
+- `screen.press`: presses a named button/link/tab, or "click 4" for the
+  numbered overlay (menu bar > Show what Jev sees). Numbers bind to the
+  list visible when speech started; a changed list refuses (`screen_changed`).
+- `screen.type`: types literal text into a named or focused field via
+  `AXSelectedText` (no keystrokes, nothing submitted). Password fields are
+  never typed into or read. Verified only when the field holds exactly the
+  old text plus the typed text.
+- `screen.submit`: "press return" sends `AXConfirm` to the focused
+  element. Verified only when the field goes away or its text changes;
+  that never means a message or purchase was accepted.
+- `screen.scroll`: native scroll bars move by fraction and verify by
+  value readback; web areas use `AXScrollToVisible` and always report
+  `unverified`.
+- `pointer.click`: a real click where the pointer already is (left, right,
+  double). Always `unverified`; refused over Hey Jev's own windows,
+  overlays, or menus.
+- `screen.pick`: "click the third video", "the video in the bottom-right"
+  — Jev picks among control cards above a confidence gate, then it runs
+  as an ordinary press with identity re-check and readback.
+- Direct commands ("scroll down", "click here") skip classification and
+  run directly, because their words leave nothing for Jev to choose.
+
+## Multi-step tasks (`task.py`)
+
+- "Take over: …" / "Work on: …" hands Jev a goal in the current app. One
+  approval per task by default (category `task`); with `in_task`
+  Automatic that OK covers its clicks/typing/Return, with Ask first each
+  step asks. Shared 120 s deadline, at most 10 s per Jev call, stops when
+  progress stalls. `done` is verified only against an explicit
+  "until you see X" that appeared during the task; anything else ends
+  `unverified`.
+
+## Voice and listening (`siri.py`, `speech_apple.py`, `wake.py`)
+
+- Transcription on the Mac: faster-whisper or Apple on-device dictation
+  (Settings > Transcription, switchable live, with mic test).
+- Custom wake phrase ("Hey Jev" default), applied live; short phrases
+  warn about accidental triggers. "Teach Jev your wake phrase" learns
+  spellings from a few repetitions.
+- Fish Audio voice with All / Some / None cue control; fixed replies cached.
+- Saying "stop" cancels the running request and anything queued (only
+  what has not been dispatched yet; an already-sent effect is reported
+  as sent).
+
+## Command line (`jevctl`, `bridge.py`)
+
+- `jevctl command --text "…"`, `--id`, `--wait`, `status`, `cancel`,
+  `trials --last N`. Same planner, queue, and confirmation rules as voice.
+- Results per step: only `completed` means the app saw the result;
+  `unverified` = acted but could not check; `unknown` = may or may not
+  have happened. Never retries; re-sending an id returns the stored result.
+
+## Confirmations and safety (`engine.py`, `actions.py`)
+
+- Every action belongs to an effect category; Settings > Confirmations
+  maps each to Ask first or Automatic. Ask-first defaults: quit, lock,
+  sleep, click, type, submit, task, risky. Reading the screen (`look`)
+  has no effect and never asks.
+- Risky-labeled controls (buy, send, delete, pay, submit, post, share,
+  install, sign out, similar) always ask. That list adds confirmation; it
+  never proves other clicks harmless.
+- Multi-step requests stop at the first step that did not verifiably
+  complete (`unverified` stops too); the rest are `skipped`.
+- Request ids are remembered for the whole app run (full bodies 10 min);
+  re-sending returns the stored result, never re-runs. Nothing retries
+  side effects.
+
+## Diagnostics (`diagnostics.py`, `trials.py`)
+
+- Every request stage logged as one JSON line to
+  `~/Library/Logs/Hey Jev/requests.jsonl`, keys and secrets redacted,
+  field values and screen text never logged.
+- `jevctl trials` summarizes recent requests from that log.

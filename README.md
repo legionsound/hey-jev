@@ -17,7 +17,7 @@ This is a fork of [henryklunaris/hey-jev](https://github.com/henryklunaris/hey-j
 
 Most voice assistants guess, act, and announce success. Hey Jev is built the other way round:
 
-- **It checks before it says "done".** Every action has a readback: the app is actually running, the volume is actually 40, the browser tab actually shows that address. If it can't check, it says so ("I sent that, but I couldn't check whether it worked").
+- **It checks before it says "done".** Most actions have a readback: the app is actually running, the volume is actually 40, the Chrome tab actually shows that address. Where no check exists (lock, sleep, pointer clicks, web scrolls, Safari navigation), it says so ("I sent that, but I couldn't check whether it worked").
 - **The model decides, Python acts.** Jev, a small classifier model, answers narrow questions ("is this a command, and which kind?"). Where it selects — duplicate-app tie-breaks, screen cards, task actions — the choice is validated against bounded candidates with identity checks, and execution stays deterministic.
 - **Nothing runs twice.** A multi-step request stops at the first step that did not verifiably work and tells you what already happened. Re-sending a request id returns the stored result instead of running again: full results are kept ten minutes, and the id record itself lasts for the whole app run. Side effects are never retried.
 - **You choose what asks first.** Every kind of action (open apps, quit apps, click buttons, type text, start a task…) is either *Ask first* or *Automatic*. Asks appear as a small pop-down from the menu bar.
@@ -98,11 +98,11 @@ mic ─► Whisper / Apple dictation ─► wake phrase ─► planner ─► en
 ```
 
 1. **Hear.** Audio is transcribed on your Mac by faster-whisper or Apple's on-device recognizer. In wake mode, only phrases that start with the wake phrase are acted on.
-2. **Plan.** The text is split into steps. Each step gets one Jev call that classifies it (open, quit, volume, website, press, timer…). Python then pulls out the target: an installed app, a checked URL, a percentage, a control on screen.
+2. **Plan.** The text is split into steps. Each step gets one Jev call that classifies it (open, quit, volume, website, press, timer…), except direct screen commands ("scroll down", "click here"), which run without classification. Python then pulls out the target: an installed app, a checked URL, a percentage, a control on screen.
 3. **Run.** One engine runs every request, voice or CLI, on a single serial queue. It asks first where your settings say to, runs each action under a time limit, and polls a readback until it sees the result or runs out of time.
 4. **Reply.** The spoken line is chosen from what actually happened, never from what was intended.
 
-How the pieces fit and the safety rules: [docs/COMMAND_ARCHITECTURE.md](docs/COMMAND_ARCHITECTURE.md). The formal behaviour spec is [docs/ENGINE_CONTRACT.md](docs/ENGINE_CONTRACT.md).
+How the pieces fit: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The formal behaviour spec is [docs/ENGINE_CONTRACT.md](docs/ENGINE_CONTRACT.md).
 
 ## Privacy
 
@@ -113,20 +113,25 @@ How the pieces fit and the safety rules: [docs/COMMAND_ARCHITECTURE.md](docs/COM
 
 ## What it costs
 
-- **Jev:** about $0.00004 per command.
-- **Fish Audio:** the `s2.1-pro-free` model is currently free; `s2.1-pro` is listed at $15 per million characters. Check [Fish Audio pricing](https://fish.audio/) for current rates. Fixed replies are cached, so normal use is a few cents a day.
+- **Jev:** one small classifier call per step. See [TypeSafe pricing](https://typesafe.ai/) or [OpenRouter pricing](https://openrouter.ai/) for current rates.
+- **Fish Audio:** spoken replies are synthesized per line; fixed replies are cached. See [Fish Audio pricing](https://fish.audio/) for current rates.
 - **Whisper / Apple dictation:** free, on your Mac.
-- **Answers (optional):** Claude Haiku via OpenRouter, about $0.0002 per answer.
+- **Answers (optional):** one LLM call per question, via your OpenRouter key. See [OpenRouter pricing](https://openrouter.ai/) for current rates.
 
 ## Documentation
 
 | Doc | For |
 | --- | --- |
+| [docs/FEATURES.md](docs/FEATURES.md) | What it can do, grounded in the code |
+| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Settings panes, permissions, files |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common failures and fixes |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | How the pieces fit |
 | [docs/ENGINE_CONTRACT.md](docs/ENGINE_CONTRACT.md) | The engine's exact rules: step states, confirmation, readback |
-| [docs/COMMAND_ARCHITECTURE.md](docs/COMMAND_ARCHITECTURE.md) | How commands flow, historical design context |
-| [docs/HEY_JEV_OVERHAUL_SPEC.md](docs/HEY_JEV_OVERHAUL_SPEC.md) | Original overhaul goals, historical design context |
-| [docs/CAPABILITY_EFFORT_MAP.md](docs/CAPABILITY_EFFORT_MAP.md) | Capability survey, historical design context |
-| [docs/BUZZ_HANDOFF.md](docs/BUZZ_HANDOFF.md) | Project handoff notes for contributors |
+| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Setup, tests, contributing to this fork |
+| [docs/COMMAND_ARCHITECTURE.md](docs/COMMAND_ARCHITECTURE.md) | Historical design context (pre-build) |
+| [docs/HEY_JEV_OVERHAUL_SPEC.md](docs/HEY_JEV_OVERHAUL_SPEC.md) | Original overhaul goals (historical) |
+| [docs/CAPABILITY_EFFORT_MAP.md](docs/CAPABILITY_EFFORT_MAP.md) | Capability survey (historical) |
+| [docs/BUZZ_HANDOFF.md](docs/BUZZ_HANDOFF.md) | Project handoff notes (historical) |
 | [CHANGELOG.md](CHANGELOG.md) | What changed in this fork |
 
 Status: the integrated features passed their automated checks, but the final live trial in the running app is still pending.

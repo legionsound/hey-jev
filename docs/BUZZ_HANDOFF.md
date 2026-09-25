@@ -1,5 +1,8 @@
 # Buzz implementation handoff
 
+> **Historical note (2026-09-25 release):** this document was written before the build and is kept for context only. Do not extend it. Current behavior is described in [FEATURES.md](FEATURES.md), [ARCHITECTURE.md](ARCHITECTURE.md), and the authoritative [ENGINE_CONTRACT.md](ENGINE_CONTRACT.md).
+
+
 Prepared 2026-09-24. **Astra owns spec/design only from this point. Johnny will use agents in a Buzz project on his Claude subscription for implementation.** The existing Buzz project now has a populated native Git repository; one agent performed Git setup only. Feature implementation has not started in this Astra task. No further feature code is authorized in this Astra task.
 
 ## Product goal

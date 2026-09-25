@@ -1,5 +1,8 @@
 # Hey Jev: what it controls, and how to grow it
 
+> **Historical note (2026-09-25 release):** this document was written before the build and is kept for context only. Do not extend it. Current behavior is described in [FEATURES.md](FEATURES.md), [ARCHITECTURE.md](ARCHITECTURE.md), and the authoritative [ENGINE_CONTRACT.md](ENGINE_CONTRACT.md).
+
+
 Status: updated 2026-09-24 (evening). Written as a discussion checkpoint while implementation was paused; implementation has since resumed and most of the core is built. [ENGINE_CONTRACT.md](ENGINE_CONTRACT.md) is the authoritative description of what exists; sections below marked *proposed* may now be implemented differently. See "Current implementation checkpoint" for the up-to-date list.
 
 ## The short answer

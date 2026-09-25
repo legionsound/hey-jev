@@ -1,6 +1,12 @@
-# Engine contract v1.1
+# Engine contract v1.2
 
-Status: design for review, 2026-09-24. v1.1 amends v1 after review. Supersedes the v0 draft posted in Buzz. Implements the foundation in `COMMAND_ARCHITECTURE.md`; where this file is more specific, this file wins. Nothing here is built yet.
+Status: implemented in release 0.3.0 (2026-09-25). v1.2 corrects the
+v1.1 draft against the built code: effect categories and defaults now
+match `actions.py: EFFECTS` / `DEFAULT_POLICY`, row ordering matches
+`screen.py` (12 pt bands), bridge limits match `bridge.py`, and the
+"not yet built" sections are retired. Implements the foundation in
+`COMMAND_ARCHITECTURE.md` (historical); where this file is more
+specific, this file wins.
 
 ## Shape
 
@@ -70,7 +76,7 @@ Every response lists all steps in order and the per-launch `instance` id. On a s
 
 ## Confirmation
 
-Each action has an `effect` category: `open`, `navigate`, `media`, `volume`, `display`, `timer`, `quit`, `lock`, `sleep`. A user setting maps each category to **Ask first** or **Automatic**. Defaults: Ask first for `quit`, `lock`, `sleep`; Automatic for the rest.
+Each action has an `effect` category (`actions.py: EFFECTS`): `open`, `navigate`, `media`, `volume`, `display`, `timer`, `scroll`, `click`, `type`, `submit`, `task`, `in_task`, `risky`, `quit`, `lock`, `sleep`. (`look`, reading the screen, has no effect and is not a setting.) A user setting maps each category to **Ask first** or **Automatic**. Defaults: Ask first for `quit`, `lock`, `sleep`, `click`, `type`, `submit`, `task`, `risky`; Automatic for the rest (`open`, `navigate`, `media`, `volume`, `display`, `timer`, `scroll`, `in_task`).
 
 - The engine enforces the policy for every source. Source (`voice`, `cli`) is set by the entry point, never read from a request, and is display metadata only.
 - An Ask-first step blocks the worker and opens a menu-bar popover naming the concrete action and target, with Confirm and Cancel. The pending decision is one record bound to that request id and step.
@@ -79,7 +85,7 @@ Each action has an `effect` category: `open`, `navigate`, `media`, `volume`, `di
 - After a Confirm wins, the engine re-resolves the target before dispatch; if any field differs or it vanished the step fails with `target_changed`.
 - The popover text names the exact effect: volume level and percent, timer duration or reminder text, the pinned timer(s) to cancel, and for apps the install's folder. Timer cancel pins timer ids at resolve; run cancels only those. Quit terminates only processes whose bundle path equals the resolved path, never by bundle id.
 - No request field can confirm, skip policy or supply a target handle.
-- Outstanding effects: if an earlier step's native effect (a screen press) outlived its deadline and may still land, every later dispatch, of any action family and including queued requests, waits up to 10 s for it to settle, then fails with `an earlier action hasn't finished` without dispatching. The earlier step stays `unknown`.
+- Outstanding effects: if an earlier step's native effect (a screen press) outlived its deadline and may still land, every later dispatch, of any action family and including queued requests, waits up to 10 s (`engine.py: PENDING_WAIT`) for it to settle, then fails with `an earlier action hasn't finished` without dispatching. The earlier step stays `unknown`.
 - `click` (on-screen controls) defaults to Ask first. A control whose label matches the risky list (buy, send, delete, pay, submit, post, share, install, sign out and similar) always asks, whatever the setting. That list only adds confirmation; it never proves any other click harmless. `look` (reading the screen) has no effect and never asks.
 
 ## Ledger and replay
@@ -105,19 +111,19 @@ Each action has an `effect` category: `open`, `navigate`, `media`, `volume`, `di
 - Direct commands skip classification, because their words leave nothing for Jev to choose: "scroll up/down [a little | a lot | to the top/bottom] [in <app>]" and "[double/right] click [here | the mouse]".
 - `screen.scroll`: the frontmost window's main scrollable view (a named app must be the one in front). After all preparation, immediately before the write or action (even on Automatic), the same process must be in front with the same window, and the view must still belong to that window (its AXWindow). Native views: the largest scroll area's vertical scroll bar. Its value must read as a finite number in 0–1 and be settable, otherwise nothing is written. At the edge, "already at the top/bottom" is returned before any write. It moves by a fraction (little 0.08, normal 0.25, a lot 0.6, or to the end). Web areas, which expose no bars: `AXScrollToVisible` (checked available) on the text or link nearest to about three quarters of a screen beyond the edge. No wheel events and no pointer movement. Done only when a native bar's value (valid 0–1 readback) changed. Web areas expose no scroll position, so a web scroll is always reported as sent and unverified; layout moving isn't taken as proof. The last element of a capped tree isn't claimed to be the page's end. Category `scroll`, Automatic by default.
 - `pointer.click`: a real click (left, right or double) where the pointer already is; nothing moves it. The target is the topmost window under the pointer. If that's Hey Jev's own, an overlay, a menu or anything but an ordinary window, the click is refused, with the process identity (pid + start) carried. At dispatch, a moved pointer, a different window or a restarted app fails with nothing clicked. Immediately before each press the pointer and window are re-checked. A press that went down is always released. A change partway through a double click stops it and reports unknown. A click at an arbitrary spot has no checkable postcondition, so it always ends unverified (delivered), with changes in that window recorded as observed. "click it/that/there" aren't pointer clicks. Category `click`.
-- `screen.pick`: "click/play/open the <ordinal> <noun> [in the <place>] [in <app>]" and "the <noun> in the top/middle/bottom[-left/right]". Nouns that are roles (button, link, tab, row, item) filter by AX role. Others (video, result, song, post…) are Jev's call: one batched yes/no question per pressable control name (names only, never field values or OCR), each answer exactly (bool, finite 0–1), counted only at ≥ 0.65. A malformed answer asks again with nothing pressed. The code counts in reading order (rows about 30 pt apart, top to bottom, then left to right) or finds the control nearest the named place. The pick then becomes an ordinary exact-element press target (identity, confirmation, risky gate, readback). Category `click`.
+- `screen.pick`: "click/play/open the <ordinal> <noun> [in the <place>] [in <app>]" and "the <noun> in the top/middle/bottom[-left/right]". Nouns that are roles (button, link, tab, row, item) filter by AX role. Others (video, result, song, post…) are Jev's call: one batched yes/no question per pressable control name (names only, never field values or OCR), each answer exactly (bool, finite 0–1), counted only at ≥ 0.65. A malformed answer asks again with nothing pressed. The code counts in reading order (rows banded about 12 pt apart per `screen.py`, top to bottom, then left to right) or finds the control nearest the named place. The pick then becomes an ordinary exact-element press target (identity, confirmation, risky gate, readback). Category `click`.
 
 ## Bridge
 
-Socket `~/Library/Application Support/Hey Jev/run/jev.sock`; directory mode 0700, socket 0600. Peer uid via `getpeereid` must equal ours, else close. `flock` on a lock file before bind; a stale socket is removed only while holding the lock after a failed connect. One JSON line in, one out; 16 KiB request cap, 5 s to send. Ops: `command {id, text}`, `status {id}`, `cancel {id}`. `op` must be a string; `wait` a finite non-negative number (not boolean). Cancel follows the dispatch boundary above; no rollback. The overflow `busy` reply has a 1 s send bound and a failed send never stops the accept loop. Startup: if the app cannot own the lock and socket, it stops before creating a microphone or voice dispatcher.
+Socket `~/Library/Application Support/Hey Jev/run/jev.sock`; directory mode 0700, socket 0600. Peer uid via `getpeereid` must equal ours, else close. `flock` on a lock file before bind; a stale socket is removed only while holding the lock after a failed connect. One JSON line in, one out; 16 KiB request cap, 5 s to send. Ops: `command {id, text}`, `status {id}`, `cancel {id}` — protocol version `v: 1`, ids 1–128 chars, unknown fields rejected. `op` must be a string; `wait` a finite non-negative number (not boolean); anything else is `rejected` with a `bad_*` detail, never queued. `wait` is clamped to 120 s (`bridge.py: MAX_WAIT`); 0 means reply with the current status. At most 16 concurrent clients; overflow gets a `busy`/`too_many_clients` reply on a 1 s send bound, and a failed send never stops the accept loop. Cancel follows the dispatch boundary above; no rollback. The overflow `busy` reply has a 1 s send bound and a failed send never stops the accept loop. Startup: if the app cannot own the lock and socket, it stops before creating a microphone or voice dispatcher.
 
 ## Speech
 
 Voice stop: ordinary turns wait on one FIFO turn worker that holds the microphone floor only while speaking, so the listener hears speech while work runs. "Stop", "stop that", "cancel", "never mind" and similar exact phrases, with work in flight, are handled at once on the listener. Under one lock with submission, they drop every heard-but-unsubmitted turn (a stop generation counter) and cancel every running and queued engine request. With nothing in flight, "stop" is an ordinary command. Each queued turn is re-checked for stop generation, listening and epoch just before it submits. Limits: stop can prevent only what hasn't been dispatched, and an effect already sent is reported as sent. Capture is off while Hey Jev is speaking, so speech can't be interrupted by voice yet. `siri.py` speaks from the final result, naming the failed step when there is one. Exception: mute, lock and sleep speak a short "about to" line before running, because speech cannot follow them. That line never claims completion. `unverified` is spoken as "sent, couldn't check", never "done". A voice request refused as `busy` is spoken at once; a result that outlives the voice wait is spoken when it lands.
 
-## Screen control (stage 1)
+## Screen control
 
-Implemented 2026-09-24 on branch screen-control: `screen.list` and `screen.press` above. A clause that starts with "click" or "tap", or that names a UI part (button, checkbox, link, menu item, icon, toggle), always plans as `screen.press`, because Jev's target question hears "the Loud mode checkbox" as volume. Not yet: clicking OCR-only text, scrolling, and multi-step goals.
+Built in release 0.3.0: `screen.list`, `screen.press`, `screen.type`, `screen.submit`, `screen.scroll`, `pointer.click`, `screen.pick`, and implied presses, all specified above. A clause that starts with "click" or "tap", or that names a UI part (button, checkbox, link, menu item, icon, toggle), always plans as `screen.press`, because Jev's target question hears "the Loud mode checkbox" as volume.
 
 Implied presses: a confident single-clause command of two or more words (`mac_command` at the gate) that no built-in action matches becomes `screen.press` with `{"intent": clause}`. No label matching: Jev is asked which one control, pressed once, does exactly what was said, or none, and must reach 0.75 (named controls need 0.65). The press then runs like any other: click policy, risky confirmation, identity re-check and readback. Otherwise it fails with "nothing on screen does that".
 
@@ -125,13 +131,18 @@ Implied presses: a confident single-clause command of two or more words (`mac_co
 
 Menu → "Show what Jev sees". While it's on, a background observer reads the frontmost window about once a second (bounded to 1.5 s, and never while a command is running). It draws click-through boxes with numbers and names: blue can be pressed, orange is a text field, teal is other Accessibility, grey is screen text that would be shared with Jev, faint is screen text that stays local. A readout shows the app, item count, read time and age. An item keeps its number while that exact element stays in view; new items take the next number; numbering restarts when the app or window changes. Each refresh becomes the list "click N" refers to, and a number still only resolves to the same live element (a scroll or replacement never retargets it). The overlay window is excluded from screen capture, so it can't be read back as screen text. A refresh that lands after the toggle goes off is dropped. Nothing is sent or logged.
 
-## Multi-step tasks (stage 3)
+## Multi-step tasks
+
+Built in release 0.3.0 (see "Multi-step tasks (stage 3)" — the stage name is historical; the behavior below is what shipped).
 
 "take over: …" / "work on: …" run as one request. The task asks once (category `task`). With `in_task` Automatic, that OK covers its clicks, typing and Return; with Ask first, each step asks. `risky` labels ask unless `risky` is Automatic. One deadline (120 s) caps the task confirmation, every Jev call (at most 10 s, abandoned when late), observations, confirmations, pending-effect waits and each step's execution. Stop and the deadline are re-checked after every wait, and they win over a late answer. Jev is offered only the kinds that can run on the exact snapshot it's shown, and its answer must match that snapshot's opaque ids. Just before each dispatch, the same app must be in front with the same window as when Jev decided. A submit must hit the same focused field. The task follows a different window only when its own previous step's readback saw the window change. Installed apps the goal names by their whole name become an `open_app` choice (ordinary `app.open`, same resolve, policy and verification) whenever that app isn't the one in front. After a verified open, the task waits up to 3 s for exactly the opened bundle to come forward and pins it; any other app ends the task. If the first read fails (Hey Jev's own window in front, say) and the goal names an app, the task starts with no snapshot and only `open_app`, `done` and `stuck` are offered; with no app named, it fails with the reason. Any step that isn't completed ends the task, and nothing is ever retried. `done` is verified only against an explicit "until you see "X"" that appeared during the task. Anything else ends unverified. Jev gets AX item labels. An OCR line is included only when a status-preserving scan of the whole window completed (unreadable roles, subroles or child lists, fields without frames, or caps make it incomplete), the line overlaps no editable or secure field, and the whole line lies inside one region Accessibility declares as text or a labelled control (static text, heading, link, button, menu item, checkbox, radio, pop-up, tab; never a row, cell, image or group). Text anywhere else, including apps that expose nothing, stays on the Mac. Stop reasons and speech never carry screen text.
 
-## Milestone 1
+## Release 0.3.0
 
-Implemented 2026-09-24. `url.open` is registered too.
-
-
-Engine, planner, bridge, `jevctl`, and `app.open` resolved through the current eight-app table mapped to bundle ids. All other current actions move to the registry with their readbacks. The confirmation popover and the per-category setting ship in milestone 1 too, so voice lock, sleep and quit keep working under the default policy. Tests: offline engine and ledger checks, including a false-success case, plus existing provider tests. Johnny runs the live trial.
+Shipped 2026-09-25. Engine, planner, bridge, `jevctl`, installed-app
+catalog with duplicate-app tiebreaks, `url.open` with per-browser
+verification, full screen-control family, multi-step tasks, confirmation
+popover with per-category policy, diagnostics log, and the offline engine
+/ ledger checks including a false-success case. Status of this release:
+the integrated features passed their automated checks, but the final
+live trial in the running app is still pending.

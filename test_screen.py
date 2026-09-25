@@ -1532,7 +1532,7 @@ class DesktopTests(unittest.TestCase):
         import time as _t
         slow = lambda *a: (_t.sleep(0.3), [(1, (0, 0, 100, 100))])[1]
         with patch.object(screen, "trusted", lambda: True), patch.object(screen, "frontmost", lambda: (1, "x", "x")), \
-                patch.object(screen, "visible_windows", slow):
+                patch.object(screen, "visible_windows", slow), patch.object(screen, "_abandoned", []):
             t0 = _t.monotonic()
             with self.assertRaises(screen.TimedOut):
                 screen.observe_desktop(_t.monotonic() + 0.02)

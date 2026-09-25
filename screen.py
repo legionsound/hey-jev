@@ -305,24 +305,36 @@ def frontmost():
     if os.environ.get("HEYJEV_SCREEN_PID"):
         pid = int(os.environ["HEYJEV_SCREEN_PID"])
         return (pid, *_app_info(pid))
-    pid = frontmost_other_pid()
-    if pid is None:
+    from AppKit import NSWorkspace
+    app = NSWorkspace.sharedWorkspace().frontmostApplication()
+    if app is None:
         raise Unavailable("no frontmost app")
+    pid = int(app.processIdentifier())
+    if pid == os.getpid():  # our own confirmation pop-down took the foreground: use the app it took it from
+        pid = handoff()
+        if pid is None:
+            raise Unavailable("Hey Jev is in front and no app handed off to it")
     return (pid, *_app_info(pid))
 
 
-def frontmost_other_pid(own=None):
-    """The app the user is working in: the owner of the frontmost ordinary window that isn't Hey Jev's own.
-    Hey Jev's confirmation pop-down makes Hey Jev the active app, so "frontmost app" alone would point at itself."""
-    import Quartz
-    own = os.getpid() if own is None else own
-    opts = Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements
-    for w in Quartz.CGWindowListCopyWindowInfo(opts, Quartz.kCGNullWindowID) or []:  # front to back
-        b = w.get("kCGWindowBounds") or {}
-        if (w.get("kCGWindowLayer") == 0 and w.get("kCGWindowOwnerPID") != own and float(w.get("kCGWindowAlpha", 1)) > 0
-                and float(b.get("Width", 0)) >= 50 and float(b.get("Height", 0)) >= 50):
-            return int(w["kCGWindowOwnerPID"])
-    return None
+HANDOFF_GRACE = 10.0  # the handoff outlives the pop-down this long, so the post-confirm re-check still finds it
+_handoff = [None, None]  # [pid of the app in front when the pop-down opened, expiry time or None while open]
+
+
+def set_handoff(pid):
+    """The UI calls this with the app's pid when its pop-down takes the foreground."""
+    _handoff[:] = [pid, None]
+
+
+def end_handoff():
+    """The pop-down closed: the handoff stays good for HANDOFF_GRACE, then names nothing."""
+    if _handoff[0] is not None:
+        _handoff[1] = time.monotonic() + HANDOFF_GRACE
+
+
+def handoff():
+    pid, expires = _handoff
+    return pid if pid is not None and (expires is None or time.monotonic() < expires) else None
 
 
 def _app_info(pid):

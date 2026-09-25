@@ -974,13 +974,20 @@ class AppDelegate(NSObject):
             self.confirm_popover.close()
             self.confirm_popover = None
             prior, self.confirm_prior = getattr(self, "confirm_prior", None), None
-            if prior is not None and not prior.isTerminated():
-                prior.activateWithOptions_(0)  # give the user back the app they were in
+            import screen
+            screen.end_handoff()
+            front = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+            ours = front is not None and front.processIdentifier() == AppKit.NSRunningApplication.currentApplication() \
+                .processIdentifier()
+            if prior is not None and ours and not prior.isTerminated():
+                prior.activateWithOptions_(0)  # we still hold the foreground only because of the pop-down: give it back
         if not pending:
             return
         front = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
         me = AppKit.NSRunningApplication.currentApplication()
         self.confirm_prior = front if front is not None and front.processIdentifier() != me.processIdentifier() else None
+        import screen
+        screen.set_handoff(self.confirm_prior.processIdentifier() if self.confirm_prior is not None else None)
         self.confirm_token = pending["token"]
         view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 320, 118))
         view.addSubview_(label(pending["text"] + "?", NSMakeRect(16, 72, 290, 30), 16))

@@ -704,53 +704,129 @@ class SubmitTests(TypeTests):
         self.assertEqual((v["state"], self.confirms), ("declined", []))
 
 
-class FrontmostTests(unittest.TestCase):
-    def test_hey_jevs_own_window_is_never_the_target(self):
-        import Quartz
-        wins = [{"kCGWindowLayer": 0, "kCGWindowOwnerPID": 111, "kCGWindowBounds": {"Width": 320, "Height": 118}},  # our pop-down
-                {"kCGWindowLayer": 25, "kCGWindowOwnerPID": 5, "kCGWindowBounds": {"Width": 900, "Height": 30}},  # menu bar
-                {"kCGWindowLayer": 0, "kCGWindowOwnerPID": 6, "kCGWindowBounds": {"Width": 10, "Height": 10}},  # a sliver
-                {"kCGWindowLayer": 0, "kCGWindowOwnerPID": 222, "kCGWindowBounds": {"Width": 1200, "Height": 800}}]
-        with patch.object(Quartz, "CGWindowListCopyWindowInfo", lambda *a: wins):
-            self.assertEqual(screen.frontmost_other_pid(own=111), 222)
+class FakeApp:
+    def __init__(self, pid, activated=None):
+        self.pid, self.activated = pid, activated
 
-    def test_confirmation_gives_the_user_back_their_app(self):
+    def processIdentifier(self):
+        return self.pid
+
+    def localizedName(self):
+        return f"App{self.pid}"
+
+    def bundleIdentifier(self):
+        return f"com.app{self.pid}"
+
+    def isTerminated(self):
+        return False
+
+    def activateWithOptions_(self, opts):
+        self.activated.append(self.pid)
+
+
+class Foreground:
+    """Fakes NSWorkspace/NSRunningApplication: `front` is the pid the system says is in front."""
+
+    def __init__(self, test, front):
         import AppKit
+        import os
+        self.front, self.me, self.activated = front, os.getpid(), []
+        ws = type("WS", (), {"sharedWorkspace": staticmethod(lambda: ws_inst)})
+        ws_inst = type("W", (), {"frontmostApplication": lambda _s: FakeApp(self.front, self.activated)})()
+        run = type("RA", (), {"currentApplication": staticmethod(lambda: FakeApp(self.me)),
+                              "runningApplicationWithProcessIdentifier_": staticmethod(lambda pid: FakeApp(pid))})
+        for p in (patch.object(AppKit, "NSWorkspace", ws), patch.object(AppKit, "NSRunningApplication", run),
+                  patch.object(screen, "_handoff", [None, None])):
+            p.start()
+            test.addCleanup(p.stop)
+
+
+class FrontmostTests(unittest.TestCase):
+    def test_the_real_foreground_app_is_authoritative(self):
+        fg = Foreground(self, 333)
+        screen.set_handoff(222)  # a stale handoff never overrides an external app in front
+        self.assertEqual(screen.frontmost()[0], 333)
+        fg.front = fg.me  # our pop-down is in front: the app it took the foreground from
+        self.assertEqual(screen.frontmost()[0], 222)
+        screen.end_handoff()
+        self.assertEqual(screen.frontmost()[0], 222)  # still good just after it closes, for the re-check
+        with patch.object(screen, "HANDOFF_GRACE", 0):
+            screen.set_handoff(222)
+            screen.end_handoff()
+            with self.assertRaises(screen.Unavailable):  # expired: never an arbitrary background app
+                screen.frontmost()
+        screen.set_handoff(None)
+        with self.assertRaises(screen.Unavailable):
+            screen.frontmost()
+
+    def prompt(self, fg):
+        import AppKit
+        import types
         import assistant_ui
-        activated = []
-
-        class App:
-            def __init__(self, pid):
-                self.pid = pid
-
-            def processIdentifier(self):
-                return self.pid
-
-            def isTerminated(self):
-                return False
-
-            def activateWithOptions_(self, opts):
-                activated.append(self.pid)
-
-        class WS:
-            @staticmethod
-            def sharedWorkspace():
-                return WS
-
-            @staticmethod
-            def frontmostApplication():
-                return App(222)
         d = assistant_ui.AppDelegate.alloc().init()
         d.status_item = AppKit.NSStatusBar.systemStatusBar().statusItemWithLength_(-1)
-        import types
-        with patch.object(assistant_ui.AppKit, "NSWorkspace", WS), \
-                patch.object(assistant_ui, "NSApp", types.SimpleNamespace(activateIgnoringOtherApps_=lambda *a: None)):
-            d.showConfirm_({"token": "t", "text": "Click Save"})
-            self.assertEqual(activated, [])
-            d.showConfirm_({})  # decided or timed out: the pop-down closes
-        self.assertEqual(activated, [222])
-        AppKit.NSStatusBar.systemStatusBar().removeStatusItem_(d.status_item)
+        self.addCleanup(lambda: AppKit.NSStatusBar.systemStatusBar().removeStatusItem_(d.status_item))
+        p = patch.object(assistant_ui, "NSApp", types.SimpleNamespace(
+            activateIgnoringOtherApps_=lambda *a: setattr(fg, "front", fg.me)))
+        p.start()
+        self.addCleanup(p.stop)
+        return d
 
+    def test_closing_the_prompt_gives_back_the_app_only_if_we_still_hold_the_foreground(self):
+        fg = Foreground(self, 222)
+        d = self.prompt(fg)
+        d.showConfirm_({"token": "t", "text": "Click Save"})
+        self.assertEqual((fg.front, screen.handoff()), (fg.me, 222))
+        d.showConfirm_({})
+        self.assertEqual(fg.activated, [222])
+        fg.front, fg.activated[:] = 222, []
+        d.showConfirm_({"token": "t2", "text": "Click Save"})
+        fg.front = 333  # the user switched apps while it was open
+        d.showConfirm_({})
+        self.assertEqual(fg.activated, [])  # their choice stands
+
+    def ask_first(self, switch_to=None):
+        """A real engine and the real screen.press resolve, with the foreground faked instead of pinned."""
+        import os
+        from engine import Engine
+        fg = Foreground(self, 222)
+        save = item(1, "Save")
+        snaps = {222: snap([save], pid=222), 333: snap([item(1, "Save")], pid=333)}
+        presses = []
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("HEYJEV_SCREEN_PID", None)
+            fns = {"observe": lambda pid=None, ocr=True, deadline=None: snaps[pid or screen.frontmost()[0]],
+                   "signature": lambda pid, d: {"n": len(presses)}, "element_state": lambda ref, d: {"v": len(presses)},
+                   "press": lambda ref, d: presses.append(ref) or 0, "process_start": lambda pid, d: "s"}
+            for name, fn in fns.items():
+                p = patch.object(screen, name, fn)
+                p.start()
+                self.addCleanup(p.stop)
+
+            def ask(pending):
+                if not pending:
+                    screen.end_handoff()
+                    return
+                screen.set_handoff(fg.front)  # what the pop-down does as it opens
+                fg.front = fg.me
+                if switch_to:
+                    fg.front = switch_to
+                eng.decide(pending["token"], True)
+            with patch.object(diagnostics, "record", lambda *a, **k: None), \
+                    patch.object(planner, "plan", lambda *a, **k: ("steps", [{"clause": "click Save",
+                                                                              "action": "screen.press",
+                                                                              "args": {"label": "Save"}}])):
+                eng = Engine(lambda _: {}, policy=lambda: dict(actions.DEFAULT_POLICY), ask=ask)
+                v = eng.wait(eng.submit("click Save", "cli")["id"], 10)
+        return v, presses, save
+
+    def test_ask_first_hands_off_to_the_same_target(self):
+        v, presses, save = self.ask_first()
+        self.assertEqual((v["state"], presses), ("completed", [save.ref]))
+
+    def test_ask_first_then_the_user_switches_apps_presses_nothing(self):
+        v, presses, _ = self.ask_first(switch_to=333)
+        self.assertEqual((v["state"], v["steps"][0]["detail"], presses), ("failed", "target_changed", []))
 
 if __name__ == "__main__":
     unittest.main()

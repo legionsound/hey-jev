@@ -45,7 +45,8 @@ current fallback text). A timer label never starts an agent session.
   on, model downloaded, language) and the reason is shown when unavailable. Older
   Macs keep working with this choice disabled. "On-device" covers answer generation
   only; Jev decisions and Fish audio may still be remote.
-- Built by `setup.py`, shipped inside the bundle.
+- Optional at build and install time: if the helper can't build (older SDK/OS), the
+  app still builds, installs and runs with other providers.
 - Gives access to Apple's model only, not Siri's tools or personal context.
 - Adopt only if the probe (10 fixed questions, latency p50/p95, quality vs the
   current OpenRouter model) shows usable short answers.
@@ -54,8 +55,9 @@ current fallback text). A timer label never starts an agent session.
 
 - One small ACP client (JSON-RPC over stdio) driving the public adapters
   `codex-acp` and `claude-agent-acp`. Detect installed binaries; never auto-install.
-  If ACP blocks a required capability, fall back to Codex app-server or Claude's
-  programmatic interface for that provider.
+  If ACP fails the capability probe, switching that provider to Codex app-server or
+  Claude's programmatic interface is an explicit implementation change, never a
+  runtime switch.
 - Auth is the user's own supported login. Hey Jev never reads or copies tokens.
   Probe each installed adapter's advertised auth methods and real login behaviour;
   show actionable login and quota errors. Never switch to API-key billing implicitly.
@@ -75,7 +77,9 @@ unavailable. No file reads either: the session runs in an empty temporary workin
 directory with no project context. Any `session/request_permission` that still
 arrives gets a valid negotiated answer (the offered reject option, else cancelled).
 Acceptance proves it per adapter: prompts to read a file, write a file or run a
-command produce no read, no file and no command.
+command produce no read, no file and no command. Proof comes from the effective runtime
+configuration and observed execution events, not from the agent saying it refused;
+an empty cwd alone does not stop absolute-path reads.
 
 ### Later: tools-enabled sessions
 
@@ -99,5 +103,11 @@ settings persist across restart, Jev action confirmation unchanged. Full test su
 after each code slice (Teach Jev sheet tests isolated first). Live trials run in
 Johnny's app session; no GUI launches from agent shells.
 
-Sources: Apple SystemLanguageModel docs, agentclientprotocol.com agent list,
-codex-acp and claude-agent-acp repos, Codex app-server docs, Claude headless docs.
+## Sources
+
+- [Apple SystemLanguageModel](https://developer.apple.com/documentation/foundationmodels/systemlanguagemodel)
+- [ACP supported agents](https://agentclientprotocol.com/get-started/agents)
+- [codex-acp](https://github.com/agentclientprotocol/codex-acp)
+- [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp)
+- [Codex app-server](https://developers.openai.com/codex/app-server/)
+- [Claude programmatic sessions](https://code.claude.com/docs/en/headless)

@@ -1424,3 +1424,96 @@ class DisplayTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DesktopTests(unittest.TestCase):
+    """All visible windows: read front to back, hidden controls dropped, other windows searched when the front
+    window has no match, several matches across windows ask and name each app."""
+
+    def setUp(self):
+        p = patch.object(diagnostics, "record", lambda *a, **k: None)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def desktop(self, wins, reads, front_pid):
+        """wins: [(pid, frame)] front to back; reads: {pid: Snapshot}. -> observe_desktop() under fakes."""
+        axw = {pid: object() for pid, _ in wins}
+        with patch.object(screen, "trusted", lambda: True), \
+                patch.object(screen, "frontmost", lambda: (front_pid, "x", "x")), \
+                patch.object(screen, "visible_windows", lambda: wins), \
+                patch.object(screen, "_ax_window", lambda pid, frame: axw[pid]), \
+                patch.object(screen, "observe", lambda pid=None, ocr=True, deadline=None, window=None: reads[pid]):
+            return screen.observe_desktop()
+
+    def test_windows_front_to_back_and_hidden_controls_dropped(self):
+        front = snap([item(1, "Save", frame=(100, 100, 60, 20))], pid=1, window="Doc", app="Pages")
+        back = snap([item(2, "OK", frame=(120, 105, 40, 20)), item(3, "Cancel", frame=(900, 500, 60, 20))],
+                    pid=2, window="Mail", app="Mail")
+        snaps, skipped = self.desktop([(1, (0, 0, 800, 600)), (2, (50, 50, 1200, 900))], {1: front, 2: back}, 1)
+        self.assertEqual(([s.app for s in snaps], skipped), (["Pages", "Mail"], 0))
+        self.assertEqual([i.label for i in snaps[1].items], ["Cancel"])  # OK sits under the Pages window
+
+    def test_a_window_that_cant_be_read_is_counted_never_silently_dropped(self):
+        front = snap([item(1, "Save")], pid=1, app="Pages")
+
+        def observe(pid=None, ocr=True, deadline=None, window=None):
+            if pid == 2:
+                raise screen.Unavailable("no window")
+            return front
+        with patch.object(screen, "trusted", lambda: True), patch.object(screen, "frontmost", lambda: (1, "x", "x")), \
+                patch.object(screen, "visible_windows", lambda: [(1, (0, 0, 10, 10)), (2, (500, 500, 90, 90))]), \
+                patch.object(screen, "_ax_window", lambda pid, frame: object()), patch.object(screen, "observe", observe):
+            snaps, skipped = screen.observe_desktop()
+        self.assertEqual((len(snaps), skipped), (1, 1))
+
+    def run_press(self, front, others, label, choose=None):
+        with patch.object(screen, "observe", lambda pid=None, ocr=True, deadline=None, window=None: front), \
+                patch.object(actions, "DESKTOP", lambda deadline: ([front] + others, 0)), \
+                patch.object(actions, "CHOOSE", choose):
+            return actions.resolve_screen_press({"label": label})
+
+    def test_a_name_only_in_another_window_resolves_there(self):
+        front = snap([item(1, "Save")], pid=1, window="Doc", app="Pages")
+        mail = snap([item(2, "Send")], pid=2, window="Draft", app="Mail")
+        got = self.run_press(front, [mail], "send")
+        self.assertEqual((got[0], got[1]["app"], got[1]["label"], got[1]["pid"]), ("target", "Mail", "Send", 2))
+
+    def test_the_front_window_wins_when_it_has_the_name(self):
+        front = snap([item(1, "OK")], pid=1, window="Doc", app="Pages")
+        mail = snap([item(2, "OK")], pid=2, window="Draft", app="Mail")
+        got = self.run_press(front, [mail], "ok")
+        self.assertEqual((got[0], got[1]["app"]), ("target", "Pages"))
+
+    def test_the_same_name_in_two_other_windows_asks_naming_each_app(self):
+        front = snap([item(1, "Save")], pid=1, window="Doc", app="Pages")
+        mail = snap([item(2, "OK")], pid=2, window="Draft", app="Mail")
+        safari = snap([item(3, "OK")], pid=3, window="Page", app="Safari")
+        got = self.run_press(front, [mail, safari], "ok")
+        self.assertEqual(got[0], "choices")
+        self.assertEqual([c["name"].split(" (")[0] for c in got[1]], ["OK in Mail", "OK in Safari"])
+        self.assertEqual([c["target"]["pid"] for c in got[1]], [2, 3])  # each answerable to its exact control
+
+    def test_the_chooser_sees_which_app_each_card_is_in(self):
+        front = snap([item(1, "Save")], pid=1, window="Doc", app="Pages")
+        mail = snap([item(2, "Paper plane")], pid=2, window="Draft", app="Mail")
+        seen = []
+
+        def choose(spoken, cards, intent=False):
+            seen.extend(cards)
+            return (next((k for k, c in enumerate(cards) if "in Mail" in c), None), 0.9)
+        got = self.run_press(front, [mail], "send the email", choose=choose)
+        self.assertEqual((got[0], got[1]["app"]), ("target", "Mail"))
+        self.assertTrue(any(c.endswith(", in Mail") for c in seen))
+
+    def test_a_background_target_is_rechecked_in_its_own_window(self):
+        mail = snap([item(2, "Send")], pid=2, window="Draft", app="Mail")
+        focused = snap([item(5, "Inbox")], pid=2, window="Inbox", app="Mail")
+        t = actions._screen_target(mail, mail.items[0])
+        reads = []
+
+        def observe(pid=None, ocr=True, deadline=None, window=None):
+            reads.append(window)
+            return mail if window is not None else focused
+        with patch.object(screen, "observe", observe), patch.object(screen, "element_for", lambda tok: object()):
+            got = actions.resolve_pinned(t)
+        self.assertEqual((got[0], len(reads)), ("target", 2))  # focused window first, then the target's own

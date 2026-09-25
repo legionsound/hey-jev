@@ -29,7 +29,7 @@ import ax_walk
 AX_MESSAGE_TIMEOUT = 0.25
 AX_VALUE_CHARS = 120
 OCR_MIN_CONFIDENCE = 0.4
-MAX_ITEMS = 60
+MAX_ITEMS = 500  # a whole web page; each Jev consumer batches or caps its own list, never this one
 LAST = None  # the Snapshot most recently listed to the user
 _lock = threading.Lock()
 

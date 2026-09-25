@@ -109,6 +109,20 @@ class QualifiedPickTests(unittest.TestCase):
             self.assertIsNone(planner.pick_args(said), said)
 
 
+class TaskListTests(unittest.TestCase):
+    def test_a_cut_list_says_so(self):
+        import json, task
+        from types import SimpleNamespace as NS
+        snap = NS(items=[NS(source="ax", label=f"b{k}", role="AXButton", frame=(0, k, 10, 10), secure=False)
+                         for k in range(70)], walk_complete=True, text_frames=[], field_frames=[], app="X",
+                  window_frame=(0, 0, 100, 100))
+        with patch.object(task, "_pressable", lambda i: True), patch.object(task, "_typeable", lambda i: False):
+            items, _ = task.shareable(snap)
+            state = json.loads(task.state_text("g", snap, items, [], []))
+        self.assertEqual(len(state["screen_items_in_reading_order"]), task.MAX_ITEMS)
+        self.assertEqual(state["items_not_shown"], 70 - task.MAX_ITEMS)
+
+
 class SecretTests(unittest.TestCase):
     def test_key_value_never_in_argv(self):
         with patch.object(secrets_store.subprocess, "run") as run:

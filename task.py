@@ -89,7 +89,14 @@ def shareable(snap):
             return True
         return (ocr_ok and not any(_overlaps(i.frame, f) for f in fields)
                 and any(_inside(i.frame, t) for t in snap.text_frames))
-    return [i for i in snap.items if allowed(i)][:MAX_ITEMS], fields
+    ok = [i for i in snap.items if allowed(i)]
+    if len(_not_shown) > 64:
+        _not_shown.clear()
+    _not_shown[id(snap)] = max(0, len(ok) - MAX_ITEMS)
+    return ok[:MAX_ITEMS], fields
+
+
+_not_shown = {}  # snapshot id -> how many shareable items didn't fit Jev's list (said out loud, never silently cut)
 
 
 def _where(item, frame):
@@ -118,6 +125,9 @@ def state_text(goal, snap, items, history, tried):
              **({"role": i.role.replace("AX", "").lower(), "pressable": True} if _pressable(i) else {}),
              **({"role": "text field", "typeable": True} if _typeable(i) else {})}
             for k, i in enumerate(items)],
+        **({"items_not_shown": _not_shown[id(snap)],
+            "note": "the list is cut at the first items in reading order; more are further down"}
+           if _not_shown.get(id(snap)) else {}),
         "previous_actions": history[-8:],
         "already_tried_on_this_screen": tried,
     }, ensure_ascii=False)

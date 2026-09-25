@@ -450,6 +450,7 @@ RISKY = re.compile(r"\b(buy|purchase|order|pay|checkout|check out|send|submit|po
                    re.I)
 CHOOSE = None  # set by the app: (spoken, [labels]) -> (index or None, confidence). Only control names are sent.
 CHOOSE_GATE = 0.65  # provisional, uncalibrated (jev skill); confirmation, not this number, authorizes risky presses
+CHOOSE_MAX = 60  # controls per Jev call
 INTENT_GATE = 0.75  # no control was named: Jev must be surer before a press happens (also provisional)
 RESOLVE_BUDGET = 3.0  # one deadline over every native read a resolve makes
 RESOLVE_UNTIL = None  # set by the engine while a task step resolves: never past the task's shared deadline
@@ -565,7 +566,22 @@ def resolve_screen_press(args):
     if not exact and not intent:
         exact = [i for i in controls if f" {said} " in f" {screen._norm(i.label)} "]
     if not exact and CHOOSE:
-        named = [i for i in controls if not i.from_value][:60]  # a field's or document's value is never sent
+        named = [i for i in controls if not i.from_value]  # a field's or document's value is never sent
+        if len(named) > CHOOSE_MAX:  # staged narrowing (jev skill): best of each batch, then a final pick
+            finalists = []
+            for k in range(0, len(named), CHOOSE_MAX):
+                part = named[k:k + CHOOSE_MAX]
+                cards = describe_cards(part, snap, snap.window_frame)
+                try:
+                    got = valid_choice(CHOOSE(intent, cards, intent=True) if intent
+                                       else CHOOSE(args.get("label", ""), cards), len(cards))
+                except Exception:
+                    got = None
+                if got is None:
+                    return ("choices", [])  # a failed or malformed answer asks again; nothing is pressed
+                if got[0] is not None:
+                    finalists.append(part[got[0]])
+            named = finalists[:CHOOSE_MAX]
         if named:
             try:
                 context = screen.observe(pid=snap.pid, ocr=True, deadline=deadline)  # the words around each control
@@ -993,7 +1009,7 @@ CLASSIFY_ITEMS = None  # set by the app: (noun, labels) -> [(is_one, confidence)
 ROLE_NOUNS = {"button": ("AXButton", "AXMenuButton", "AXPopUpButton"), "link": ("AXLink",),
               "tab": ("AXTab", "AXRadioButton"), "row": ("AXRow", "AXCell"), "item": None}
 PICK_GATE = 0.65  # provisional, uncalibrated (jev skill): measure on labeled pages before trusting
-PICK_MAX = 60
+PICK_MAX = 60  # items per Jev call
 def reading_order(items):
     """Rows top to bottom, then left to right: how a person counts "the third video" on a grid or a list.
     Rows come from the items themselves, not fixed screen bands: an item joins the current row when its centre
@@ -1053,24 +1069,20 @@ def resolve_screen_pick(args):
     else:
         if not CLASSIFY_ITEMS or not pool:
             return ("none", f"no {noun}s on screen")
-        # Jev judges at most PICK_MAX items. Take them in reading order so "the third video" among the first
-        # PICK_MAX is the true third; "last" and "nearest" need the whole page, so a cut page refuses those.
+        # Jev judges every item, PICK_MAX per call (jev skill: batch within limits, never silently truncate)
         pool = reading_order(pool)
-        cut = len(pool) > PICK_MAX
-        if cut and ("where" in args or args.get("ordinal", 1) in (-1, 0)):
-            return ("none", f"too many things on screen to find the {'last' if 'where' not in args else 'right'} "
-                            f"{noun}; scroll closer first")
-        pool = pool[:PICK_MAX]
         labels = [i.label for i in pool]
-        try:
-            got = CLASSIFY_ITEMS(noun, labels)
-        except Exception:
-            got = None
-        if not isinstance(got, list) or len(got) != len(labels) or not all(_valid_flag(g) for g in got):
-            return ("choices", [])  # a malformed answer asks again; nothing is pressed
+        got = []
+        for k in range(0, len(labels), PICK_MAX):
+            part = labels[k:k + PICK_MAX]
+            try:
+                ans = CLASSIFY_ITEMS(noun, part)
+            except Exception:
+                ans = None
+            if not isinstance(ans, list) or len(ans) != len(part) or not all(_valid_flag(g) for g in ans):
+                return ("choices", [])  # a failed or malformed answer asks again; nothing is pressed
+            got += ans
         group = [i for i, (yes, conf) in zip(pool, got) if yes is True and conf >= PICK_GATE]
-        if cut and isinstance(args.get("ordinal", 1), int) and args.get("ordinal", 1) > len(group):
-            return ("none", f"too many things on screen to count that far; scroll closer first")
     if not group:
         return ("none", f"no {noun}s on screen")
     if "where" in args:

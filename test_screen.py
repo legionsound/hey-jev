@@ -274,6 +274,21 @@ class ScreenActionTests(unittest.TestCase):
             v = self.run_text("reload this page", "screen.press", {"intent": "reload this page"})
         self.assertEqual((v["state"], v["steps"][0]["detail"], fake.presses), ("failed", "nothing on screen does that", []))
 
+    def test_a_big_window_is_narrowed_in_batches_then_a_final_pick(self):
+        items = [item(k + 1, f"Control {k}", frame=(10, 10 + 20 * k, 80, 16)) for k in range(130)]
+        fake = FakeScreen(self, items)
+        asked = []
+
+        def choose(spoken, cards, intent=False):
+            asked.append(len(cards))
+            hit = next((n for n, c in enumerate(cards) if "Control 125" in c), None)
+            return (hit, 0.9)
+        with patch.object(actions, "CHOOSE", choose):
+            v = self.run_text("click the gear", "screen.press", {"label": "the gear"})
+        self.assertEqual(asked, [60, 60, 10, 1])  # three batches cover all 130, then the one finalist
+        self.assertEqual((v["state"], v["steps"][0]["target"]["label"], len(fake.presses)),
+                         ("completed", "Control 125", 1))
+
     def test_chooser_never_sees_field_or_document_values(self):
         FakeScreen(self, [item(1, "New Note"), item(2, "Dear Sam, the merger", role="AXCell", from_value=True)])
         seen = []
@@ -1069,19 +1084,22 @@ class PickTests(unittest.TestCase):
     def big_page(self, n=70):
         return snap([item(k + 1, f"Video {k}", role="AXLink", frame=(10, 10 + 30 * k, 150, 20)) for k in range(n)])
 
-    def test_a_cut_page_refuses_last_instead_of_counting_part_of_it(self):
-        v = self.run_pick({"noun": "video", "ordinal": -1}, self.big_page())
-        self.assertEqual((v["state"], self.presses, self.sent), ("failed", [], []))
-
-    def test_a_cut_page_still_counts_early_ordinals_in_reading_order(self):
+    def test_a_big_page_is_judged_whole_in_batches(self):
         g = self.big_page()
-        v = self.run_pick({"noun": "video", "ordinal": 2}, g)
-        self.assertEqual((v["state"], self.presses), ("completed", [g.items[1].ref]))
-        self.assertEqual(len(self.sent[0][1]), actions.PICK_MAX)
+        v = self.run_pick({"noun": "video", "ordinal": -1}, g)
+        self.assertEqual((v["state"], self.presses), ("completed", [g.items[69].ref]))
+        self.assertEqual([len(x[1]) for x in self.sent], [actions.PICK_MAX, 70 - actions.PICK_MAX])
 
-    def test_a_cut_page_refuses_an_ordinal_past_what_was_judged(self):
-        v = self.run_pick({"noun": "video", "ordinal": 65}, self.big_page())
-        self.assertEqual((v["state"], self.presses), ("failed", []))
+    def test_a_failed_batch_presses_nothing(self):
+        calls = []
+        def answer(ls):
+            calls.append(1)
+            if len(calls) == 2:
+                raise ConnectionError("down")
+            return [(True, 0.95)] * len(ls)
+        v = self.run_pick({"noun": "video", "ordinal": 2}, self.big_page(), answer=answer)
+        self.assertEqual(self.presses, [])
+        self.assertNotEqual(v["state"], "completed")
 
     def test_the_named_video_presses_only_when_exactly_one_matches(self):
         g = self.grid()

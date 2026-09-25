@@ -5,6 +5,7 @@
   jevctl command --text-file cmd.txt     (use - for stdin)
   jevctl status ID [--wait 30]
   jevctl cancel ID
+  jevctl trials [--since MINUTES] [--last N] [--json]   (reads the log; the app needn't be running)
 
 Exit: 0 completed/answered, 1 other final state, 2 still pending (query status with the same id), 3 app unavailable.
 """
@@ -64,7 +65,21 @@ def main():
     st.add_argument("--wait", type=float, default=0)
     ca = sub.add_parser("cancel")
     ca.add_argument("id")
+    tr = sub.add_parser("trials", help="readable history of recent attempts, from the diagnostics log")
+    tr.add_argument("--since", type=float, help="only the last N minutes")
+    tr.add_argument("--last", type=int, help="only the last N requests")
+    tr.add_argument("--json", action="store_true")
     a = ap.parse_args()
+    if a.op == "trials":
+        sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+        import trials
+        events = trials.load(since_minutes=a.since, last=a.last)
+        if a.json:
+            print(json.dumps([trials.summarize(e) if e["kind"] == "request" else
+                              {**e, "ts": e["ts"].isoformat()} for e in events], indent=2, default=str))
+        else:
+            print(trials.render(events))
+        return
     if a.op == "command":
         if a.text_file:
             text = sys.stdin.read() if a.text_file == "-" else open(a.text_file, encoding="utf-8").read()

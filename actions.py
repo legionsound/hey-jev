@@ -1094,32 +1094,34 @@ def resolve_screen_pick(args):
 
     def ask(items):  # an unsure item could change the answer: ask rather than count past it
         return ("choices", [{"name": f"{i.label} ({_where(i, snap.window_frame)})"} for i in items[:4]])
+    # One order for the whole pool, filtered, never regrouped: rows form around their tallest item, so ordering a
+    # subset can reorder what's left (Astra, 2026-09-25).
+    sure_ids, unsure_ids = {id(i) for i in group}, {id(i) for i in unsure}
+    order = [i for i in reading_order(pool) if id(i) in sure_ids | unsure_ids]
+    ordered = [i for i in order if id(i) in sure_ids]
     if "where" in args:
         if unsure:
-            return ask(reading_order(group + unsure))
+            return ask(order)
         chosen = nearest_to(group, args["where"], snap.window_frame)
     else:
-        ordered = reading_order(group)
         k = args.get("ordinal", 1)
         if k == 0:  # "the Full Tilt video": exactly one, else ask which
             if len(ordered) > 1 or unsure:
-                return ask(reading_order(ordered + unsure))
+                return ask(order)
             chosen = ordered[0]
         elif k == -1:
             chosen = ordered[-1]
-            both = reading_order(unsure + [chosen])
-            after = both[[id(i) for i in both].index(id(chosen)) + 1:]
+            after = order[[id(i) for i in order].index(id(chosen)) + 1:]  # anything past it is unsure
             if after:
                 return ask([chosen] + after)
         elif isinstance(k, int) and 1 <= k <= len(ordered):
             chosen = ordered[k - 1]
-            both = reading_order(ordered[:k] + unsure)
-            upto = both[:[id(i) for i in both].index(id(chosen)) + 1]
-            if {id(i) for i in upto} & {id(i) for i in unsure}:
+            upto = order[:[id(i) for i in order].index(id(chosen)) + 1]
+            if any(id(i) in unsure_ids for i in upto):
                 return ask(upto)
         else:
             if unsure:
-                return ask(reading_order(ordered + unsure))
+                return ask(order)
             return ("none", f"only {len(ordered)} {noun}{'s' if len(ordered) != 1 else ''} on screen")
     return ("target", _screen_target(snap, chosen))
 

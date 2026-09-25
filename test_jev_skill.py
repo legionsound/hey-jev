@@ -218,6 +218,17 @@ class PickAuditTests(unittest.TestCase):
         got = self.pick({"noun": "video", "ordinal": 0}, [(True, .99), (False, .55), (False, .99)])
         self.assertEqual(got[0], "choices")
 
+    def test_ordering_is_one_full_pool_order_never_a_regrouped_subset(self):
+        from types import SimpleNamespace as NS
+        mk = lambda n, f: NS(source="ax", pressable=True, enabled=True, from_value=False, role="AXLink", label=n,
+                             frame=f, token=n, secure=False)
+        items = [mk("A", (0, 0, 50, 100)), mk("B", (300, 40, 50, 10)), mk("C", (400, 20, 50, 10))]
+        snap = NS(items=items, app="Browser", window_frame=(0, 0, 500, 500), pid=1, started=1, window_token="w",
+                  truncated=False)
+        with patch.object(actions.screen, "observe", return_value=snap), patch.object(actions, "_live", lambda i: True), \
+                patch.object(actions, "CLASSIFY_ITEMS", return_value=[(True, .99), (True, .99), (False, .55)]):
+            self.assertEqual(actions.resolve_screen_pick({"noun": "video", "ordinal": -1})[0], "choices")
+
     def test_sure_answers_still_pick(self):
         got = self.pick({"noun": "video", "ordinal": 2}, [(True, .99), (False, .99), (True, .9)])
         self.assertEqual((got[0], got[1]["label"]), ("target", "Video 2"))

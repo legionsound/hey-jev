@@ -8,6 +8,7 @@ cache/
 *.log
 .DS_Store
 build/
+bin/heyjev-fm
 dist/
 .eggs/
 assets/icon.iconset/

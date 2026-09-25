@@ -1990,7 +1990,8 @@ class AppDelegate(NSObject):
         self.confirm_token = pending["token"]
         view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 320, 118))
         view.addSubview_(label(pending["text"] + "?", NSMakeRect(16, 72, 290, 30), 16))
-        who = "Typed command (jevctl)" if pending.get("source") == "cli" else "Voice command"
+        who = {"cli": "Typed command (jevctl)", "claude": "Claude Code asks", "codex": "Codex asks"}.get(
+            pending.get("source"), "Voice command")
         view.addSubview_(label(who + " · cancels itself in 60 s", NSMakeRect(16, 50, 290, 20), 11,
                                NSColor.secondaryLabelColor()))
         for title, action, x, key in (("Cancel", "confirmCancel:", 112, "\x1b"), ("Confirm", "confirmYes:", 212, "\r")):
@@ -2092,6 +2093,8 @@ class AppDelegate(NSObject):
             siri.BRIDGE.stop()
         if "apple_fm" in sys.modules:
             sys.modules["apple_fm"].shutdown()
+        for session in (getattr(siri, "AGENT_SESSIONS", None) or {}).values():
+            session.kill()
         voice_output.configure(mute=None)
         if getattr(self, "global_monitor", None):
             NSEvent.removeMonitor_(self.global_monitor)

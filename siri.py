@@ -575,6 +575,74 @@ def say(line, notify):
 
 
 # --------------------------------------------------------------------------- Engine wiring
+# --------------------------------------------------------------------------- Agent sessions (Claude Code, Codex)
+AGENT_SESSIONS = {}  # agent -> acp_client.Session, one per app run
+AGENT_BUSY = threading.Event()
+SAY_NOTE = ("\n\n(Asked by voice through Hey Jev. End your reply with one line starting \"Say:\" that holds a one or "
+            "two sentence spoken summary, no markdown.)")
+
+
+def spoken_summary(reply):
+    """The agent's "Say:" line, else its last paragraph cut to two sentences, without markdown."""
+    lines = [l.strip() for l in reply.splitlines() if l.strip()]
+    said = next((l[4:].strip() for l in reversed(lines) if l.lower().startswith("say:")), None)
+    if not said:
+        said = (reply.strip().split("\n\n") or [""])[-1]
+        said = " ".join(re.split(r"(?<=[.!?])\s+", said)[:2])
+    said = re.sub(r"[*_`#>\[\]]", "", said).strip()
+    return said[:400] or "Done."
+
+
+def agent_turn(agent, text, eng, notify):
+    """Runs outside the engine queue, so Hey Jev keeps listening while the agent works."""
+    import acp_client
+    AGENT_BUSY.set()
+    t = time.time()
+    try:
+        session = AGENT_SESSIONS.get(agent)
+        cwd = model_settings.agent_settings(agent)["cwd"]
+        if session is None or session.cwd != cwd:
+            if session is not None:
+                session.kill()
+            session = AGENT_SESSIONS[agent] = acp_client.Session(agent, cwd)
+
+        def on_update(kind, update):
+            if kind == "tool_call" and update.get("title"):
+                emit(notify, acp_client.NAMES[agent], update["title"][:120])
+
+        def permission(tool, options):
+            title = (tool.get("title") or "use a tool")[:100]
+            decision = eng.confirm_outside(f"{acp_client.NAMES[agent]}: {title}", source=agent)
+            allow = next((o["optionId"] for o in options if o.get("kind") == "allow_once"), None)
+            diagnostics.record(None, "agent_permission", decision, agent=agent, title=title)
+            return allow if decision == "confirmed" else None
+
+        reply, stop = session.prompt(text + SAY_NOTE, on_update=on_update, permission=permission)
+        diagnostics.record(None, "agent", stop, (time.time() - t) * 1000, agent=agent, chars=len(reply))
+        print(f"\n  {agent} ({stop}):\n{reply}\n")
+        if stop == "cancelled":
+            return
+        line = spoken_summary(reply)
+    except acp_client.Unavailable as exc:
+        line = str(exc)
+        diagnostics.record(None, "agent", "unavailable", (time.time() - t) * 1000, agent=agent, error=line)
+    except Exception as exc:
+        line = f"{acp_client.NAMES[agent]} ran into a problem."
+        diagnostics.record(None, "agent", "error", (time.time() - t) * 1000, agent=agent, error=repr(exc)[:300])
+    finally:
+        AGENT_BUSY.clear()
+    with eng.hold():
+        say(line, notify)
+    emit(notify, "Ready", line)
+
+
+def cancel_agents(eng):
+    """Stop: the running agent turn is cancelled and an open permission pop-down declined."""
+    eng.cancel_outside()
+    for session in AGENT_SESSIONS.values():
+        session.cancel()
+
+
 def make_engine(notify=None, ask=None, show=None):
     """The single engine. Voice-sourced mute/lock/sleep get a short spoken line before they run."""
     spoke_first = set()
@@ -601,6 +669,13 @@ def make_engine(notify=None, ask=None, show=None):
 
     def answer(text):
         from engine import current_rid
+        if ANSWER_PROVIDER in ("claude", "codex"):
+            if AGENT_BUSY.is_set():
+                return "I'm still working on the last one. Say stop to cancel it."
+            AGENT_BUSY.set()  # claimed now, so a second question can't slip in before the thread starts
+            threading.Thread(target=agent_turn, args=(ANSWER_PROVIDER, text, eng, notify), daemon=True).start()
+            diagnostics.record(current_rid(), "answer", "handed_off", provider=ANSWER_PROVIDER)
+            return "On it."
         t = time.time()
         model = model_settings.apple_model() if ANSWER_PROVIDER == "apple" else answer_settings().get("model")
         try:
@@ -618,7 +693,7 @@ def make_engine(notify=None, ask=None, show=None):
     actions.CLASSIFY_ITEMS = classify_items
     eng = Engine(classify, policy=confirm_policy, ask=ask, tiebreak=tiebreak,
                  threshold=lambda: float("inf") if tiebreak_threshold() >= 100 else tiebreak_threshold() / 100,
-                 answer=answer if ANSWER_PROVIDER in ("openrouter", "apple") else None, on_event=on_event)
+                 answer=answer if ANSWER_PROVIDER in ("openrouter", "apple", "claude", "codex") else None, on_event=on_event)
     if ANSWER_PROVIDER == "apple":
         import apple_fm
         eng.interrupt_answer = apple_fm.interrupt
@@ -647,9 +722,10 @@ def turn(eng, text, notify, hold=contextlib.nullcontext, stt_ms=None, admit=None
     if not text.strip():
         emit(notify, "Ready", "Didn't catch anything")
         return
-    if is_stop(text) and (eng.active() or stop_queued()):  # out of band: never queued behind the work it stops
+    if is_stop(text) and (eng.active() or stop_queued() or AGENT_BUSY.is_set()):  # out of band: never queued behind it
         dropped = stop_queued(drop=True)
         stopped = [eng.cancel(rid) for rid in eng.active()]
+        cancel_agents(eng)
         diagnostics.record(None, "stop", "cancelled", ids=[v["id"] for v in stopped], dropped_turns=dropped)
         with hold():
             say(say_line("cancelled"), notify)

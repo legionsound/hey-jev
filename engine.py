@@ -124,6 +124,38 @@ class Engine:
                 self.lock.notify_all()
             return self._view(rec)
 
+    def confirm_outside(self, text, source="agent", ttl=None):
+        """The same pop-down for a request that isn't an engine step (an agent asking permission).
+        -> "confirmed" | "declined" | "timed_out" | "busy" (another confirmation is open) | "no_confirmation_ui"."""
+        if not self.ask:
+            return "no_confirmation_ui"
+        with self.lock:
+            if self.pending is not None:
+                return "busy"
+            p = {"token": uuid.uuid4().hex, "id": None, "step": None, "decision": None, "text": text, "source": source}
+            self.pending = p
+        self.ask(dict(p))
+        end = time.monotonic() + (ttl or CONFIRM_TTL)
+        with self.lock:
+            while p["decision"] is None:
+                left = end - time.monotonic()
+                if left <= 0:
+                    p["decision"] = "timed_out"
+                    break
+                self.lock.wait(left)
+            if self.pending is p:
+                self.pending = None
+            decision = p["decision"]
+        self.ask(None)
+        return decision
+
+    def cancel_outside(self):
+        """Stop: an open agent permission pop-down is declined."""
+        with self.lock:
+            if self.pending is not None and self.pending["id"] is None and self.pending["decision"] is None:
+                self.pending["decision"] = "cancelled"
+                self.lock.notify_all()
+
     def decide(self, token, confirmed):
         """Pop-down button. First decision wins; a late one is a no-op. Returns True when this call decided."""
         with self.lock:

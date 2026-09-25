@@ -873,6 +873,18 @@ class VoiceCueTests(Base):
         self.save()
         voice_output.set_cues.assert_called_once_with("fish", "some", ["laughing", "cheerful", "clear throat"])
 
+    def test_cue_list_sits_under_the_fish_group_and_playback_moves_down(self):
+        pb = lambda: self.d.playback_view.frame().origin.y
+        self.assertEqual(pb(), self.d.cue_top)  # All: Playback takes the cue list's place
+        self.d.cue_mode.selectItemAtIndex_(1)
+        self.d.cueModeChanged_(self.d.cue_mode)
+        cue = self.d.cue_view.frame()
+        self.assertEqual(cue.origin.y, self.d.cue_top)
+        self.assertGreaterEqual(pb(), cue.origin.y + cue.size.height)  # below the cue list, no overlap
+        self.d.cue_mode.selectItemAtIndex_(0)
+        self.d.cueModeChanged_(self.d.cue_mode)
+        self.assertEqual(pb(), self.d.cue_top)
+
     def test_none_saves_none_and_back_to_all(self):
         self.d.cue_mode.selectItemAtIndex_(2)
         self.d.cueModeChanged_(self.d.cue_mode)

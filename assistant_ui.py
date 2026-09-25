@@ -719,13 +719,9 @@ class AppDelegate(NSObject):
         v.addSubview_(self.voice_message)
         footnote(v, y + 4, "Find with an empty box lists your own Fish voices; type a name to search public ones. "
                            "The sample uses the chosen voice. Save to make Jev use it.")
-        y = form_group(v, y + 44, "Playback", [("Volume", self.settings_voice_slider), ("Mute", self.settings_mute),
-                                               ("Sample", self.sample_button)])
-        self.sample_result.setFrame_(NSMakeRect(GROUP_X + 14, y - 16, PANE_W - 2 * GROUP_X, 16))
-        v.addSubview_(self.sample_result)
-        footnote(v, y + 4, "Volume and mute apply right away and only affect Jev's voice. Timer chimes stay audible.")
-        # Voice cues, shown only for Some: one checkbox per performance tag Fish can do.
-        self.cue_view = FlippedView.alloc().initWithFrame_(NSMakeRect(0, y + 36, PANE_W, 10))
+        # Voice cues, shown only for Some, directly under the Fish group that holds the popup revealing them.
+        self.cue_top = y + 44
+        self.cue_view = FlippedView.alloc().initWithFrame_(NSMakeRect(0, self.cue_top, PANE_W, 10))
         v.addSubview_(self.cue_view)
         self.cue_boxes = {}
         rows = []
@@ -738,6 +734,15 @@ class AppDelegate(NSObject):
         cy = form_group(self.cue_view, 0, "Cues to perform", rows, row_h=30)
         footnote(self.cue_view, cy, "Lines are written with cues like [chuckling]; unticked ones are left out. "
                                     "Applies from the next thing Jev says after Save.")
+        # Playback follows, moving down while the cue list shows.
+        self.playback_view = FlippedView.alloc().initWithFrame_(NSMakeRect(0, self.cue_top, PANE_W, 10))
+        v.addSubview_(self.playback_view)
+        py = form_group(self.playback_view, 0, "Playback", [("Volume", self.settings_voice_slider),
+                                                            ("Mute", self.settings_mute), ("Sample", self.sample_button)])
+        self.sample_result.setFrame_(NSMakeRect(GROUP_X + 14, py - 16, PANE_W - 2 * GROUP_X, 16))
+        self.playback_view.addSubview_(self.sample_result)
+        footnote(self.playback_view, py + 4, "Volume and mute apply right away and only affect Jev's voice. Timer "
+                                             "chimes stay audible.")
         self._show_cues()
 
         # Confirmations: one row per kind of action.
@@ -1089,7 +1094,10 @@ class AppDelegate(NSObject):
 
     @objc.python_method
     def _show_cues(self):
-        self.cue_view.setHidden_(voice_output.CUE_MODES[self.cue_mode.indexOfSelectedItem()] != "some")
+        some = voice_output.CUE_MODES[self.cue_mode.indexOfSelectedItem()] == "some"
+        self.cue_view.setHidden_(not some)
+        top = self.cue_top + (content_bottom(self.cue_view) + 24 if some else 0)
+        self.playback_view.setFrameOrigin_((0, top))
         self._fit_panes()
 
     @objc.python_method
@@ -1101,7 +1109,7 @@ class AppDelegate(NSObject):
     def _fit_panes(self):
         """Size each pane's scrolling content to what it holds: exactly the window when it fits, taller when not."""
         for view in (getattr(self, "advanced_view", None), getattr(self, "folder_view", None),
-                     getattr(self, "cue_view", None)):
+                     getattr(self, "cue_view", None), getattr(self, "playback_view", None)):
             if view is not None:
                 f = view.frame()
                 view.setFrameSize_((f.size.width, content_bottom(view)))

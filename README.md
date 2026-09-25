@@ -164,7 +164,7 @@ Development happens on [legionsound/hey-jev](https://github.com/legionsound/hey-
 
 ## Credits and license
 
-Hey Jev was created by Henryk Brzozowski ([henryklunaris/hey-jev](https://github.com/henryklunaris/hey-jev)). This fork is maintained by Legion Media and was built with Claude, ChatGPT and Muse Spark working together in Buzz.
+Hey Jev was created by Henryk Brzozowski ([henryklunaris/hey-jev](https://github.com/henryklunaris/hey-jev)). This fork is maintained by Legion Media.
 
 `ax_walk.py` is adapted from [awlevin/typesafe-computer-use](https://github.com/awlevin/typesafe-computer-use) under the MIT License. See [LICENSES/typesafe-computer-use.txt](LICENSES/typesafe-computer-use.txt).
 

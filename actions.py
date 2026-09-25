@@ -498,6 +498,9 @@ def resolve_pinned(t):
     if ((snap.started, snap.window_token) != (t["started"], t["window"]) or item is None or not _live(item)
             or [round(v) for v in item.frame] != t["frame"] or (item.role, item.label) != (t["role"], t["label"])):
         return ("none", "that one isn't on screen anymore")
+    hidden = _hidden(snap, item, deadline)
+    if hidden:
+        return ("none", hidden)
     return ("target", _screen_target(snap, item))
 
 
@@ -509,6 +512,20 @@ def _target_window(t, deadline):
         if win is not None:
             snap = screen.observe(pid=t["pid"], ocr=False, deadline=deadline, window=win)
     return snap
+
+
+VISIBLE = None  # set by the app: screen.still_visible. Unset (tests), visibility isn't re-checked
+
+
+def _hidden(snap, item, deadline):
+    """The control's window left the screen, or another window now covers it. -> reason or None."""
+    if VISIBLE is None:
+        return None
+    try:
+        return None if VISIBLE(snap.pid, snap.window_frame, item.frame, deadline) else \
+            "that control is hidden behind another window now"
+    except (screen.TimedOut, screen.Wedged, screen.Unavailable):
+        return "can't check that control is still showing"
 
 
 def _live(item):
@@ -658,13 +675,14 @@ def _elsewhere(args, front, deadline):
     if DESKTOP is None:
         return None
     try:
-        snaps, _skipped = DESKTOP(deadline)
+        snaps, skipped = DESKTOP(deadline)
     except (screen.Unavailable, screen.TimedOut, screen.Wedged):
         return None
     others = [s for s in snaps if (s.pid, s.window_token) != (front.pid, front.window_token)]
+    partial = skipped > 0 or any(s.truncated for s in others)  # an unread window could hold a second match
     pairs = [(s, i) for s in others for i in s.items if _live(i) and not i.from_value]
     if not pairs:
-        return None
+        return ("none", "I couldn't read every window; bring that app to the front") if partial else None
     intent = args.get("intent")
     said = screen._norm(intent or args.get("label"))
     exact = [] if intent else [(s, i) for s, i in pairs if screen._norm(i.label) == said] or \
@@ -690,8 +708,8 @@ def _elsewhere(args, front, deadline):
                 best = (k + got[0], got[1])
         exact = [pairs[best[0]]] if best else []
     if not exact:
-        return None
-    if len(exact) > 1:
+        return ("none", "I couldn't read every window; bring that app to the front") if partial else None
+    if len(exact) > 1 or partial:  # never a claimed unique match when some windows went unread: ask
         return ("choices", [_choice_in(s, i) for s, i in exact[:4]])
     return ("target", _screen_target(*exact[0]))
 
@@ -715,6 +733,9 @@ def _find(t, deadline):
     if ((snap.started, snap.window_token) != (t["started"], t["window"]) or item is None or not _live(item)
             or [round(v) for v in item.frame] != t["frame"] or (item.role, item.label) != (t["role"], t["label"])):
         raise Failed("that control is no longer there")
+    hidden = _hidden(snap, item, deadline)
+    if hidden:
+        raise Failed(hidden)
     return ref
 
 

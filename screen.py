@@ -600,14 +600,14 @@ def observe_desktop(deadline=None):
     if not trusted():
         raise Unavailable("accessibility_permission")
     front_pid = frontmost()[0]
-    wins = visible_windows()
+    wins = bounded(visible_windows, deadline)  # native discovery shares the read's deadline
     snaps, skipped, above = [], 0, []
     for n, (pid, frame) in enumerate(wins):
         if n >= DESKTOP_WINDOWS or time.monotonic() >= deadline:
             skipped += len(wins) - n
             break
         try:
-            ax = None if pid == front_pid and not snaps else _ax_window(pid, frame)
+            ax = None if pid == front_pid and not snaps else bounded(_ax_window, deadline, pid, frame)
             if ax is None and not (pid == front_pid and not snaps):
                 skipped += 1
                 above.append(frame)
@@ -622,6 +622,14 @@ def observe_desktop(deadline=None):
         snaps.append(snap)
         above.append(frame)
     return snaps, skipped
+
+
+def still_visible(pid, window_frame, item_frame, deadline):
+    """Whether this window is still on screen and nothing now stacked above it covers the control's centre."""
+    wins = bounded(visible_windows, deadline)
+    at = next((n for n, (p, f) in enumerate(wins)
+               if p == pid and sum(abs(a - b) for a, b in zip(f, window_frame)) <= 8), None)
+    return at is not None and not _covered(item_frame, [f for _, f in wins[:at]])
 
 
 _shown = {}  # version -> Snapshot, the last few lists put in front of the user

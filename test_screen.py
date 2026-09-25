@@ -1466,9 +1466,9 @@ class DesktopTests(unittest.TestCase):
             snaps, skipped = screen.observe_desktop()
         self.assertEqual((len(snaps), skipped), (1, 1))
 
-    def run_press(self, front, others, label, choose=None):
+    def run_press(self, front, others, label, choose=None, skipped=0):
         with patch.object(screen, "observe", lambda pid=None, ocr=True, deadline=None, window=None: front), \
-                patch.object(actions, "DESKTOP", lambda deadline: ([front] + others, 0)), \
+                patch.object(actions, "DESKTOP", lambda deadline: ([front] + others, skipped)), \
                 patch.object(actions, "CHOOSE", choose):
             return actions.resolve_screen_press({"label": label})
 
@@ -1517,3 +1517,47 @@ class DesktopTests(unittest.TestCase):
         with patch.object(screen, "observe", observe), patch.object(screen, "element_for", lambda tok: object()):
             got = actions.resolve_pinned(t)
         self.assertEqual((got[0], len(reads)), ("target", 2))  # focused window first, then the target's own
+
+    def test_unread_windows_mean_a_single_match_is_asked_not_claimed(self):
+        front = snap([item(1, "Save")], pid=1, window="Doc", app="Pages")
+        mail = snap([item(2, "OK")], pid=2, window="Draft", app="Mail")
+        got = self.run_press(front, [mail], "ok", skipped=3)
+        self.assertEqual((got[0], [c["target"]["pid"] for c in got[1]]), ("choices", [2]))
+        got = self.run_press(front, [mail], "archive", skipped=3)
+        self.assertEqual(got, ("none", "I couldn't read every window; bring that app to the front"))
+        mail.truncated = True
+        self.assertEqual(self.run_press(front, [mail], "ok")[0], "choices")
+
+    def test_window_discovery_stays_inside_the_deadline(self):
+        import time as _t
+        slow = lambda *a: (_t.sleep(0.3), [(1, (0, 0, 100, 100))])[1]
+        with patch.object(screen, "trusted", lambda: True), patch.object(screen, "frontmost", lambda: (1, "x", "x")), \
+                patch.object(screen, "visible_windows", slow):
+            t0 = _t.monotonic()
+            with self.assertRaises(screen.TimedOut):
+                screen.observe_desktop(_t.monotonic() + 0.02)
+            self.assertLess(_t.monotonic() - t0, 0.2)
+
+    def test_a_target_covered_since_it_was_chosen_is_never_pressed(self):
+        import time as _time
+        mail = snap([item(2, "Send", ref=object())], pid=2, window="Draft", app="Mail")
+        t = actions._screen_target(mail, mail.items[0])
+        covered = lambda pid, wf, f, d: False
+        with patch.object(screen, "observe", lambda pid=None, ocr=True, deadline=None, window=None: mail), \
+                patch.object(screen, "element_for", lambda tok: mail.items[0].ref), \
+                patch.object(actions, "VISIBLE", covered):
+            self.assertEqual(actions.resolve_pinned(t), ("none", "that control is hidden behind another window now"))
+            with self.assertRaises(actions.Failed):
+                actions._find(t, _time.monotonic() + 5)
+        with patch.object(screen, "observe", lambda pid=None, ocr=True, deadline=None, window=None: mail), \
+                patch.object(actions, "VISIBLE", lambda pid, wf, f, d: True):
+            self.assertEqual(actions.resolve_pinned(t)[0], "target")
+
+    def test_still_visible_uses_the_current_stacking(self):
+        import time as _t
+        wins = [(9, (0, 0, 500, 500)), (2, (100, 100, 800, 600))]
+        d = _t.monotonic() + 5
+        with patch.object(screen, "visible_windows", lambda: wins):
+            self.assertFalse(screen.still_visible(2, (100, 100, 800, 600), (200, 200, 40, 20), d))  # under pid 9
+            self.assertTrue(screen.still_visible(2, (100, 100, 800, 600), (700, 600, 40, 20), d))
+            self.assertFalse(screen.still_visible(3, (0, 0, 10, 10), (1, 1, 2, 2), d))  # its window is gone

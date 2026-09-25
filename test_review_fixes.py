@@ -224,7 +224,7 @@ class VoiceWiringTests(unittest.TestCase):
         self.p = patch.object(siri, "say", lambda line, notify: self.said.append(line))
         self.p.start()
         import actions
-        for name in ("CHOOSE", "CLASSIFY_ITEMS", "DESKTOP"):  # make_engine wires the app's globals: put them back
+        for name in ("CHOOSE", "CLASSIFY_ITEMS", "DESKTOP", "VISIBLE"):  # make_engine wires the app's globals: put them back
             self.addCleanup(setattr, actions, name, getattr(actions, name))
 
     def tearDown(self):

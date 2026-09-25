@@ -783,6 +783,7 @@ def make_engine(notify=None, ask=None, show=None):
     actions.CLASSIFY_ITEMS = classify_items
     import screen as _desktop_screen
     actions.DESKTOP = _desktop_screen.observe_desktop
+    actions.VISIBLE = _desktop_screen.still_visible
     eng = Engine(classify, policy=confirm_policy, ask=ask, tiebreak=tiebreak,
                  threshold=lambda: float("inf") if tiebreak_threshold() >= 100 else tiebreak_threshold() / 100,
                  answer=answer if ANSWER_PROVIDER in ("openrouter", "apple", "claude", "codex") else None, on_event=on_event)

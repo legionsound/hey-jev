@@ -406,8 +406,23 @@ def compose_args(clause):
     return {"compose": rest, **({"field": field} if field else {})}
 
 
+UNFINISHED_FIELD = re.compile(r"\s(?:into|in)(?:\s+the)?[\s.!?]*$", re.I)
+
+
+def unfinished_field(clause):
+    """"type hello into", "write a reply saying hi into the": a typing or writing request whose field phrase stopped
+    short. It asks which field; it never falls through to the focused field or an implied click."""
+    if not (TYPE_SPAN.match(clause) or COMPOSE.match(clause)) or not UNFINISHED_FIELD.search(clause):
+        return False
+    q = QUOTED.match(TYPE_SPAN.match(clause)["rest"]) if TYPE_SPAN.match(clause) else None
+    return not (q and not q["after"].strip(" .!?,"))  # 'type "sign in"': the words end inside the quotes
+
+
 def direct(clause):
-    """Commands whose words say exactly what to do, with nothing for Jev to choose: -> (action, args) or None."""
+    """Commands whose words say exactly what to do, with nothing for Jev to choose: -> (action, args) or None.
+    ("clarify", reason) when the words themselves are unfinished."""
+    if unfinished_field(clause):
+        return ("clarify", "unfinished_field")
     c = compose_args(clause)
     if c:
         return ("screen.type", c)
@@ -558,6 +573,8 @@ def plan(text, classify, can_answer=False):
         return ("clarify", "too_many_steps")
     if len(clauses) == 1:
         d = direct(clauses[0])  # the words say exactly what to do: no classification needed
+        if d and d[0] == "clarify":
+            return d
         if d:
             return ("steps", [{"clause": clauses[0], "action": d[0], "args": d[1]}])
         kind, got = judge(classify(clauses[0]), clauses[0], can_answer, implied=True)
@@ -566,6 +583,8 @@ def plan(text, classify, can_answer=False):
     browser = None  # same-request only: an earlier "open Safari/Chrome" applies to later website steps
     for clause in clauses:
         d = direct(clause)
+        if d and d[0] == "clarify":
+            return d
         if d:
             steps.append({"clause": clause, "action": d[0], "args": d[1]})
             continue

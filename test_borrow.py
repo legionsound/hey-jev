@@ -173,6 +173,29 @@ class ComposeWordsTests(unittest.TestCase):
         self.assertEqual(planner.type_args("write hello"), {"text": "hello"})
 
 
+class UnfinishedFieldPlanTests(unittest.TestCase):
+    """Through planner.plan with Jev saying "type": an unfinished field phrase asks which field; it never reaches
+    the focused field, the writer or an implied click."""
+
+    def test_unfinished_field_phrases_clarify_before_classification(self):
+        from test_screen import PlannerTests
+        ans = PlannerTests().answers("screen", screen_action=("type", 0.9))
+        classified = []
+        for said in ("write a reply saying hi into", "write a reply saying hi into the", "draft a note in",
+                     "type hello into", "type hello into the"):
+            self.assertEqual(planner.plan(said, lambda c: classified.append(c) or ans),
+                             ("clarify", "unfinished_field"), said)
+        self.assertEqual(classified, [])
+        self.assertEqual(planner.plan('type "sign in"', lambda c: ans)[1][0]["args"], {"text": "sign in"})
+        self.assertEqual(planner.plan("write a reply saying hi", lambda c: ans)[1][0]["args"],
+                         {"compose": "a reply saying hi"})
+
+    def test_it_is_spoken_as_a_question(self):
+        import siri
+        line = siri.line_for({"state": "needs_clarification", "detail": "unfinished_field", "steps": []})
+        self.assertIn("Into which field", line)
+
+
 class ComposeTests(unittest.TestCase):
     """From the words, through the real planner and engine, to the field."""
 

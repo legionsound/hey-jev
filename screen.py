@@ -151,6 +151,7 @@ class Item:
     enabled: bool = True
     from_value: bool = False  # the label is the element's AXValue, not its name
     secure: bool = False  # a password field: never typed into, its value never read
+    home: object = field(default=None, repr=False, compare=False)  # desktop views: the window Snapshot it came from
 
     @property
     def token(self):
@@ -182,6 +183,9 @@ class Snapshot:
     text_frames: list = field(default_factory=list, repr=False)  # regions Accessibility says are ordinary text
     walk_complete: bool = True  # False when the AX walk hit its node or time cap: unknown fields may exist
     version: int = 0  # set by remember(): which numbered list the user saw
+    desktop: bool = False  # desktop_view(): items from every visible window, each with its home window
+    skipped: int = 0  # desktop views: windows that were not read (limit, no AX window, error or time)
+    windows: list = field(default_factory=list, repr=False)  # desktop views: each window's Snapshot, front first
 
     @property
     def window_token(self):
@@ -517,6 +521,12 @@ def observe(pid=None, ocr=True, deadline=None, walk_cap=None, window=None):
     """Read one window under one deadline: the app's focused window, or `window` (an AX window element of that
     pid). Raises Unavailable or TimedOut; never acts. walk_cap: seconds the control walk may take, instead of
     ax_walk.AX_TIME_CAP."""
+    part = _observe_ax(pid, deadline, walk_cap, window)
+    return _finish(part, *(_ocr(part, part["deadline"]) if ocr else ([], "off")))
+
+
+def _observe_ax(pid, deadline, walk_cap=None, window=None):
+    """observe()'s first half: identity, controls and the field scan, everything but text off the pixels."""
     t0 = time.monotonic()
     deadline = deadline or t0 + 4.0
     if not trusted():
@@ -531,24 +541,34 @@ def observe(pid=None, ocr=True, deadline=None, walk_cap=None, window=None):
         field_scan = bounded(scan_fields, deadline, win)
     except TimedOut:
         field_scan = ([], False, [])
-    t_ax = time.monotonic()
-    texts, ocr_state = [], "off"
-    if ocr:
-        try:
-            texts, ocr_state = bounded(read_text, deadline, pid, wframe, deadline), "ok"
-        except TimedOut:
-            ocr_state = "timed_out"  # the controls still stand; text is a bonus
-        except Unavailable as exc:
-            ocr_state = "no_permission" if str(exc) == "no_permission" else "failed"
+    return {"t0": t0, "t_ax": time.monotonic(), "deadline": deadline, "pid": pid, "app": app, "bundle": bundle,
+            "started": started, "win": win, "wframe": wframe, "title": title, "controls": controls, "extra": extra,
+            "truncated": truncated, "field_scan": field_scan}
+
+
+def _ocr(part, deadline):
+    """observe()'s text half. -> (texts, ocr state); it never fails the read: the controls still stand."""
+    try:
+        return bounded(read_text, deadline, part["pid"], part["wframe"], deadline), "ok"
+    except TimedOut:
+        return [], "timed_out"
+    except Unavailable as exc:
+        return [], "no_permission" if str(exc) == "no_permission" else "failed"
+
+
+def _finish(part, texts, ocr_state):
+    controls, extra, wframe = part["controls"], part["extra"], part["wframe"]
     items = merge(controls, texts, wframe)
     for i in items:
         if i.source != "ocr":
             ref_extra = next((v for c in controls if c.ref is i.ref for v in [extra[id(c)]]), (True, False, False))
             i.enabled, i.from_value, i.secure = ref_extra
-    fields, fields_complete, text_frames = field_scan
-    return Snapshot(pid, app, bundle, title, wframe, items[:MAX_ITEMS], truncated or len(items) > MAX_ITEMS, ocr_state,
-                    {"ax": round((t_ax - t0) * 1000), "ocr": round((time.monotonic() - t_ax) * 1000)},
-                    window_ref=win, started=started, field_frames=fields, walk_complete=fields_complete,
+    fields, fields_complete, text_frames = part["field_scan"]
+    t_ax = part["t_ax"]
+    return Snapshot(part["pid"], part["app"], part["bundle"], part["title"], wframe, items[:MAX_ITEMS],
+                    part["truncated"] or len(items) > MAX_ITEMS, ocr_state,
+                    {"ax": round((t_ax - part["t0"]) * 1000), "ocr": round((time.monotonic() - t_ax) * 1000)},
+                    window_ref=part["win"], started=part["started"], field_frames=fields, walk_complete=fields_complete,
                     text_frames=text_frames)
 
 
@@ -592,27 +612,57 @@ def _covered(frame, above):
 DESKTOP_WINDOWS = 8  # at most this many windows, front first; the rest are reported, never silently dropped
 
 
-def observe_desktop(deadline=None):
+BACK_WALK = 0.4  # seconds each window behind the front one may take to walk
+
+
+def front_with_text(pid, deadline):
+    """The front window's controls now, its text off the pixels in the background (Vision runs natively, so it
+    overlaps the reads of the windows behind). -> (snapshot without text, finish()); finish() waits for the text,
+    still under the deadline, and returns the full snapshot."""
+    part = _observe_ax(pid, deadline)
+    box = {}
+
+    def run():
+        try:
+            box["got"] = _ocr(part, deadline)
+        except Exception:  # Wedged, or anything native: the controls still stand
+            box["got"] = ([], "failed")
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+
+    def finish():
+        t.join(max(0.0, deadline - time.monotonic()) + 0.05)
+        return _finish(part, *box.get("got", ([], "timed_out")))
+    return _finish(part, [], "off"), finish
+
+
+def observe_desktop(deadline=None, front_ocr=False):
     """Every visible window, front to back, each its own Snapshot (identity, window token, frame), with controls hidden
     behind a window above removed. -> (snapshots, skipped) where skipped counts windows not read (limit, no AX
-    window, error or time). The front window comes first and is read exactly as observe() reads it."""
+    window, error or time). The front window comes first and is read exactly as observe() reads it, with OCR only when
+    front_ocr: text off the pixels is trusted only in front, where nothing can be painted over it. Windows behind it
+    get BACK_WALK each."""
     deadline = deadline or time.monotonic() + 4.0
     if not trusted():
         raise Unavailable("accessibility_permission")
     front_pid = frontmost()[0]
     wins = bounded(visible_windows, deadline)  # native discovery shares the read's deadline
-    snaps, skipped, above = [], 0, []
-    for n, (pid, frame) in enumerate(wins):
+    snaps, skipped, above, finish = [], 0, [], None
+    for n, (pid, frame) in enumerate(wins):  # one at a time: reads are Python-bound, so threads only slow each down
         if n >= DESKTOP_WINDOWS or time.monotonic() >= deadline:
             skipped += len(wins) - n
             break
+        front = pid == front_pid and not snaps
         try:
-            ax = None if pid == front_pid and not snaps else bounded(_ax_window, deadline, pid, frame)
-            if ax is None and not (pid == front_pid and not snaps):
+            ax = None if front else bounded(_ax_window, deadline, pid, frame)
+            if ax is None and not front:
                 skipped += 1
                 above.append(frame)
                 continue
-            snap = observe(pid=pid, ocr=False, deadline=deadline, window=ax)
+            if front and front_ocr:
+                snap, finish = front_with_text(pid, deadline)
+            else:
+                snap = observe(pid=pid, ocr=False, deadline=deadline, window=ax, walk_cap=None if front else BACK_WALK)
         except (Unavailable, TimedOut, Wedged):
             skipped += 1
             above.append(frame)
@@ -621,7 +671,41 @@ def observe_desktop(deadline=None):
             snap.items = [i for i in snap.items if not _covered(i.frame, above)]
         snaps.append(snap)
         above.append(frame)
+    if finish is not None:  # the front window is never covered: its full read replaces the text-less one as is
+        snaps[0] = finish()
     return snaps, skipped
+
+
+def desktop_view(deadline=None, ocr=True):
+    """One numbered list across every visible window: the front window's items first (as observe() reads them), then
+    each window behind it, front to back, minus what a window above covers. Every item keeps its home window, so a
+    number resolves against exactly that window. Identity fields (pid, window...) are the front window's."""
+    snaps, skipped = observe_desktop(deadline, front_ocr=ocr)
+    if not snaps:
+        raise Unavailable("no readable window")
+    for s in snaps:
+        for i in s.items:
+            i.home = s
+    items = [i for s in snaps for i in s.items]
+    for n, i in enumerate(items, 1):  # one list: numbers run on across windows
+        i.n = n
+    front = snaps[0]
+    return Snapshot(front.pid, front.app, front.bundle, front.window, front.window_frame,
+                    items, truncated=any(s.truncated for s in snaps), ocr=front.ocr,
+                    ms=front.ms, window_ref=front.window_ref, started=front.started, field_frames=front.field_frames,
+                    text_frames=front.text_frames, walk_complete=front.walk_complete, desktop=True, skipped=skipped,
+                    windows=snaps)
+
+
+def window_index(item, snap):
+    """Which of a desktop view's windows (0 = front) an item is in: the UI draws one overlay per window."""
+    return next((k for k, w in enumerate(snap.windows) if w is item.home), 0)
+
+
+def scope_of(item, snap):
+    """The window an item lives in: its home window in a desktop view, else the snapshot's own."""
+    s = item.home or snap
+    return (s.pid, s.started, s.window_token)
 
 
 def still_visible(pid, window_frame, item_frame, deadline):
@@ -665,7 +749,8 @@ _mapping = {}  # version -> what each number pointed at, so a refresh that chang
 def mapping(snap):
     """Number -> the thing it points at, keyed the way numbering is: element token, or OCR label and place."""
     return ((snap.pid, snap.started, snap.window_token),
-            tuple(sorted((i.n, i.token if i.ref is not None else ("ocr", i.label, tuple(round(v) for v in i.frame)))
+            tuple(sorted((i.n, scope_of(i, snap),
+                          i.token if i.ref is not None else ("ocr", i.label, tuple(round(v) for v in i.frame)))
                          for i in snap.items)))
 
 
@@ -815,6 +900,36 @@ def page_key(pid, ref, role, deadline):
             if not sent:
                 return TOO_LATE
         raise
+
+
+def in_front(pid, window_ref, deadline):
+    """Whether this window is the frontmost app's focused window: where keyboard input goes."""
+    def read():
+        if frontmost()[0] != pid:
+            return False
+        app_el = _AS().AXUIElementCreateApplication(pid)
+        _AS().AXUIElementSetMessagingTimeout(app_el, AX_MESSAGE_TIMEOUT)
+        return _attr(app_el, "AXFocusedWindow") == window_ref
+    return bounded(read, deadline)
+
+
+def bring_forward(pid, window_ref, deadline):
+    """Make this window the frontmost app's focused window, through Accessibility (an agent app can't take focus
+    with activate()). Needed before a keyboard press: keys go to the focused window, never a background one. Waits
+    until macOS reports it in front. -> True once it is, False if it never got there (nothing else was done)."""
+    def run():
+        AS = _AS()
+        app_el = AS.AXUIElementCreateApplication(pid)
+        AS.AXUIElementSetMessagingTimeout(app_el, AX_MESSAGE_TIMEOUT)
+        AS.AXUIElementSetAttributeValue(window_ref, "AXMain", True)
+        AS.AXUIElementPerformAction(window_ref, "AXRaise")
+        AS.AXUIElementSetAttributeValue(app_el, "AXFrontmost", True)
+        while time.monotonic() < deadline - 0.05:
+            if frontmost()[0] == pid and _attr(app_el, "AXFocusedWindow") == window_ref:
+                return True
+            time.sleep(0.03)
+        return False
+    return bounded(run, deadline, effect=True)
 
 
 UNKNOWN = "?unknown"

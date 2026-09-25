@@ -614,6 +614,8 @@ def resolve_screen_press(args):
             return ("none", "no such number on the last list")
         if seen.source == "ocr":
             return ("none", "not_a_control")
+        if seen.home is not None:  # a desktop list: that exact control, re-read in its own window, wherever it is now
+            return resolve_pinned(_screen_target(seen.home, seen))
         if (shown.pid, shown.started, shown.window_token) != (snap.pid, snap.started, snap.window_token):
             return ("none", "screen_changed")
         now = next((i for i in controls if i.token == seen.token and i.key() == seen.key()), None)
@@ -739,6 +741,16 @@ def _find(t, deadline):
     return ref
 
 
+_raised = set()  # id(target): its window was brought to the front for the press (reported, not hidden)
+
+
+def _took_raise(t):
+    if id(t) in _raised:
+        _raised.discard(id(t))
+        return True
+    return False
+
+
 def run_screen_press(t, deadline):
     ref = _find(t, deadline)
     try:
@@ -749,6 +761,17 @@ def run_screen_press(t, deadline):
         web = screen.chromium_page(t["pid"], ref, deadline)
     except (screen.TimedOut, screen.Wedged) as exc:
         raise Failed(f"screen read failed before the press: {exc}")
+    if web:  # keys go to the focused window only: a page in a window behind is brought to the front first
+        win = screen.element_for(t["window"])
+        try:
+            if win is None:
+                raise Failed("that window is gone, so nothing was pressed")
+            if not screen.in_front(t["pid"], win, deadline):
+                if not screen.bring_forward(t["pid"], win, deadline):
+                    raise Failed("that window wouldn't come to the front, so nothing was pressed")
+                _raised.add(id(t))
+        except (screen.TimedOut, screen.Wedged) as exc:
+            raise Failed(f"couldn't bring that window forward, so nothing was pressed ({exc})")
     _pressed[id(t)] = (before, time.monotonic(), ref)
     try:
         err = screen.page_key(t["pid"], ref, t["role"], deadline) if web else screen.press(ref, deadline)
@@ -779,13 +802,14 @@ def verify_screen_press(t, deadline):
         own.append("menu_open")
     if own:
         _pressed.pop(id(t), None)
-        return ("done", {"changed": own, "window_changed": before[0].get("window") != after[0].get("window")})
+        return ("done", {"changed": own, "window_changed": before[0].get("window") != after[0].get("window"),
+                         "brought_forward": _took_raise(t)})
     if time.monotonic() - at < SETTLE:
         return ("wait", {})
     _pressed.pop(id(t), None)
     other = sorted(k for k in before[0] if before[0].get(k) != after[0].get(k))
     unread = sorted(k for k in before[1] if k not in known)
-    return ("unverified", {"delivered": True, "observed": other, "unread": unread,
+    return ("unverified", {"delivered": True, "observed": other, "unread": unread, "brought_forward": _took_raise(t),
                            "why": "pressed; the control itself did not change" if not unread
                            else "pressed; the control could not be read back"})
 
@@ -815,7 +839,10 @@ def resolve_screen_type(args):
             seen = next((i for i in shown.items if i.n == args["number"]), None) if shown is not None else None
             if seen is None:
                 return ("none", "no such number on the last list")
-            if (shown.pid, shown.started, shown.window_token) != (snap.pid, snap.started, snap.window_token):
+            if seen.home is not None and screen.scope_of(seen, shown) != (snap.pid, snap.started, snap.window_token):
+                return ("none", "that field is in another window; bring it to the front first")
+            if seen.home is None and (shown.pid, shown.started, shown.window_token) != (snap.pid, snap.started,
+                                                                                         snap.window_token):
                 return ("none", "screen_changed")
             now = next((i for i in snap.items if i.token == seen.token and i.key() == seen.key()), None)
             if now is None or now.role not in EDITABLE_ROLES:
@@ -1348,7 +1375,8 @@ def resolve_screen_pick(args):
 
 def run_screen_list(t, deadline):
     try:
-        snap = screen.observe(ocr=True, deadline=deadline)
+        snap = screen.desktop_view(deadline=deadline, ocr=True) if DESKTOP else screen.observe(ocr=True,
+                                                                                             deadline=deadline)
     except (screen.Unavailable, screen.TimedOut, screen.Wedged) as exc:
         raise Failed(f"can't read the screen: {exc}")
     screen.remember(snap)
@@ -1358,7 +1386,7 @@ def run_screen_list(t, deadline):
 def verify_screen_list(t, deadline):
     snap = _listed.pop(id(t), None) or screen.last()
     return ("done", {"app": snap.app, "count": len(snap.items), "ocr": snap.ocr, "version": snap.version,
-                     "items": [i.public() for i in snap.items]})
+                     "items": [{**i.public(), "win": screen.window_index(i, snap)} for i in snap.items]})
 
 
 def effect_pending():

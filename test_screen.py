@@ -118,7 +118,8 @@ class FakeScreen:
         self.sig, self.state = {"text": "a", "menu_open": False}, {"exists": True, "AXValue": "0"}
         for name, fn in {"observe": self.observe, "last": lambda: self.shown,
                          "signature": lambda pid, deadline: dict(self.sig),
-                         "element_state": lambda ref, deadline: dict(self.state), "press": self.press}.items():
+                         "element_state": lambda ref, deadline: dict(self.state), "press": self.press,
+                         "in_front": lambda pid, win, deadline: True}.items():
             p = patch.object(screen, name, fn)
             p.start()
             test.addCleanup(p.stop)
@@ -1442,7 +1443,7 @@ class DesktopTests(unittest.TestCase):
                 patch.object(screen, "frontmost", lambda: (front_pid, "x", "x")), \
                 patch.object(screen, "visible_windows", lambda: wins), \
                 patch.object(screen, "_ax_window", lambda pid, frame: axw[pid]), \
-                patch.object(screen, "observe", lambda pid=None, ocr=True, deadline=None, window=None: reads[pid]):
+                patch.object(screen, "observe", lambda pid=None, ocr=True, deadline=None, window=None, walk_cap=None: reads[pid]):
             return screen.observe_desktop()
 
     def test_windows_front_to_back_and_hidden_controls_dropped(self):
@@ -1456,7 +1457,7 @@ class DesktopTests(unittest.TestCase):
     def test_a_window_that_cant_be_read_is_counted_never_silently_dropped(self):
         front = snap([item(1, "Save")], pid=1, app="Pages")
 
-        def observe(pid=None, ocr=True, deadline=None, window=None):
+        def observe(pid=None, ocr=True, deadline=None, window=None, walk_cap=None):
             if pid == 2:
                 raise screen.Unavailable("no window")
             return front

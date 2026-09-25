@@ -325,9 +325,47 @@ def label(text, frame, size, color=None):
     return view
 
 
+class Overlay:
+    """The overlay for a desktop list: one click-through window per app window (a window spanning two displays shows
+    on only one of them). Shown, hidden and dimmed together; anything else reads the front window's."""
+
+    def __init__(self, windows):
+        self.windows = windows
+
+    def orderFrontRegardless(self):
+        for w in self.windows:
+            w.orderFrontRegardless()
+
+    def orderOut_(self, sender):
+        for w in self.windows:
+            w.orderOut_(sender)
+
+    def setAlphaValue_(self, a):
+        for w in self.windows:
+            w.setAlphaValue_(a)
+
+    def isVisible(self):
+        return any(w.isVisible() for w in self.windows)
+
+    def __getattr__(self, name):
+        return getattr(self.windows[0], name)
+
+
+def by_window(items):
+    """Items grouped by the window they were read from ("win", 0 = front), front first."""
+    groups = {}
+    for i in items:
+        groups.setdefault(i.get("win", 0), []).append(i)
+    return [groups[k] for k in sorted(groups)]
+
+
 def numbers_window(facts):
-    """A click-through window spanning the listed items, one small badge per item. Controls are tinted, OCR text grey."""
-    items = facts["items"]
+    """Badges for every listed item, one click-through window per app window."""
+    return Overlay([_numbers_one(g) for g in by_window(facts["items"])])
+
+
+def _numbers_one(items):
+    """A click-through window spanning these items, one small badge per item. Controls are tinted, OCR text grey."""
     top = AppKit.NSScreen.screens()[0].frame().size.height  # AX frames are top-left on the primary display
     xs = [i["frame"][0] for i in items]
     ys = [i["frame"][1] for i in items]
@@ -367,8 +405,13 @@ INSPECT_COLORS = {"press": NSColor.systemBlueColor, "field": NSColor.systemOrang
 def inspect_window(view):
     """Click-through boxes, numbers and names over every item, coloured by what Hey Jev knows about it: blue can be
     pressed, orange is a text field, teal is other Accessibility, grey is text read off the screen and shared with
-    Jev, faint is text that stays on the Mac. A readout gives the app, count, read time and age."""
-    items = view["items"]
+    Jev, faint is text that stays on the Mac. One overlay per app window; the front one carries a readout with the
+    apps, count, read time and age."""
+    groups = by_window(view["items"])
+    return Overlay([_inspect_one(g, view if k == 0 else None) for k, g in enumerate(groups)])
+
+
+def _inspect_one(items, view):
     top = AppKit.NSScreen.screens()[0].frame().size.height
     x0 = min(i["frame"][0] for i in items) - 30
     y0 = min(i["frame"][1] for i in items) - 18
@@ -409,6 +452,8 @@ def inspect_window(view):
         else:
             tag.setFrame_(NSMakeRect(fx - x0, h - (fy - y0) + 1, tw, 14))
         content.addSubview_(tag)
+    if view is None:
+        return win
     hud = NSTextField.labelWithString_(hud_text(view))
     hud.setFont_(NSFont.systemFontOfSize_weight_(11, 0.5))
     hud.setTextColor_(NSColor.whiteColor())
@@ -422,12 +467,16 @@ def inspect_window(view):
     return win
 
 
-STALE_AFTER = 2.5
+STALE_AFTER = 4.0  # a whole-desktop read takes 2-3 s: older than that, reads have paused
 
 
 def hud_text(view):
     age = max(0.0, time.time() - view.get("at", time.time()))
-    text = f"Jev sees: {view.get('app', '?')} · {len(view['items'])} items · read in {view.get('ms', 0)} ms · {age:.1f} s ago"
+    apps = view.get("apps") or [view.get("app", "?")]
+    names = ", ".join(dict.fromkeys(apps))  # each app once, front first
+    text = f"Jev sees: {names} · {len(view['items'])} items · read in {view.get('ms', 0)} ms · {age:.1f} s ago"
+    if view.get("skipped"):
+        text += f" · {view['skipped']} window{'s' if view['skipped'] != 1 else ''} not read"
     if age > STALE_AFTER:
         text += " · STALE (paused while a command runs)"
     if not view.get("complete", True):

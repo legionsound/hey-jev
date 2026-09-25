@@ -450,6 +450,7 @@ RISKY = re.compile(r"\b(buy|purchase|order|pay|checkout|check out|send|submit|po
                    re.I)
 CHOOSE = None  # set by the app: (spoken, [labels]) -> (index or None, confidence). Only control names are sent.
 CHOOSE_GATE = 0.65
+INTENT_GATE = 0.75  # no control was named: Jev must be surer before a press happens
 RESOLVE_BUDGET = 3.0  # one deadline over every native read a resolve makes
 RESOLVE_UNTIL = None  # set by the engine while a task step resolves: never past the task's shared deadline
 
@@ -556,11 +557,12 @@ def resolve_screen_press(args):
             return ("none", "screen_changed")
         now = next((i for i in controls if i.token == seen.token and i.key() == seen.key()), None)
         return ("target", _screen_target(snap, now)) if now else ("none", "screen_changed")
-    said = screen._norm(args.get("label"))
+    intent = args.get("intent")
+    said = screen._norm(intent or args.get("label"))
     if not said:
         return ("none", "no control named")
-    exact = [i for i in controls if screen._norm(i.label) == said]
-    if not exact:
+    exact = [] if intent else [i for i in controls if screen._norm(i.label) == said]
+    if not exact and not intent:
         exact = [i for i in controls if f" {said} " in f" {screen._norm(i.label)} "]
     if not exact and CHOOSE:
         named = [i for i in controls if not i.from_value][:60]  # a field's or document's value is never sent
@@ -571,15 +573,16 @@ def resolve_screen_press(args):
                 context = snap
             cards = describe_cards(named, context, snap.window_frame)
             try:
-                got = valid_choice(CHOOSE(args.get("label", ""), cards), len(cards))
+                got = valid_choice(CHOOSE(intent, cards, intent=True) if intent
+                                   else CHOOSE(args.get("label", ""), cards), len(cards))
             except Exception:
                 got = None
             if got is None:
                 return ("choices", [])  # a malformed answer asks again; nothing is pressed
-            if got[0] is not None and got[1] >= CHOOSE_GATE:
+            if got[0] is not None and got[1] >= (INTENT_GATE if intent else CHOOSE_GATE):
                 exact = [named[got[0]]]
     if not exact:
-        return ("none", "no control by that name")
+        return ("none", "nothing on screen does that" if intent else "no control by that name")
     if len({i.token for i in exact}) > 1:
         return ("choices", [{"name": f"{i.label} ({_where(i, snap.window_frame)})"} for i in exact[:4]])
     return ("target", _screen_target(snap, exact[0]))

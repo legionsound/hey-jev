@@ -353,8 +353,8 @@ class PlannerTests(unittest.TestCase):
                          ("clarify", "no_action"))
         self.assertEqual(planner.search_query("search google for"), None)
         # no regressions: in-page search, plain google navigation, Chrome app
-        self.assertEqual(planner.plan("search in page", lambda _: ans_for()),
-                         ("clarify", "no_action"))
+        kind, got = planner.plan("search in page", lambda _: ans_for())  # never a web search; at most Jev
+        self.assertEqual((got[0]["action"], got[0]["args"]), ("screen.press", {"intent": "search in page"}))  # picks a control
         kind, got = planner.plan("go to google.com", lambda _: ans_for())
         self.assertEqual(got[0]["args"]["url"], "google.com")
         kind, got = planner.plan("open Google Chrome",

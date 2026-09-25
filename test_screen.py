@@ -78,6 +78,21 @@ class PlannerTests(unittest.TestCase):
         ans.update(branch)
         return ans
 
+    def test_a_command_nothing_built_in_does_asks_which_control_does_it(self):
+        none = {f"{t}_action": ("none", 0.9) for t in ("screen", "app", "volume", "display", "media", "timer", "system")}
+        kind, steps = planner.plan("reload this page", lambda _: self.answers("screen", **none))
+        self.assertEqual((kind, steps[0]["action"], steps[0]["args"]),
+                         ("steps", "screen.press", {"intent": "reload this page"}))
+        kind, steps = planner.plan("switch to dark mode", lambda _: self.answers("display", display_action=("dark_on", 0.9)))
+        self.assertEqual(steps[0]["action"], "display.dark_on")  # a built-in action still wins
+        chat = lambda _: {**self.answers("screen", **none), "category": ("chit_chat", 0.9)}
+        self.assertEqual(planner.plan("you're great", chat)[0], "reply")  # only commands ever reach the screen
+        unsure = lambda _: {**self.answers("screen", **none), "category": ("mac_command", 0.5)}
+        self.assertEqual(planner.plan("hmm reload maybe", unsure), ("clarify", "no_action"))
+        self.assertEqual(planner.plan("refresh", lambda _: self.answers("screen", **none)), ("clarify", "no_action"))
+        kind, got = planner.plan("mute, then reload this page", lambda _: self.answers("screen", **none))
+        self.assertEqual((kind, got), ("clarify", "no_action"))  # never inside a multi-step request
+
     def test_click_and_ui_nouns_never_become_other_actions(self):
         # Real Jev heard "click on the Loud mode checkbox" as volume up (0.82): the click must stay a click.
         for said, target in [("click on the Loud mode checkbox", "volume"), ("tap the Play button", "media"),
@@ -240,6 +255,24 @@ class ScreenActionTests(unittest.TestCase):
         self.chosen = (0, 0.9)
         v = self.run_text("click compose", "screen.press", {"label": "compose"})
         self.assertEqual((v["state"], v["steps"][0]["target"]["label"]), ("completed", "New Note"))
+
+    def test_an_implied_press_is_the_one_control_jev_says_does_it(self):
+        fake = FakeScreen(self, [item(1, "Back"), item(2, "Reload")])
+        asked = []
+
+        def choose(spoken, labels, intent=False):
+            asked.append((spoken, intent))
+            return (1, 0.9)
+        with patch.object(actions, "CHOOSE", choose):
+            v = self.run_text("reload this page", "screen.press", {"intent": "reload this page"})
+        self.assertEqual(asked, [("reload this page", True)])
+        self.assertEqual((v["state"], v["steps"][0]["target"]["label"], len(fake.presses)), ("completed", "Reload", 1))
+
+    def test_an_implied_press_needs_a_surer_jev_and_never_matches_words(self):
+        fake = FakeScreen(self, [item(1, "reload this page"), item(2, "Reload")])
+        with patch.object(actions, "CHOOSE", lambda spoken, labels, intent=False: (1, 0.7)):
+            v = self.run_text("reload this page", "screen.press", {"intent": "reload this page"})
+        self.assertEqual((v["state"], v["steps"][0]["detail"], fake.presses), ("failed", "nothing on screen does that", []))
 
     def test_chooser_never_sees_field_or_document_values(self):
         FakeScreen(self, [item(1, "New Note"), item(2, "Dear Sam, the merger", role="AXCell", from_value=True)])

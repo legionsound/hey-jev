@@ -446,7 +446,7 @@ def pick(ans, clause, inherited_browser=None):
     return s
 
 
-def judge(ans, clause, can_answer=False, inherited_browser=None):
+def judge(ans, clause, can_answer=False, inherited_browser=None, implied=False):
     """One clause -> ("step", step) | ("reply", key) | ("answer", None) | ("clarify", reason)."""
     cat, cconf = ans["category"]
     if ans["target"][0] == "timer" and ans["target"][1] >= GATE and not ans["compound"][0]:
@@ -464,6 +464,11 @@ def judge(ans, clause, can_answer=False, inherited_browser=None):
     s = pick(ans, clause, inherited_browser)
     if s and s[1] == "clarify":
         return ("clarify", s[2])
+    if not s and implied and cat == "mac_command" and cconf >= GATE and len(clause.split()) >= 2:
+        # a command nothing built in does ("reload this page", "mute this video"): Jev picks the one control on
+        # screen that does it, or none. The press runs with the usual checks and click confirmation. Single-clause
+        # requests of two words or more only: a lone word ("google") or a stray clause in a list never presses.
+        return ("step", {"clause": clause, "action": "screen.press", "args": {"intent": clause}})
     if not s:
         return ("answer", None) if can_answer and cat == "information_request" else ("clarify", "no_action")
     return ("step", {"clause": clause, "action": s[1], "args": s[2]})
@@ -498,7 +503,7 @@ def plan(text, classify, can_answer=False):
         d = direct(clauses[0])  # the words say exactly what to do: no classification needed
         if d:
             return ("steps", [{"clause": clauses[0], "action": d[0], "args": d[1]}])
-        kind, got = judge(classify(clauses[0]), clauses[0], can_answer)
+        kind, got = judge(classify(clauses[0]), clauses[0], can_answer, implied=True)
         return ("steps", [got]) if kind == "step" else (kind, got)
     steps = []
     browser = None  # same-request only: an earlier "open Safari/Chrome" applies to later website steps

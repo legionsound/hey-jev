@@ -92,14 +92,16 @@ def tiebreak(clause, choices):
     return int(choice.split("_")[1]), conf
 
 
-def choose_control(spoken, labels):
-    """Jev picks which on-screen control the user named. Only the control names and the spoken words are sent."""
+def choose_control(spoken, labels, intent=False):
+    """Jev picks which on-screen control the user named, or (intent) the one control that does what they asked.
+    Only the control names and the spoken words are sent."""
     from engine import current_rid
     names = labels[:250]
     ids = [f"c{i}" for i in range(len(names))]  # opaque keys: control text can never collide with a protocol choice
-    q = {"control": {"type": "choice", "instructions": f"Which on-screen control did the user mean by: {spoken}. "
-                                                      "Each is described by its name, the words around it, and where "
-                                                      "it is in the window.",
+    ask = (f"The user asked: {spoken}. Which one on-screen control, pressed once, does exactly that? Choose none "
+           "unless one control clearly does it." if intent else f"Which on-screen control did the user mean by: {spoken}.")
+    q = {"control": {"type": "choice", "instructions": ask + " Each is described by its name, the words around it, "
+                                                           "and where it is in the window.",
                      "criteria": {**{k: f"the control {n}" for k, n in zip(ids, names)},
                                   "none": "none of these controls"}}}
     try:
@@ -108,7 +110,8 @@ def choose_control(spoken, labels):
         diagnostics.record(current_rid(), "choose_control", "error", error=repr(exc), options=len(names))
         return None, 0.0
     pick, conf = ans["control"]
-    diagnostics.record(current_rid(), "choose_control", "ok", ms, options=len(names), confidence=round(conf, 2))
+    diagnostics.record(current_rid(), "choose_control", "ok", ms, options=len(names), confidence=round(conf, 2),
+                       intent=intent)
     return (ids.index(pick) if pick in ids else None), conf
 
 

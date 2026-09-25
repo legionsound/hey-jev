@@ -48,7 +48,7 @@ from AppKit import (
     NSWindowStyleMaskTitled,
 )
 from AppKit import NSPopover, NSViewController
-from Foundation import NSObject, NSTimer, NSUserDefaults
+from Foundation import NSObject, NSString, NSTimer, NSUserDefaults
 from actions import EFFECT_LABELS, EFFECTS
 from model_settings import (show_cursor, save_show_cursor, apple_model, save_apple_model, AGENTS, agent_settings, clean_agent_folder, save_agent_settings, PREFS, PARAMETERS, advanced_open, save_advanced_open, voice, save_voice,
                             app_folders, clean_app_folders, save_app_folders, JEV_MODELS, MODEL_ID_RE, jev_model,
@@ -304,6 +304,9 @@ def footnote(parent, top, value):
                 NSColor.secondaryLabelColor())
     view.setLineBreakMode_(0)  # wrap
     view.cell().setWraps_(True)
+    f = view.frame()  # as tall as the text needs, so a third line isn't cut off
+    need = view.cell().cellSizeForBounds_(NSMakeRect(0, 0, f.size.width, 10_000)).height
+    view.setFrame_(NSMakeRect(f.origin.x, f.origin.y, f.size.width, max(f.size.height, need)))
     parent.addSubview_(view)
 
 
@@ -371,7 +374,7 @@ def _numbers_one(items):
     ys = [i["frame"][1] for i in items]
     x0, y0 = min(xs) - 34, min(ys) - 4  # room for a badge left of the leftmost item
     x1 = max(i["frame"][0] + 40 for i in items)
-    y1 = max(i["frame"][1] + 24 for i in items)
+    y1 = max(i["frame"][1] + max(0, (i["frame"][3] - 15) / 2) + 19 for i in items)  # a tall item's badge sits lower
     frame = NSMakeRect(x0, top - y1, x1 - x0, y1 - y0)
     win = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(frame, 0, 2, False)
     win.setOpaque_(False)
@@ -473,12 +476,21 @@ def inspect_window(view):
     return Overlay([_inspect_one(g, view if k == 0 else None) for k, g in enumerate(groups)])
 
 
+def _tag_width(text, size=10):
+    """Rendered width of an overlay tag's text in its font, plus its padding."""
+    font = NSFont.monospacedDigitSystemFontOfSize_weight_(size, 0.5)
+    return NSString.stringWithString_(text).sizeWithAttributes_({AppKit.NSFontAttributeName: font}).width + 10
+
+
 def _inspect_one(items, view):
     top = AppKit.NSScreen.screens()[0].frame().size.height
     x0 = min(i["frame"][0] for i in items) - 30
     y0 = min(i["frame"][1] for i in items) - 18
     x1 = max(i["frame"][0] + i["frame"][2] for i in items) + 6
     y1 = max(i["frame"][1] + i["frame"][3] for i in items) + 26
+    # wide enough for every name tag and the readout, so none is cut off at the window's right edge
+    x1 = max([x1] + [i["frame"][0] + _tag_width(f"{i['n']} {i['label'][:28]}") + 6 for i in items
+                     if i["source"] != "ocr"] + ([x0 + _tag_width(hud_text(view), 11) + 66] if view else []))
     win = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
         NSMakeRect(x0, top - y1, x1 - x0, y1 - y0), 0, 2, False)
     win.setOpaque_(False)

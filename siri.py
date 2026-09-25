@@ -241,8 +241,9 @@ def classify_items(noun, labels):
     q = {f"c{k}": {"type": "noul", "instructions": f"Candidate c{k} is a control's quoted name, then the words right "
                                                      f"around it (such as its channel) and where it is. Is the quoted "
                                                      f"control itself one {noun}? Its name or the words around it may "
-                                                     f"say what it is. A channel name, menu, button, duration or count "
-                                                     f"is not one. The words '{noun}' were heard by speech "
+                                                     f"say what it is. A control that is only a channel name, a menu, "
+                                                     f"a button, a duration or a count is not one; a title that "
+                                                     f"mentions its length or channel can be. The words '{noun}' were heard by speech "
                                                      f"recognition: they may be split, joined or spelled "
                                                      f"differently from the screen."}
          for k in range(len(labels))}

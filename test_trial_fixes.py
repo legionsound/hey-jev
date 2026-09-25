@@ -78,9 +78,11 @@ def page(items, truncated=False):
 
 
 class PickTests(unittest.TestCase):
-    def pick(self, args, flags, observe, cards=None):
+    def pick(self, args, flags, observe, cards=None, kind=None):
+        # flags answer the qualified question; kind (per label) answers "is it a <noun> at all" for word matches
+        classify = lambda noun, labels: [kind.get(l, (False, .99)) for l in labels] if kind and noun == args["noun"] else flags
         with patch.object(actions.screen, "observe", observe), \
-                patch.object(actions, "CLASSIFY_ITEMS", lambda noun, labels: flags), \
+                patch.object(actions, "CLASSIFY_ITEMS", classify), \
                 patch.object(actions, "_live", lambda i: True), \
                 patch.object(actions, "describe_cards", lambda pool, s, f: cards or [f"“{i.label}”, top-left" for i in pool]):
             return actions.resolve_screen_pick(args)
@@ -107,14 +109,34 @@ class PickTests(unittest.TestCase):
         cards = ["“Paperclip”, near: NetworkChuck · 2 days ago, top-left", "“TV of Babel”, top-centre",
                  "“Doom”, near: Counterpoint, top-right"]
         got = self.pick({"noun": "video", "kind": "network Chuck", "ordinal": 0}, [(True, .5), (True, .5), (True, .5)],
-                        lambda **k: page(items), cards)
+                        lambda **k: page(items), cards, kind={cards[0]: (True, .95)})
         self.assertEqual((got[0], got[1]["label"]), ("target", "Paperclip"))
+
+    def test_the_words_prove_the_name_not_the_kind(self):
+        # Astra: an unsure channel link named NetworkChuck is not a video just because the name matches
+        items = videos(2, ["NetworkChuck", "Paperclip"])
+        cards = ["“NetworkChuck”, top-left", "“Paperclip”, near: NetworkChuck, top-centre"]
+        got = self.pick({"noun": "video", "kind": "networkchuck", "ordinal": 0}, [(True, .5), (True, .5)],
+                        lambda **k: page(items), cards, kind={cards[0]: (False, .55), cards[1]: (True, .95)})
+        self.assertEqual(got[0], "choices")  # the link stays unsure, so it asks
+        got = self.pick({"noun": "video", "kind": "networkchuck", "ordinal": 0}, [(True, .5), (True, .5)],
+                        lambda **k: page(items), cards, kind={cards[0]: (False, .95), cards[1]: (True, .95)})
+        self.assertEqual((got[0], got[1]["label"]), ("target", "Paperclip"))
+
+    def test_the_words_match_whole_words_only(self):
+        # Astra: "the Apple video" must not settle on "Pineapple farming"
+        items = videos(1, ["Pineapple farming"])
+        got = self.pick({"noun": "video", "kind": "Apple", "ordinal": 0}, [(False, .6)], lambda **k: page(items))
+        self.assertEqual(got[0], "choices")
+        self.assertTrue(actions._says("Paperclip, near: Network Chuck", "networkchuck"))
+        self.assertFalse(actions._says("Pineapple farming", "apple"))
+        self.assertFalse(actions._says("Applesauce", "apple"))
 
     def test_a_sure_no_is_not_overruled_by_the_words(self):
         items = videos(2, ["NetworkChuck", "Paperclip"])
         cards = ["“NetworkChuck”, top-left", "“Paperclip”, near: NetworkChuck, top-centre"]
         got = self.pick({"noun": "video", "kind": "networkchuck", "ordinal": 0}, [(False, .95), (True, .4)],
-                        lambda **k: page(items), cards)
+                        lambda **k: page(items), cards, kind={cards[1]: (True, .95)})
         self.assertEqual((got[0], got[1]["label"]), ("target", "Paperclip"))  # the channel link is not the video
 
     def test_which_one_lists_the_likeliest_first(self):
@@ -140,6 +162,49 @@ class PageOnlyTests(unittest.TestCase):
                 patch.object(actions, "_live", lambda i: True):
             got = actions.resolve_screen_pick({"noun": "video", "ordinal": 1})
         self.assertEqual((got[0], got[1]["label"]), ("target", "Video 0"))
+
+    def test_the_first_tab_is_the_browser_tab_strip(self):
+        # Astra: the page filter is for content; "the first tab" still counts the window's tabs
+        tab = NS(source="ax", pressable=True, enabled=True, from_value=False, role="AXRadioButton", label="Inbox",
+                 frame=(10, 10, 150, 30), token="t", secure=False)
+        inpage = NS(source="ax", pressable=True, enabled=True, from_value=False, role="AXTab", label="Overview",
+                    frame=(10, 200, 100, 30), token="p", secure=False)
+        snap_ = page([tab, inpage])
+        snap_.window_ref = object()
+        with patch.object(actions.screen, "observe", lambda **k: snap_), \
+                patch.object(actions.screen, "page_frame", lambda win, d: (0, 80, 500, 420)), \
+                patch.object(actions, "_live", lambda i: True):
+            got = actions.resolve_screen_pick({"noun": "tab", "ordinal": 1})
+        self.assertEqual((got[0], got[1]["label"]), ("target", "Inbox"))
+
+
+class PageKeyDeadlineTests(unittest.TestCase):
+    def run_key(self, focus_delay, budget):
+        import sys
+        posted = []
+        quartz = NS(CGEventCreateKeyboardEvent=lambda src, key, down: (key, down),
+                    CGEventPostToPid=lambda pid, ev: posted.append(ev))
+        ref = object()
+
+        def attr(el, name):
+            time.sleep(focus_delay)
+            return ref
+        AS = NS(AXUIElementSetAttributeValue=lambda *a: 0, AXUIElementCreateApplication=lambda pid: object(),
+                AXUIElementSetMessagingTimeout=lambda *a: 0)
+        with patch.dict(sys.modules, {"Quartz": quartz}), patch.object(screen, "_AS", lambda: AS), \
+                patch.object(screen, "_attr", attr), patch.object(screen, "EFFECT_SETTLE", 0.5):
+            got = screen.page_key(1, ref, "AXLink", time.monotonic() + budget)
+            time.sleep(focus_delay + 0.05)
+        return got, posted
+
+    def test_a_slow_focus_read_past_the_deadline_sends_nothing(self):
+        # Astra repro: both key events went out ~65 ms after a 10 ms deadline
+        got, posted = self.run_key(0.075, 0.01)
+        self.assertEqual((got, posted), (screen.TOO_LATE, []))
+
+    def test_in_time_sends_the_pair(self):
+        got, posted = self.run_key(0, 1)
+        self.assertEqual((got, posted), (0, [(screen.KEY_RETURN, True), (screen.KEY_RETURN, False)]))
 
 
 class VideoMediaTests(unittest.TestCase):

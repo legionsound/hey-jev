@@ -78,11 +78,13 @@ For exact behavior rules see `ENGINE_CONTRACT.md`.
   product's price) and where it sits; a card ends at the next like item,
   so rows never borrow each other's words. The code then counts in one
   reading order or takes the nearest to the named place. On a web page
-  only the page counts, never the browser's tabs. Words heard that appear
+  a video, result or link pick counts only the page, never the browser's
+  tabs; "the first tab" still means the browser's. Words heard that appear
   on a card, spacing and case aside ("network Chuck" is NetworkChuck),
-  settle it unless Jev is sure that card isn't one. If an item Jev
-  wasn't sure about could change the answer, it asks, likeliest first; for
-  a named pick, an item Jev leans against doesn't count. A cut-short read
+  settle that card's name (whole words only: "apple" never matches
+  Pineapple) unless Jev is sure that card isn't one, and Jev still judges
+  whether it is a video at all. If an item Jev wasn't sure about could
+  change the answer, it asks, likeliest first. A cut-short read
   is retried once with a longer walk; still cut short, it asks you to
   scroll or name it. The pick runs as an ordinary press with
   identity re-check and readback.

@@ -672,6 +672,8 @@ def run_screen_press(t, deadline):
         raise Uncertain(f"the app did not answer the press in time ({exc})")
     if err == screen.NOT_FOCUSED:
         raise Failed("the page wouldn't focus that control, so nothing was pressed")
+    if err == screen.TOO_LATE:
+        raise Failed("the page took too long to focus that control, so nothing was pressed")
     if err in AX_GONE:
         raise Failed(f"the app refused the press (AX error {err})")
     if err != 0:
@@ -1091,6 +1093,47 @@ def _squash(text):
     return re.sub(r"[\W_]+", "", (text or "").lower())
 
 
+def _says(text, heard):
+    """True when the heard words run whole-word through the text, spacing and case aside: "network Chuck" is in
+    "NetworkChuck · 2 days ago", "apple" is not in "Pineapple farming"."""
+    want = _squash(heard)
+    if len(want) < 4:
+        return False
+    words = re.findall(r"[^\W_]+", (text or "").lower())
+    for start in range(len(words)):
+        run = ""
+        for w in words[start:]:
+            run += w
+            if run == want:
+                return True
+            if not want.startswith(run):
+                break
+    return False
+
+
+def _judge_kind(noun, items, labels):
+    """Whether each item is a `noun` at all ("video", "result"): role nouns by role, the rest by Jev, batched.
+    None when Jev's answer failed or was malformed."""
+    roles = ROLE_NOUNS.get(noun, "jev")
+    if roles is None:
+        return [(True, 1.0)] * len(items)
+    if roles != "jev":
+        return [(True, 1.0) if i.role in roles else (False, 1.0) for i in items]
+    if not CLASSIFY_ITEMS:
+        return None
+    got = []
+    for k in range(0, len(labels), PICK_MAX):
+        part = labels[k:k + PICK_MAX]
+        try:
+            ans = CLASSIFY_ITEMS(noun, part)
+        except Exception:
+            ans = None
+        if not isinstance(ans, list) or len(ans) != len(part) or not all(_valid_flag(g) for g in ans):
+            return None
+        got += ans
+    return got
+
+
 def observe_whole(deadline):
     """The front window, read again with a longer walk when the first read was cut short. Chrome builds its page
     tree on the first read after a while unused, so a cold YouTube page runs out the usual walk time; the second read
@@ -1122,15 +1165,17 @@ def resolve_screen_pick(args):
     if snap.truncated:  # first/last/nearest/only all need every candidate; a cut list can't say which is which
         return ("none", "there's more on screen than I can read at once; scroll or name it")
     pool = [i for i in snap.items if _live(i) and not i.from_value]
-    try:  # on a web page, "the first video" counts the page, never the browser's tabs named after videos
-        page = screen.page_frame(snap.window_ref, deadline) if getattr(snap, "window_ref", None) is not None else None
-    except (screen.TimedOut, screen.Wedged):
-        page = None
-    if page:
-        pool = [i for i in pool if page[0] <= i.frame[0] + i.frame[2] / 2 <= page[0] + page[2]
-                and page[1] <= i.frame[1] + i.frame[3] / 2 <= page[1] + page[3]]
-    unsure, flags = [], {}
+    bare = noun
     roles = ROLE_NOUNS.get(noun, "jev") if not args.get("kind") else "jev"  # a qualified noun is Jev's to judge
+    if roles == "jev" or noun in ("link", "row"):  # content: "the first video" counts the page, never the
+        try:  # browser's tabs named after videos; "the first tab" or "button" still means the whole window
+            page = screen.page_frame(snap.window_ref, deadline) if getattr(snap, "window_ref", None) is not None else None
+        except (screen.TimedOut, screen.Wedged):
+            page = None
+        if page:
+            pool = [i for i in pool if page[0] <= i.frame[0] + i.frame[2] / 2 <= page[0] + page[2]
+                    and page[1] <= i.frame[1] + i.frame[3] / 2 <= page[1] + page[3]]
+    unsure, flags = [], {}
     noun = f"{args['kind']} {noun}" if args.get("kind") else noun
     if roles is None:
         group = pool
@@ -1152,12 +1197,21 @@ def resolve_screen_pick(args):
             if not isinstance(ans, list) or len(ans) != len(part) or not all(_valid_flag(g) for g in ans):
                 return ("choices", [])  # a failed or malformed answer asks again; nothing is pressed
             got += ans
-        said = _squash(args.get("kind"))
-        literal = [len(said) >= 4 and said in _squash(l.rpartition(", ")[0]) and not (g[0] is False and g[1] >= PICK_GATE)
+        literal = [_says(l.rpartition(", ")[0], args.get("kind")) and not (g[0] is False and g[1] >= PICK_GATE)
                    for l, g in zip(labels, got)]  # the heard words on a card, spacing and case aside: NetworkChuck
-        if any(literal):  # words the user read off the screen: the cards without them are no longer in question
-            got = [(True, 1.0) if hit else (False, 1.0) if conf < PICK_GATE else (yes, conf)
-                   for hit, (yes, conf) in zip(literal, got)]
+        if any(literal):  # words the user read off the screen: the cards without them are no longer in question.
+            # The words prove the name, not the kind (a channel link says NetworkChuck too). A card Jev was sure of
+            # keeps that answer; for the rest Jev judges whether each is a video at all, asked over the whole page
+            # (alone, one card reads as a coin toss: live 2026-09-25, .6 alone vs .85 among its neighbours), and an
+            # unsure answer stays unsure.
+            kinds = None
+            if any(hit and not (yes is True and conf >= PICK_GATE) for hit, (yes, conf) in zip(literal, got)):
+                kinds = _judge_kind(bare, pool, labels)
+                if kinds is None:
+                    return ("choices", [])
+            got = [((yes, conf) if yes is True and conf >= PICK_GATE else kinds[n]) if hit
+                   else (False, 1.0) if conf < PICK_GATE else (yes, conf)
+                   for n, (hit, (yes, conf)) in enumerate(zip(literal, got))]
         flags = {id(i): g for i, g in zip(pool, got)}
         group = [i for i, (yes, conf) in zip(pool, got) if yes is True and conf >= PICK_GATE]
         unsure = [i for i, (yes, conf) in zip(pool, got) if conf < PICK_GATE]  # neither a match nor a non-match
@@ -1186,8 +1240,7 @@ def resolve_screen_pick(args):
     else:
         k = args.get("ordinal", 1)
         if k == 0:  # "the Full Tilt video": exactly one, else ask which, likeliest first
-            leaning = [i for i in unsure if flags.get(id(i), (False, 0))[0] is True]
-            if len(ordered) > 1 or leaning:  # an unsure item leaning no doesn't outweigh one sure match
+            if len(ordered) > 1 or unsure:  # any unsure rival, even one leaning no, leaves "which one" open
                 return ask(likeliest(order))
             chosen = ordered[0]
         elif k == -1:

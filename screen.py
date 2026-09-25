@@ -659,6 +659,7 @@ _chromium = {}  # pid -> bool
 KEY_RETURN, KEY_SPACE = 36, 49
 SPACE_ROLES = ("AXCheckBox", "AXRadioButton", "AXSwitch", "AXToggle")  # Return would submit a form around these
 NOT_FOCUSED = -1  # page_key's code when the page never focused the control: no key was sent
+TOO_LATE = -2  # page_key's code when the deadline passed before the key: no key was sent
 
 
 def _is_chromium(pid):
@@ -701,7 +702,7 @@ def page_key(pid, ref, role, deadline):
     switch), posted to that app only, so it works behind other windows and never moves the pointer. The key goes only
     once the app reports this exact element focused, never into whatever else has focus. A control a keyboard can't
     reach (a bare clickable div) doesn't react; the press then stays unverified. Returns 0 once the key is sent, or
-    NOT_FOCUSED with nothing sent."""
+    NOT_FOCUSED or TOO_LATE with nothing sent."""
     def run():
         import Quartz
         AS = _AS()
@@ -716,10 +717,23 @@ def page_key(pid, ref, role, deadline):
         else:
             return NOT_FOCUSED
         key = KEY_SPACE if role in SPACE_ROLES else KEY_RETURN
-        for down in (True, False):
-            Quartz.CGEventPostToPid(pid, Quartz.CGEventCreateKeyboardEvent(None, key, down))
+        with gate:  # the last moment to back out: a slow focus read must not send the key after the deadline
+            if time.monotonic() >= deadline:
+                return TOO_LATE
+            sent.append(key)
+        try:
+            Quartz.CGEventPostToPid(pid, Quartz.CGEventCreateKeyboardEvent(None, key, True))
+        finally:  # a key pressed is always released
+            Quartz.CGEventPostToPid(pid, Quartz.CGEventCreateKeyboardEvent(None, key, False))
         return 0
-    return bounded(run, deadline, effect=True)
+    gate, sent = threading.Lock(), []
+    try:
+        return bounded(run, deadline, effect=True)
+    except TimedOut:
+        with gate:  # past the deadline now, so a key not yet sent never will be
+            if not sent:
+                return TOO_LATE
+        raise
 
 
 UNKNOWN = "?unknown"

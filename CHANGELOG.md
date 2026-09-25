@@ -2,6 +2,17 @@
 
 All notable changes to this fork of [henryklunaris/hey-jev](https://github.com/henryklunaris/hey-jev). The fork starts from upstream `c3a0176` (timers and reminders, 2026-09-22).
 
+## Unreleased
+
+Fixes from the first live trial of 0.3.0.
+
+- **Clicks on web pages land in Chrome and other Chromium apps.** Chromium ignores `AXPress` on page content, so every page click did nothing. Page controls are now focused and sent Return (Space for checkboxes, radios and switches) as that app's own key, only once the app reports that exact control focused and only while the step is still in time. The pointer never moves.
+- **Picks count the page.** "The first video" no longer counts browser tabs named after videos, and a cold page that reads short is read once more with a longer walk. "The first tab" still means the browser's tabs.
+- **Heard names match whatever the spacing.** "The Network Chuck video" finds NetworkChuck. Only whole words match, and Jev still decides whether a matching card is a video. An unsure card still makes it ask.
+- **"Pause the video" presses the player on screen**; "pause the music" still goes to Spotify.
+- **"Which one?" by place**, never by name, and "click <odd name>" is always a click.
+- **Pause becoming Play counts as a verified press.**
+
 ## 0.3.0 (2026-09-25)
 
 A ground-up rework of how commands run, plus screen control. Everything a command does now goes through one engine that plans, asks where you told it to, acts, and then checks the result before saying it worked.

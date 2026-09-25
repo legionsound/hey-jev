@@ -242,7 +242,9 @@ def classify_items(noun, labels):
                                                      f"around it (such as its channel) and where it is. Is the quoted "
                                                      f"control itself one {noun}? Its name or the words around it may "
                                                      f"say what it is. A channel name, menu, button, duration or count "
-                                                     f"is not one."}
+                                                     f"is not one. The words '{noun}' were heard by speech "
+                                                     f"recognition: they may be split, joined or spelled "
+                                                     f"differently from the screen."}
          for k in range(len(labels))}
     ans, ms, cost = jev(state, q)
     diagnostics.record(current_rid(), "classify_items", "ok", ms, noun=noun, options=len(labels))
@@ -348,6 +350,7 @@ def step_line(step):
 
 
 misses = 0
+ORDINAL_WORDS = ["the first", "the second", "the third", "the fourth"]
 
 
 def line_for(result):
@@ -374,8 +377,14 @@ def line_for(result):
     if state == "needs_clarification":
         bad = next((s for s in steps if s["state"] == "needs_clarification"), None)
         if bad and bad["action"] == "screen.press":  # control text is never spoken: speech goes to a remote service
-            if bad["facts"].get("choices"):
-                return "[clear throat] There's more than one of those. Ask what you can click, then say a number."
+            choices = bad["facts"].get("choices") or []
+            places = [c.get("where") for c in choices[:4]]
+            if len(choices) > 1 and all(places) and len(set(places)) == len(places):
+                return f"[clear throat] I see {len(choices)}: " + ", ".join(p.replace("-", " ") for p in places[:-1]) + \
+                    f" or {places[-1].replace('-', ' ')}. Which one?"
+            if len(choices) > 1:
+                return "[clear throat] I see " + str(len(choices)) + ". Say " + \
+                    ", ".join(ORDINAL_WORDS[:len(choices[:4]) - 1]) + f" or {ORDINAL_WORDS[len(choices[:4]) - 1]}."
             return say_line("clarify")
         if bad and bad["facts"].get("choices"):
             names = [c["name"] + (f" in {os.path.basename(os.path.dirname(c['path']))}" if c.get("path") else "")

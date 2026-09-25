@@ -19,7 +19,9 @@ For exact behavior rules see `ENGINE_CONTRACT.md`.
 
 - Exact system volume ("set volume to 40 percent", relative up/down),
   mute/unmute, per-app Spotify volume.
-- Spotify play / pause / next / previous via AppleScript.
+- Spotify play / pause / next / previous via AppleScript. "Pause the
+  video", "resume the clip" (a video word and no music word, as a request
+  of its own) press the player control on screen instead.
 - Dark mode on/off (read back after setting), lock screen, sleep the Mac
   (lock and sleep report `unverified`: there is no readback).
 
@@ -46,6 +48,15 @@ For exact behavior rules see `ENGINE_CONTRACT.md`.
 - `screen.press`: presses a named button/link/tab, or "click 4" for the
   numbered overlay (menu bar > Show what Jev sees). Numbers bind to the
   list visible when speech started; a changed list refuses (`screen_changed`).
+  Several matches ask "which one?" by place ("top left or bottom right"),
+  never by name. Inside a web page in Chrome, Brave, Edge, Arc or an
+  Electron app, the control is focused and sent Return (Space for a
+  checkbox, radio or switch) as that app's own key, because Chromium
+  ignores `AXPress` on page content; the key goes only once the app reports
+  that exact control focused. A bare clickable `div` that no keyboard can
+  reach doesn't react and stays `unverified`. A press is verified when the
+  control changes, disappears, or changes its name (Pause becomes Play).
+  "Click …" is always a click, however odd the name.
 - `screen.type`: types literal text into a named or focused field via
   `AXSelectedText` (no keystrokes, nothing submitted), replacing the
   current selection. Password fields are
@@ -66,9 +77,14 @@ For exact behavior rules see `ENGINE_CONTRACT.md`.
   control's name, the words right around it (a video's channel, a
   product's price) and where it sits; a card ends at the next like item,
   so rows never borrow each other's words. The code then counts in one
-  reading order or takes the nearest to the named place. If an item Jev
-  wasn't sure about could change the answer, or the screen couldn't be
-  read whole, it asks instead. The pick runs as an ordinary press with
+  reading order or takes the nearest to the named place. On a web page
+  only the page counts, never the browser's tabs. Words heard that appear
+  on a card, spacing and case aside ("network Chuck" is NetworkChuck),
+  settle it unless Jev is sure that card isn't one. If an item Jev
+  wasn't sure about could change the answer, it asks, likeliest first; for
+  a named pick, an item Jev leans against doesn't count. A cut-short read
+  is retried once with a longer walk; still cut short, it asks you to
+  scroll or name it. The pick runs as an ordinary press with
   identity re-check and readback.
 - Answering "which one?": for 45 seconds after Hey Jev asks, reply "the
   first one", "the second", "the last one", "number 2", or words from one

@@ -216,8 +216,14 @@ class PickAuditTests(unittest.TestCase):
         self.assertEqual(got[0], "choices")
 
     def test_an_unsure_item_makes_only_one_ask(self):
-        got = self.pick({"noun": "video", "ordinal": 0}, [(True, .99), (False, .55), (False, .99)])
+        got = self.pick({"noun": "video", "ordinal": 0}, [(True, .99), (True, .55), (False, .99)])
         self.assertEqual(got[0], "choices")
+
+    def test_an_unsure_item_leaning_no_does_not_outweigh_one_sure_match(self):
+        # Johnny's trial, 2026-09-25: "the Counterpoint video" listed four unrelated videos because other cards
+        # were unsure. An item Jev leans against is not a rival to the one it is sure of.
+        got = self.pick({"noun": "video", "ordinal": 0}, [(False, .55), (True, .99), (False, .99)])
+        self.assertEqual((got[0], got[1]["label"]), ("target", "Video 1"))
 
     def test_ordering_is_one_full_pool_order_never_a_regrouped_subset(self):
         from types import SimpleNamespace as NS

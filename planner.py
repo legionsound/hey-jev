@@ -437,6 +437,11 @@ def pick_args(clause):
     return out
 
 
+CLICK_START = re.compile(r"^\W*(?:please\s+)?(?:click|tap|double[\s-]click)\b", re.I)
+VIDEO_WORDS = re.compile(r"\b(?:videos?|youtube|clips?|movies?|films?|episodes?|streams?)\b", re.I)
+MUSIC_WORDS = re.compile(r"\b(?:spotify|music|songs?|tracks?|albums?|playlists?|podcasts?)\b", re.I)
+
+
 def pick(ans, clause, inherited_browser=None):
     """Trust Jev's target if it is fairly sure, else the single most confident action anywhere.
     "Click" and "tap", or a named UI part ("the Loud mode checkbox"), always mean a control on screen:
@@ -468,17 +473,24 @@ def judge(ans, clause, can_answer=False, inherited_browser=None, implied=False):
         s = step_for(ans, "timer", clause)  # "how long is left?" reads like a question but is a timer command
         if s:
             return ("step", {"clause": clause, "action": s[1], "args": s[2]})
-    if cat == "chit_chat" and cconf >= GATE:
+    said_click = CLICK_START.match(clause)  # "click TV of Babel": odd names don't make the request unclear
+    if cat == "chit_chat" and cconf >= GATE and not said_click:
         return ("reply", "chit_chat")
-    if cat == "unclear" and cconf >= GATE:
+    if cat == "unclear" and cconf >= GATE and not said_click:
         return ("clarify", "unclear")
-    if cat == "information_request" and cconf >= GATE:
+    if cat == "information_request" and cconf >= GATE and not said_click:
         return ("answer", None) if can_answer else ("reply", "info")
     if ans["compound"][0] and ans["compound"][1] >= GATE:
         return ("clarify", "compound_unsplit")  # say it as "X, then Y"
     s = pick(ans, clause, inherited_browser)
     if s and s[1] == "clarify":
         return ("clarify", s[2])
+    if s and s[1].startswith("media.") and VIDEO_WORDS.search(clause) and not MUSIC_WORDS.search(clause):
+        # "pause the video" means the player on screen, not Spotify: Jev picks the control that does it. Like any
+        # implied press, only as a request of its own.
+        if not implied:
+            return ("clarify", "no_action")
+        return ("step", {"clause": clause, "action": "screen.press", "args": {"intent": clause}})
     if not s and implied and cat == "mac_command" and cconf >= GATE and len(clause.split()) >= 2:
         # a command nothing built in does ("reload this page", "mute this video"): Jev picks the one control on
         # screen that does it, or none. The press runs with the usual checks and click confirmation. Single-clause

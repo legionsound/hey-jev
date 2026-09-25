@@ -13,6 +13,7 @@ import sys
 import time
 
 import app_catalog
+import ax_walk
 import screen
 import timers
 import url_adapter
@@ -482,7 +483,8 @@ def _screen_target(snap, item):
 
 def _choice(snap, item):
     """A spoken option ("name (where)") that keeps its exact target, so a later "the first one" presses exactly it."""
-    return {"name": f"{item.label} ({_where(item, snap.window_frame)})", "target": _screen_target(snap, item)}
+    where = _where(item, snap.window_frame)
+    return {"name": f"{item.label} ({where})", "where": where, "target": _screen_target(snap, item)}
 
 
 def resolve_pinned(t):
@@ -657,13 +659,19 @@ def run_screen_press(t, deadline):
         before = (screen.signature(t["pid"], deadline), screen.element_state(ref, deadline))
     except (screen.TimedOut, screen.Wedged) as exc:
         raise Failed(f"screen read failed before the press: {exc}")
+    try:
+        web = screen.chromium_page(t["pid"], ref, deadline)
+    except (screen.TimedOut, screen.Wedged) as exc:
+        raise Failed(f"screen read failed before the press: {exc}")
     _pressed[id(t)] = (before, time.monotonic(), ref)
     try:
-        err = screen.press(ref, deadline)
+        err = screen.page_key(t["pid"], ref, t["role"], deadline) if web else screen.press(ref, deadline)
     except screen.Wedged as exc:
         raise Failed(str(exc))  # refused before sending: nothing was pressed
     except screen.TimedOut as exc:
         raise Uncertain(f"the app did not answer the press in time ({exc})")
+    if err == screen.NOT_FOCUSED:
+        raise Failed("the page wouldn't focus that control, so nothing was pressed")
     if err in AX_GONE:
         raise Failed(f"the app refused the press (AX error {err})")
     if err != 0:
@@ -1076,6 +1084,25 @@ def _valid_flag(g):
             and isinstance(g[1], (int, float)) and not isinstance(g[1], bool) and math.isfinite(g[1]) and 0 <= g[1] <= 1)
 
 
+WHOLE_WALK = 2.5  # seconds a second, longer walk may take when the first was cut short
+
+
+def _squash(text):
+    return re.sub(r"[\W_]+", "", (text or "").lower())
+
+
+def observe_whole(deadline):
+    """The front window, read again with a longer walk when the first read was cut short. Chrome builds its page
+    tree on the first read after a while unused, so a cold YouTube page runs out the usual walk time; the second read
+    is warm and usually complete (2026-09-25: "the first video" refused on a cold read)."""
+    snap = screen.observe(ocr=False, deadline=deadline)
+    if snap.truncated:
+        left = deadline - time.monotonic() - 0.3
+        if left > ax_walk.AX_TIME_CAP:
+            snap = screen.observe(pid=snap.pid, ocr=False, deadline=deadline, walk_cap=min(WHOLE_WALK, left))
+    return snap
+
+
 def resolve_screen_pick(args):
     """"the third video", "the last result", "the video in the bottom-right". Which on-screen controls are videos
     (results, songs…) is Jev's call, one batched question over the pressable controls' names; counting and place
@@ -1084,7 +1111,7 @@ def resolve_screen_pick(args):
         return resolve_pinned(args["pinned"])
     deadline = resolve_deadline()
     try:
-        snap = screen.observe(ocr=False, deadline=deadline)
+        snap = observe_whole(deadline)
     except (screen.Unavailable, screen.TimedOut, screen.Wedged) as exc:
         return ("none", f"can't read the screen: {exc}")
     wanted = (args.get("app") or "").strip().lower()
@@ -1095,7 +1122,14 @@ def resolve_screen_pick(args):
     if snap.truncated:  # first/last/nearest/only all need every candidate; a cut list can't say which is which
         return ("none", "there's more on screen than I can read at once; scroll or name it")
     pool = [i for i in snap.items if _live(i) and not i.from_value]
-    unsure = []
+    try:  # on a web page, "the first video" counts the page, never the browser's tabs named after videos
+        page = screen.page_frame(snap.window_ref, deadline) if getattr(snap, "window_ref", None) is not None else None
+    except (screen.TimedOut, screen.Wedged):
+        page = None
+    if page:
+        pool = [i for i in pool if page[0] <= i.frame[0] + i.frame[2] / 2 <= page[0] + page[2]
+                and page[1] <= i.frame[1] + i.frame[3] / 2 <= page[1] + page[3]]
+    unsure, flags = [], {}
     roles = ROLE_NOUNS.get(noun, "jev") if not args.get("kind") else "jev"  # a qualified noun is Jev's to judge
     noun = f"{args['kind']} {noun}" if args.get("kind") else noun
     if roles is None:
@@ -1118,11 +1152,24 @@ def resolve_screen_pick(args):
             if not isinstance(ans, list) or len(ans) != len(part) or not all(_valid_flag(g) for g in ans):
                 return ("choices", [])  # a failed or malformed answer asks again; nothing is pressed
             got += ans
+        said = _squash(args.get("kind"))
+        literal = [len(said) >= 4 and said in _squash(l.rpartition(", ")[0]) and not (g[0] is False and g[1] >= PICK_GATE)
+                   for l, g in zip(labels, got)]  # the heard words on a card, spacing and case aside: NetworkChuck
+        if any(literal):  # words the user read off the screen: the cards without them are no longer in question
+            got = [(True, 1.0) if hit else (False, 1.0) if conf < PICK_GATE else (yes, conf)
+                   for hit, (yes, conf) in zip(literal, got)]
+        flags = {id(i): g for i, g in zip(pool, got)}
         group = [i for i, (yes, conf) in zip(pool, got) if yes is True and conf >= PICK_GATE]
         unsure = [i for i, (yes, conf) in zip(pool, got) if conf < PICK_GATE]  # neither a match nor a non-match
+    def likeliest(items):  # sure matches first, then the unsure ones leaning yes, then those leaning no
+        def rank(i):
+            yes, conf = flags.get(id(i), (True, 1.0))
+            return (0, -conf) if yes and conf >= PICK_GATE else (1, -conf) if yes else (2, conf)
+        return sorted(items, key=rank)
+
     if not group:
         if unsure:
-            return ("choices", [_choice(snap, i) for i in unsure[:4]])
+            return ("choices", [_choice(snap, i) for i in likeliest(unsure)[:4]])
         return ("none", f"no {noun}s on screen")
 
     def ask(items):  # an unsure item could change the answer: ask rather than count past it
@@ -1138,9 +1185,10 @@ def resolve_screen_pick(args):
         chosen = nearest_to(group, args["where"], snap.window_frame)
     else:
         k = args.get("ordinal", 1)
-        if k == 0:  # "the Full Tilt video": exactly one, else ask which
-            if len(ordered) > 1 or unsure:
-                return ask(order)
+        if k == 0:  # "the Full Tilt video": exactly one, else ask which, likeliest first
+            leaning = [i for i in unsure if flags.get(id(i), (False, 0))[0] is True]
+            if len(ordered) > 1 or leaning:  # an unsure item leaning no doesn't outweigh one sure match
+                return ask(likeliest(order))
             chosen = ordered[0]
         elif k == -1:
             chosen = ordered[-1]

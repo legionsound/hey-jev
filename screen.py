@@ -493,7 +493,7 @@ def merge(controls, texts, window_frame):
     return items
 
 
-def _read_ax(pid, deadline):
+def _read_ax(pid, deadline, walk_cap=None):
     AS = _AS()
     app_el = AS.AXUIElementCreateApplication(pid)
     AS.AXUIElementSetMessagingTimeout(app_el, AX_MESSAGE_TIMEOUT)
@@ -503,7 +503,7 @@ def _read_ax(pid, deadline):
     wframe = _frame(win)
     if not wframe:
         raise Unavailable("window has no frame")
-    left = max(0.05, min(ax_walk.AX_TIME_CAP, deadline - time.monotonic()))
+    left = max(0.05, min(walk_cap or ax_walk.AX_TIME_CAP, deadline - time.monotonic()))
     found, _offscreen, truncated = _walk(win, wframe, left)
     menubar = _attr(app_el, "AXMenuBar")
     bar = [ax_walk.AxNode(r, l, *f, True, k) for k in (_children(menubar) if menubar is not None else [])
@@ -513,8 +513,9 @@ def _read_ax(pid, deadline):
     return win, wframe, _label(win), controls, extra, truncated
 
 
-def observe(pid=None, ocr=True, deadline=None):
-    """Read one window under one deadline. Raises Unavailable or TimedOut; never acts."""
+def observe(pid=None, ocr=True, deadline=None, walk_cap=None):
+    """Read one window under one deadline. Raises Unavailable or TimedOut; never acts. walk_cap: seconds the control
+    walk may take, instead of ax_walk.AX_TIME_CAP."""
     t0 = time.monotonic()
     deadline = deadline or t0 + 4.0
     if not trusted():
@@ -524,7 +525,7 @@ def observe(pid=None, ocr=True, deadline=None):
     else:
         app, bundle = _app_info(pid)
     started = process_start(pid, deadline)
-    win, wframe, title, controls, extra, truncated = bounded(_read_ax, deadline, pid, deadline)
+    win, wframe, title, controls, extra, truncated = bounded(_read_ax, deadline, pid, deadline, walk_cap)
     try:
         field_scan = bounded(scan_fields, deadline, win)
     except TimedOut:
@@ -635,16 +636,102 @@ def press(ref, deadline):
     return bounded(lambda: int(_AS().AXUIElementPerformAction(ref, "AXPress")), deadline, effect=True)
 
 
+def page_frame(win, deadline, node_cap=400):
+    """The frame of the window's web page (its outermost AXWebArea, the largest if there are several), or None for a
+    window with no page. What's outside it is the browser's own tab strip and toolbar."""
+    def read():
+        from collections import deque
+        queue, seen, best = deque([win]), 0, None
+        while queue and seen < node_cap:
+            el = queue.popleft()
+            seen += 1
+            if _attr(el, "AXRole") == "AXWebArea":
+                f = _frame(el)
+                if f and (best is None or f[2] * f[3] > best[2] * best[3]):
+                    best = f
+                continue  # a page inside the page is part of it
+            queue.extend(_children(el))
+        return best
+    return bounded(read, deadline)
+
+
+_chromium = {}  # pid -> bool
+KEY_RETURN, KEY_SPACE = 36, 49
+SPACE_ROLES = ("AXCheckBox", "AXRadioButton", "AXSwitch", "AXToggle")  # Return would submit a form around these
+NOT_FOCUSED = -1  # page_key's code when the page never focused the control: no key was sent
+
+
+def _is_chromium(pid):
+    """Chrome, Brave, Edge, Arc, Electron apps: a bundle that ships Chromium's renderer helper."""
+    if pid not in _chromium:
+        import glob
+        from AppKit import NSRunningApplication
+        try:
+            app = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+            path = str(app.bundleURL().path()) if app is not None and app.bundleURL() is not None else ""
+        except Exception:
+            return False  # unknown: the plain AXPress, as before; not cached
+        _chromium[pid] = bool(path) and bool(
+            glob.glob(glob.escape(path) + "/Contents/Frameworks/*.framework/Versions/*/Helpers/* Helper (Renderer).app")
+            or glob.glob(glob.escape(path) + "/Contents/Frameworks/* Helper (Renderer).app"))
+    return _chromium[pid]
+
+
+def chromium_page(pid, ref, deadline):
+    """True for a control inside a web page in a Chromium app. Chromium ignores AXPress on page content unless it
+    thinks a screen reader is running: the call returns 0 and nothing happens (measured on Chrome 153, 2026-09-25:
+    links, buttons, checkboxes, tabs). Its own toolbar is not page content and takes AXPress."""
+    def read():
+        if not _is_chromium(pid):
+            return False
+        el = ref
+        for _ in range(40):
+            el = _attr(el, "AXParent")
+            role = str(_attr(el, "AXRole") or "") if el is not None else ""
+            if role == "AXWebArea":
+                return True
+            if role in ("", "AXWindow", "AXApplication"):
+                return False
+        return False
+    return bounded(read, deadline)
+
+
+def page_key(pid, ref, role, deadline):
+    """Press a web page control the way a keyboard user does: focus it, then Return (Space for a checkbox, radio or
+    switch), posted to that app only, so it works behind other windows and never moves the pointer. The key goes only
+    once the app reports this exact element focused, never into whatever else has focus. A control a keyboard can't
+    reach (a bare clickable div) doesn't react; the press then stays unverified. Returns 0 once the key is sent, or
+    NOT_FOCUSED with nothing sent."""
+    def run():
+        import Quartz
+        AS = _AS()
+        if int(AS.AXUIElementSetAttributeValue(ref, "AXFocused", True)):
+            return NOT_FOCUSED
+        app_el = AS.AXUIElementCreateApplication(pid)
+        AS.AXUIElementSetMessagingTimeout(app_el, AX_MESSAGE_TIMEOUT)
+        for _ in range(10):
+            if _attr(app_el, "AXFocusedUIElement") == ref:
+                break
+            time.sleep(0.03)
+        else:
+            return NOT_FOCUSED
+        key = KEY_SPACE if role in SPACE_ROLES else KEY_RETURN
+        for down in (True, False):
+            Quartz.CGEventPostToPid(pid, Quartz.CGEventCreateKeyboardEvent(None, key, down))
+        return 0
+    return bounded(run, deadline, effect=True)
+
+
 UNKNOWN = "?unknown"
 
 
 def element_state(ref, deadline):
-    """What a press on this element might flip: value, selection, expansion, and whether it still exists.
-    A read that failed is UNKNOWN, never a value: it can't prove a change or a disappearance."""
+    """What a press on this element might flip: value, selection, expansion, its name (Pause becomes Play), and
+    whether it still exists. A read that failed is UNKNOWN, never a value: it can't prove a change or a disappearance."""
     def read():
         role, _ = _read(ref, "AXRole")
         state = {"exists": {"ok": "yes", "gone": "no"}.get(role, UNKNOWN)}
-        for k in ("AXValue", "AXSelected", "AXExpanded"):
+        for k in ("AXValue", "AXSelected", "AXExpanded", "AXTitle", "AXDescription"):
             st, v = _read(ref, k)
             state[k] = repr(v) if st in ("ok", "absent") else UNKNOWN
         return state

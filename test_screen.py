@@ -704,5 +704,53 @@ class SubmitTests(TypeTests):
         self.assertEqual((v["state"], self.confirms), ("declined", []))
 
 
+class FrontmostTests(unittest.TestCase):
+    def test_hey_jevs_own_window_is_never_the_target(self):
+        import Quartz
+        wins = [{"kCGWindowLayer": 0, "kCGWindowOwnerPID": 111, "kCGWindowBounds": {"Width": 320, "Height": 118}},  # our pop-down
+                {"kCGWindowLayer": 25, "kCGWindowOwnerPID": 5, "kCGWindowBounds": {"Width": 900, "Height": 30}},  # menu bar
+                {"kCGWindowLayer": 0, "kCGWindowOwnerPID": 6, "kCGWindowBounds": {"Width": 10, "Height": 10}},  # a sliver
+                {"kCGWindowLayer": 0, "kCGWindowOwnerPID": 222, "kCGWindowBounds": {"Width": 1200, "Height": 800}}]
+        with patch.object(Quartz, "CGWindowListCopyWindowInfo", lambda *a: wins):
+            self.assertEqual(screen.frontmost_other_pid(own=111), 222)
+
+    def test_confirmation_gives_the_user_back_their_app(self):
+        import AppKit
+        import assistant_ui
+        activated = []
+
+        class App:
+            def __init__(self, pid):
+                self.pid = pid
+
+            def processIdentifier(self):
+                return self.pid
+
+            def isTerminated(self):
+                return False
+
+            def activateWithOptions_(self, opts):
+                activated.append(self.pid)
+
+        class WS:
+            @staticmethod
+            def sharedWorkspace():
+                return WS
+
+            @staticmethod
+            def frontmostApplication():
+                return App(222)
+        d = assistant_ui.AppDelegate.alloc().init()
+        d.status_item = AppKit.NSStatusBar.systemStatusBar().statusItemWithLength_(-1)
+        import types
+        with patch.object(assistant_ui.AppKit, "NSWorkspace", WS), \
+                patch.object(assistant_ui, "NSApp", types.SimpleNamespace(activateIgnoringOtherApps_=lambda *a: None)):
+            d.showConfirm_({"token": "t", "text": "Click Save"})
+            self.assertEqual(activated, [])
+            d.showConfirm_({})  # decided or timed out: the pop-down closes
+        self.assertEqual(activated, [222])
+        AppKit.NSStatusBar.systemStatusBar().removeStatusItem_(d.status_item)
+
+
 if __name__ == "__main__":
     unittest.main()

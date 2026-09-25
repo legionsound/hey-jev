@@ -305,11 +305,24 @@ def frontmost():
     if os.environ.get("HEYJEV_SCREEN_PID"):
         pid = int(os.environ["HEYJEV_SCREEN_PID"])
         return (pid, *_app_info(pid))
-    from AppKit import NSWorkspace
-    app = NSWorkspace.sharedWorkspace().frontmostApplication()
-    if app is None:
+    pid = frontmost_other_pid()
+    if pid is None:
         raise Unavailable("no frontmost app")
-    return int(app.processIdentifier()), str(app.localizedName() or ""), str(app.bundleIdentifier() or "")
+    return (pid, *_app_info(pid))
+
+
+def frontmost_other_pid(own=None):
+    """The app the user is working in: the owner of the frontmost ordinary window that isn't Hey Jev's own.
+    Hey Jev's confirmation pop-down makes Hey Jev the active app, so "frontmost app" alone would point at itself."""
+    import Quartz
+    own = os.getpid() if own is None else own
+    opts = Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements
+    for w in Quartz.CGWindowListCopyWindowInfo(opts, Quartz.kCGNullWindowID) or []:  # front to back
+        b = w.get("kCGWindowBounds") or {}
+        if (w.get("kCGWindowLayer") == 0 and w.get("kCGWindowOwnerPID") != own and float(w.get("kCGWindowAlpha", 1)) > 0
+                and float(b.get("Width", 0)) >= 50 and float(b.get("Height", 0)) >= 50):
+            return int(w["kCGWindowOwnerPID"])
+    return None
 
 
 def _app_info(pid):

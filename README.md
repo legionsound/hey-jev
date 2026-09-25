@@ -1,5 +1,9 @@
 # Hey Jev
 
+<p align="center">
+  <img src="docs/images/hero.png" alt="Hey Jev numbering every button in Calculator, its cursor on the equals key, and the status window saying Doing it: click 29" width="900">
+</p>
+
 Voice control for your Mac. Say "Hey Jev" or hold the right Option key, tell it what you want, and it does the thing. Then it checks whether it actually worked before telling you so.
 
 ```text
@@ -13,6 +17,10 @@ Voice control for your Mac. Say "Hey Jev" or hold the right Option key, tell it 
 This is a fork of [henryklunaris/hey-jev](https://github.com/henryklunaris/hey-jev). The command engine was rebuilt from scratch. On top of that, the fork adds screen control across every visible window, a command-line bridge into the running app, Apple on-device dictation, a wake phrase you choose yourself, answers from Apple's models or a Claude Code or Codex session, and a redesigned Settings window. [CHANGELOG.md](CHANGELOG.md) has the full list.
 
 Hey Jev runs on macOS only (Sequoia or later). It works through Accessibility, AppleScript and the Keychain, so there is no Windows or Linux version.
+
+<p align="center">
+<img src="docs/images/status_ready_dark.png" alt="The Hey Jev status window: Ready, say Hey Jev then your command" width="400">
+</p>
 
 ## How it's different
 
@@ -103,6 +111,45 @@ The first time you open it:
 Settings > Permissions shows all of these in one place, with the current status of each and a button to request it or jump to the right page in System Settings.
 
 Finally, pick how you want to talk to it using the switch in the main window. **Hold Option** listens while you hold the right Option key. **Hey Jev** listens all the time for your wake phrase.
+
+## A look around
+
+Settings follows the macOS System Settings layout, in light and dark.
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/settings_confirm_dark.png">
+  <img src="docs/images/settings_confirm_light.png" alt="Settings, Confirmations pane: Ask first or Automatic for each kind of action" width="420">
+</picture>
+      <br><sub><b>Confirmations.</b> Ask first or Automatic, per kind of action.</sub>
+    </td>
+    <td align="center" width="50%">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/settings_transcription_dark.png">
+  <img src="docs/images/settings_transcription_light.png" alt="Settings, Transcription pane: recognizer, wake phrase and microphone test" width="420">
+</picture>
+      <br><sub><b>Transcription.</b> Whisper or Apple dictation, your wake phrase, a mic test.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="50%">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/settings_voice_dark.png">
+  <img src="docs/images/settings_voice_light.png" alt="Settings, Voice pane: Fish Audio voice, cues and playback" width="420">
+</picture>
+      <br><sub><b>Voice.</b> Pick a Fish Audio voice and how expressive it is.</sub>
+    </td>
+    <td align="center" width="50%">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/settings_permissions_dark.png">
+  <img src="docs/images/settings_permissions_light.png" alt="Settings, Permissions pane: every macOS permission with its live status" width="420">
+</picture>
+      <br><sub><b>Permissions.</b> Every macOS permission, its status, and a button to fix it.</sub>
+    </td>
+  </tr>
+</table>
 
 ## Command line
 

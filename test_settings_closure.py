@@ -32,7 +32,10 @@ class Base(unittest.TestCase):
                         patch.object(assistant_ui, "whisper_model", lambda: "small.en"),
                         patch.object(assistant_ui, "ocr_level", lambda: "accurate"),
                         patch.object(assistant_ui, "app_folders", lambda: []),
-                        patch.object(assistant_ui, "wake_settings", lambda: ("Hey Jev", []))]
+                        patch.object(assistant_ui, "wake_settings", lambda: ("Hey Jev", [])),
+                        patch.object(voice_output, "cues", lambda provider="fish": self.saved_cues),
+                        patch.object(voice_output, "set_cues", MagicMock())]
+        self.saved_cues = {"mode": "all", "on": list(voice_output.CUES["fish"])}
         for p in self.patches:
             p.start()
         self.d = assistant_ui.AppDelegate.alloc().init()
@@ -835,6 +838,84 @@ class OcrLevelTests(unittest.TestCase):
     def test_read_text_uses_it(self):
         import inspect, screen
         self.assertIn("configure_ocr(req)", inspect.getsource(screen.read_text))
+
+
+class VoiceCueTests(Base):
+    def save(self):
+        patches = [patch.object(assistant_ui, n) for n in SAVES]
+        for p in patches:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in patches])
+        with patch.object(assistant_ui, "get_secret", return_value="stored"), patch.object(siri, "reload_keys"), \
+                patch.object(assistant_ui.AppDelegate, "_start_worker"):
+            self.d.saveSettings_(None)
+
+    def voice_height(self):
+        return self.d.pane_views["voice"].frame().size.height
+
+    def test_default_all_hides_the_checkboxes_and_saves_nothing(self):
+        self.assertEqual(self.d.cue_mode.titleOfSelectedItem(), "All")
+        self.assertTrue(self.d.cue_view.isHidden())
+        self.assertEqual(self.voice_height(), assistant_ui.PANE_H)  # fits without scrolling
+        self.save()
+        voice_output.set_cues.assert_not_called()
+
+    def test_some_shows_one_checkbox_per_cue_and_saves_the_ticked_ones(self):
+        self.d.cue_mode.selectItemAtIndex_(1)
+        self.d.cueModeChanged_(self.d.cue_mode)
+        self.assertFalse(self.d.cue_view.isHidden())
+        self.assertEqual(list(self.d.cue_boxes), voice_output.CUES["fish"])
+        self.assertTrue(all(b.state() for b in self.d.cue_boxes.values()))  # starts from what All performed
+        self.d.cue_boxes["chuckling"].setState_(0)
+        self.d.cue_boxes["sighing"].setState_(0)
+        doc = self.d.pane_views["voice"]
+        self.assertLessEqual(self.d.cue_view.frame().origin.y + self.d.cue_view.frame().size.height, doc.frame().size.height)
+        self.save()
+        voice_output.set_cues.assert_called_once_with("fish", "some", ["laughing", "cheerful", "clear throat"])
+
+    def test_cue_list_sits_under_the_fish_group_and_playback_moves_down(self):
+        pb = lambda: self.d.playback_view.frame().origin.y
+        self.assertEqual(pb(), self.d.cue_top)  # All: Playback takes the cue list's place
+        self.d.cue_mode.selectItemAtIndex_(1)
+        self.d.cueModeChanged_(self.d.cue_mode)
+        cue = self.d.cue_view.frame()
+        self.assertEqual(cue.origin.y, self.d.cue_top)
+        self.assertGreaterEqual(pb(), cue.origin.y + cue.size.height)  # below the cue list, no overlap
+        self.d.cue_mode.selectItemAtIndex_(0)
+        self.d.cueModeChanged_(self.d.cue_mode)
+        self.assertEqual(pb(), self.d.cue_top)
+
+    def test_none_saves_none_and_back_to_all(self):
+        self.d.cue_mode.selectItemAtIndex_(2)
+        self.d.cueModeChanged_(self.d.cue_mode)
+        self.assertTrue(self.d.cue_view.isHidden())
+        self.save()
+        voice_output.set_cues.assert_called_once_with("fish", "none", [])
+
+    def test_second_save_in_an_open_window_compares_with_what_was_saved(self):
+        def saved(provider, mode, on=()):
+            self.saved_cues = {"mode": mode, "on": list(on) if mode == "some" else
+                               list(voice_output.CUES["fish"]) if mode == "all" else []}
+        voice_output.set_cues.side_effect = saved
+        self.d.wake_field.setStringValue_("Jo")  # the short-phrase warning keeps Settings open after Save
+        self.d.cue_mode.selectItemAtIndex_(2)
+        self.save()
+        self.assertIsNotNone(self.d.settings_sheet)
+        self.assertEqual(self.saved_cues["mode"], "none")
+        self.d.cue_mode.selectItemAtIndex_(0)  # back to All in the same window
+        self.save()
+        self.assertEqual(voice_output.set_cues.call_args_list[-1].args, ("fish", "all", []))
+        self.assertEqual(self.saved_cues["mode"], "all")
+
+    def test_saved_some_is_shown_as_saved(self):
+        self.d.closeSettings_(None)
+        self.saved_cues = {"mode": "some", "on": ["cheerful"]}
+        self.d._show_settings()
+        self.assertEqual(self.d.cue_mode.titleOfSelectedItem(), "Some")
+        self.assertFalse(self.d.cue_view.isHidden())
+        self.assertEqual([c for c, b in self.d.cue_boxes.items() if b.state()], ["cheerful"])
+        self.save()
+        voice_output.set_cues.assert_not_called()  # unchanged
 
 
 class ModelPrefsTests(unittest.TestCase):

@@ -711,18 +711,39 @@ class AppDelegate(NSObject):
         self.fish_model_popup.selectItemWithTitle_(fish_model())
         self.fish_model_popup.setToolTip_(f"Fish Audio speech model. Default: {FISH_MODELS[0]}.")
         y = form_group(v, 20, "Fish Audio", [("API key", key_field("FISH_AUDIO_API_KEY")),
-                                             ("Speech model", self.fish_model_popup), ("Voice", self.voice_popup),
+                                             ("Speech model", self.fish_model_popup),
+                                             ("Voice cues", self._cue_mode_popup()), ("Voice", self.voice_popup),
                                              ("Find voices", find_cell)])
         self.voice_message = text("", NSMakeRect(GROUP_X + 14, y - 16, PANE_W - 2 * GROUP_X, 16), 11,
                                   NSColor.secondaryLabelColor())
         v.addSubview_(self.voice_message)
         footnote(v, y + 4, "Find with an empty box lists your own Fish voices; type a name to search public ones. "
                            "The sample uses the chosen voice. Save to make Jev use it.")
-        y = form_group(v, y + 44, "Playback", [("Volume", self.settings_voice_slider), ("Mute", self.settings_mute),
-                                               ("Sample", self.sample_button)])
-        self.sample_result.setFrame_(NSMakeRect(GROUP_X + 14, y - 16, PANE_W - 2 * GROUP_X, 16))
-        v.addSubview_(self.sample_result)
-        footnote(v, y + 4, "Volume and mute apply right away and only affect Jev's voice. Timer chimes stay audible.")
+        # Voice cues, shown only for Some, directly under the Fish group that holds the popup revealing them.
+        self.cue_top = y + 44
+        self.cue_view = FlippedView.alloc().initWithFrame_(NSMakeRect(0, self.cue_top, PANE_W, 10))
+        v.addSubview_(self.cue_view)
+        self.cue_boxes = {}
+        rows = []
+        for cue in voice_output.CUES["fish"]:
+            box = NSButton.checkboxWithTitle_target_action_("", None, None)
+            box.setState_(int(cue in self.cue_start["on"]))
+            box.setAccessibilityLabel_(f"Perform {cue}")
+            self.cue_boxes[cue] = box
+            rows.append((cue.capitalize(), box))
+        cy = form_group(self.cue_view, 0, "Cues to perform", rows, row_h=30)
+        footnote(self.cue_view, cy, "Lines are written with cues like [chuckling]; unticked ones are left out. "
+                                    "Applies from the next thing Jev says after Save.")
+        # Playback follows, moving down while the cue list shows.
+        self.playback_view = FlippedView.alloc().initWithFrame_(NSMakeRect(0, self.cue_top, PANE_W, 10))
+        v.addSubview_(self.playback_view)
+        py = form_group(self.playback_view, 0, "Playback", [("Volume", self.settings_voice_slider),
+                                                            ("Mute", self.settings_mute), ("Sample", self.sample_button)])
+        self.sample_result.setFrame_(NSMakeRect(GROUP_X + 14, py - 16, PANE_W - 2 * GROUP_X, 16))
+        self.playback_view.addSubview_(self.sample_result)
+        footnote(self.playback_view, py + 4, "Volume and mute apply right away and only affect Jev's voice. Timer "
+                                             "chimes stay audible.")
+        self._show_cues()
 
         # Confirmations: one row per kind of action.
         c = panes["confirm"]
@@ -1059,9 +1080,36 @@ class AppDelegate(NSObject):
         self._fit_panes()
 
     @objc.python_method
+    def _cue_mode_popup(self):
+        self.cue_start = voice_output.cues("fish")
+        popup = self._popup(None, ["All", "Some", "None"], NSMakeRect(0, 0, CONTROL_W, 24), "cueModeChanged:")
+        popup.selectItemAtIndex_(voice_output.CUE_MODES.index(self.cue_start["mode"]))
+        popup.setToolTip_("Performance tags in Jev's lines, like [chuckling] or [sighing]. Default: All.")
+        popup.setAccessibilityLabel_("Fish voice cues")
+        self.cue_mode = popup
+        return popup
+
+    def cueModeChanged_(self, _sender):
+        self._show_cues()
+
+    @objc.python_method
+    def _show_cues(self):
+        some = voice_output.CUE_MODES[self.cue_mode.indexOfSelectedItem()] == "some"
+        self.cue_view.setHidden_(not some)
+        top = self.cue_top + (content_bottom(self.cue_view) + 24 if some else 0)
+        self.playback_view.setFrameOrigin_((0, top))
+        self._fit_panes()
+
+    @objc.python_method
+    def _cue_choice(self):
+        mode = voice_output.CUE_MODES[self.cue_mode.indexOfSelectedItem()]
+        return mode, [c for c, box in self.cue_boxes.items() if box.state()] if mode == "some" else []
+
+    @objc.python_method
     def _fit_panes(self):
         """Size each pane's scrolling content to what it holds: exactly the window when it fits, taller when not."""
-        for view in (getattr(self, "advanced_view", None), getattr(self, "folder_view", None)):
+        for view in (getattr(self, "advanced_view", None), getattr(self, "folder_view", None),
+                     getattr(self, "cue_view", None), getattr(self, "playback_view", None)):
             if view is not None:
                 f = view.frame()
                 view.setFrameSize_((f.size.width, content_bottom(view)))
@@ -1446,6 +1494,10 @@ class AppDelegate(NSObject):
             for provider, model in jev_models.items():
                 if model != jev_model(provider):
                     save_jev_model(provider, model)
+            mode, on = self._cue_choice()
+            saved = voice_output.cues("fish")  # live value: an earlier Save in this window may have changed it
+            if (mode, on) != (saved["mode"], saved["on"] if saved["mode"] == "some" else []):
+                voice_output.set_cues("fish", mode, on)  # the next spoken line follows it
             if self.fish_model_popup.titleOfSelectedItem() != fish_model():
                 save_fish_model(self.fish_model_popup.titleOfSelectedItem())
             if OCR_LEVELS[self.ocr_popup.indexOfSelectedItem()] != ocr_level():

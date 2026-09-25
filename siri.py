@@ -97,8 +97,10 @@ def choose_control(spoken, labels):
     from engine import current_rid
     names = labels[:250]
     ids = [f"c{i}" for i in range(len(names))]  # opaque keys: control text can never collide with a protocol choice
-    q = {"control": {"type": "choice", "instructions": f"Which on-screen control did the user mean by: {spoken}",
-                     "criteria": {**{k: f"the control named “{n}”" for k, n in zip(ids, names)},
+    q = {"control": {"type": "choice", "instructions": f"Which on-screen control did the user mean by: {spoken}. "
+                                                      "Each is described by its name, the words around it, and where "
+                                                      "it is in the window.",
+                     "criteria": {**{k: f"the control {n}" for k, n in zip(ids, names)},
                                   "none": "none of these controls"}}}
     try:
         ans, ms, _ = jev(spoken, q)

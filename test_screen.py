@@ -246,7 +246,9 @@ class ScreenActionTests(unittest.TestCase):
         seen = []
         with patch.object(actions, "CHOOSE", lambda spoken, labels: seen.append(labels) or (None, 0.0)):
             self.run_text("click compose", "screen.press", {"label": "compose"})
-        self.assertEqual(seen, [["New Note"]])
+        self.assertEqual(len(seen), 1)
+        self.assertNotIn("Dear Sam", repr(seen))  # neither as a choice nor as a neighbour in a card
+        self.assertEqual(len(seen[0]), 1)
 
     def test_risky_labels_always_ask_even_when_clicks_are_automatic(self):
         fake = FakeScreen(self, [item(1, "Delete everything")])
@@ -1070,6 +1072,74 @@ class PickTests(unittest.TestCase):
     def test_a_named_app_must_be_in_front(self):
         v = self.run_pick({"noun": "video", "ordinal": 1, "app": "Chrome"}, self.grid())
         self.assertEqual((v["steps"][0]["detail"], self.presses), ("that app isn't in front", []))
+
+
+class CardTests(unittest.TestCase):
+    def test_a_card_carries_the_words_around_a_control_and_where_it_is(self):
+        title = item(1, "Opus 5.5 is here", role="AXLink", frame=(600, 100, 250, 20))
+        channel = item(2, "Nate Herk", role="AXLink", frame=(600, 124, 90, 14))
+        age = item(3, "3 days ago", source="ocr", role="text", pressable=False, frame=(700, 124, 70, 14))
+        far = item(4, "Unrelated sidebar", role="AXLink", frame=(10, 500, 120, 14))
+        s = snap([title, channel, age, far])
+        s.text_frames = [(0, 0, 1000, 1000)]
+        s.window_frame = (0, 0, 900, 800)
+        cards = actions.describe_cards([title], s, s.window_frame)
+        self.assertEqual(len(cards), 1)
+        self.assertTrue(cards[0].startswith("“Opus 5.5 is here”, near: "))
+        self.assertEqual(set(cards[0].split("near: ")[1].rsplit(", ", 1)[0].split(" · ")), {"Nate Herk", "3 days ago"})
+        self.assertTrue(cards[0].endswith(", top-right"))  # the sidebar link far below isn't part of this card
+
+    def test_the_chooser_gets_cards_and_presses_that_exact_one(self):
+        with patch.object(diagnostics, "record", lambda *a, **k: None):
+            a = item(1, "Watch", role="AXLink", frame=(10, 100, 100, 20))
+            b = item(2, "Watch", role="AXLink", frame=(600, 100, 100, 20))
+            ch = item(3, "Nate Herk", role="AXLink", frame=(600, 124, 90, 14))
+            s = snap([a, b, ch])
+            s.window_frame = (0, 0, 800, 600)
+            presses, seen = [], []
+            for name, fn in {"observe": lambda pid=None, ocr=True, deadline=None: s,
+                             "signature": lambda pid, d: {"n": len(presses)},
+                             "element_state": lambda ref, d: {"v": str(len(presses))},
+                             "press": lambda ref, d: presses.append(ref) or 0}.items():
+                p = patch.object(screen, name, fn)
+                p.start()
+                self.addCleanup(p.stop)
+
+            def choose(spoken, cards):
+                seen.append(cards)
+                return (next(k for k, c in enumerate(cards) if "Nate Herk" in c and "Watch" in c), 0.9)
+            with patch.object(actions, "CHOOSE", choose), \
+                    patch.object(planner, "plan", lambda *a, **k: ("steps", [{"clause": "c", "action": "screen.press",
+                                                                              "args": {"label": "the one by Nate Herk"}}])):
+                eng = Engine(lambda _: {}, policy=lambda: {**actions.DEFAULT_POLICY, "click": "auto"})
+                v = eng.wait(eng.submit("c", "cli")["id"], 10)
+        self.assertEqual((v["state"], presses), ("completed", [b.ref]))  # the right one of two identical labels
+
+
+class DisplayTests(unittest.TestCase):
+    def test_overlays_land_on_the_display_above_an_ultrawide_main(self):
+        """Johnny's layout: a 3200x1350 main display and a 2560x1440 one above it (y from -1440 to 0)."""
+        import AppKit
+        import assistant_ui
+        AppKit.NSApplication.sharedApplication()
+        view = {"app": "Chrome", "at": time.time(), "ms": 1, "complete": True, "version": 1,
+                "items": [{"n": 1, "source": "ax", "role": "AXLink", "label": "Video", "frame": [300, -1300, 200, 20],
+                           "pressable": True, "shared": True, "field": False}]}
+        main_h = AppKit.NSScreen.screens()[0].frame().size.height
+        w = assistant_ui.inspect_window(view)
+        f = w.frame()
+        self.assertGreater(f.origin.y, main_h)  # Cocoa y above the main display: the upper screen
+        self.assertLess(f.origin.x, 300)
+        w2 = assistant_ui.numbers_window({"items": view["items"]})
+        self.assertGreater(w2.frame().origin.y, main_h)
+
+    def test_reading_order_and_places_on_a_very_wide_window(self):
+        wide = (0, 0, 3200, 1300)
+        items = [item(k, f"v{k}", frame=(x, y, 300, 20)) for k, (x, y) in
+                 enumerate([(2800, 40), (100, 40), (1500, 42), (100, 700), (2900, 1200)], 1)]
+        self.assertEqual([i.label for i in actions.reading_order(items)], ["v2", "v3", "v1", "v4", "v5"])
+        self.assertEqual(actions.nearest_to(items, "bottom-right", wide).label, "v5")
+        self.assertEqual(actions.nearest_to(items, "top-left", wide).label, "v2")
 
 
 if __name__ == "__main__":

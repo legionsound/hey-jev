@@ -510,6 +510,31 @@ def _shown_list(args):
     return screen.shown(v) or "stale"
 
 
+CARD_BELOW, CARD_ABOVE, CARD_SIDE, CARD_WORDS = 70, 20, 12, 3
+
+
+def describe_cards(controls, context, frame):
+    """One short description per control for Jev: its own name, the shareable words right around it (the channel
+    under a video title, the price next to a product), and where it sits. Neighbours come only from what a task may
+    share with Jev (AX labels, and OCR text the field scan and text regions vouch for), minus any label that came
+    from an element's value: names, never contents."""
+    import task as task_mod
+    shareable, _ = task_mod.shareable(context)
+    out = []
+    for c in controls:
+        x, y, w, h = c.frame
+        near = []
+        for o in shareable:
+            if o.label == c.label or o.from_value or o.secure:  # never a field's or document's value
+                continue
+            ox, oy = o.frame[0] + o.frame[2] / 2, o.frame[1] + o.frame[3] / 2
+            if x - CARD_SIDE <= ox <= x + w + CARD_SIDE and y - CARD_ABOVE <= oy <= y + h + CARD_BELOW:
+                near.append((abs(oy - (y + h / 2)), o.label[:60]))
+        words = [t for _, t in sorted(near)][:CARD_WORDS]
+        out.append(f"“{c.label[:100]}”" + (f", near: {' · '.join(words)}" if words else "") + f", {_where(c, frame)}")
+    return out
+
+
 def resolve_screen_press(args):
     """A number from the last list the user saw, or a spoken control name, to one exact control the app declared."""
     deadline = resolve_deadline()
@@ -538,17 +563,21 @@ def resolve_screen_press(args):
     if not exact:
         exact = [i for i in controls if f" {said} " in f" {screen._norm(i.label)} "]
     if not exact and CHOOSE:
-        named = [i for i in controls if not i.from_value]  # a field's or document's value is never sent
-        names = list(dict.fromkeys(i.label for i in named))
-        if names:
+        named = [i for i in controls if not i.from_value][:60]  # a field's or document's value is never sent
+        if named:
             try:
-                got = valid_choice(CHOOSE(args.get("label", ""), names), len(names))
+                context = screen.observe(pid=snap.pid, ocr=True, deadline=deadline)  # the words around each control
+            except (screen.Unavailable, screen.TimedOut, screen.Wedged):
+                context = snap
+            cards = describe_cards(named, context, snap.window_frame)
+            try:
+                got = valid_choice(CHOOSE(args.get("label", ""), cards), len(cards))
             except Exception:
                 got = None
             if got is None:
                 return ("choices", [])  # a malformed answer asks again; nothing is pressed
             if got[0] is not None and got[1] >= CHOOSE_GATE:
-                exact = [i for i in named if i.label == names[got[0]]]
+                exact = [named[got[0]]]
     if not exact:
         return ("none", "no control by that name")
     if len({i.token for i in exact}) > 1:

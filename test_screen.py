@@ -982,5 +982,95 @@ class ScrollAndPointerTests(unittest.TestCase):
 
 
 
+class PickTests(unittest.TestCase):
+    """"the third video": Jev classifies the controls, the code counts or finds the place, the press is exact."""
+
+    def setUp(self):
+        p = patch.object(diagnostics, "record", lambda *a, **k: None)
+        p.start()
+        self.addCleanup(p.stop)
+        self.sent, self.presses = [], []
+
+    def grid(self):
+        # a 2x2 grid of videos with channel names and a menu, as a video site lays it out
+        vids = [item(1, "Video A", role="AXLink", frame=(10, 10, 150, 20)), item(2, "Chan A", role="AXLink", frame=(10, 32, 80, 14)),
+                item(3, "Video B", role="AXLink", frame=(200, 12, 150, 20)), item(4, "Chan B", role="AXLink", frame=(200, 34, 80, 14)),
+                item(5, "Video C", role="AXLink", frame=(10, 210, 150, 20)), item(6, "Video D", role="AXLink", frame=(200, 208, 150, 20)),
+                item(7, "Menu", frame=(380, 5, 20, 20))]
+        return snap(vids)
+
+    def run_pick(self, args, current, answer=None, policy=None):
+        def classify(noun, labels):
+            self.sent.append((noun, list(labels)))
+            return answer(labels) if answer else [(l.startswith("Video"), 0.95) for l in labels]
+        fns = {"observe": lambda pid=None, ocr=True, deadline=None: current,
+               "signature": lambda pid, d: {"n": len(self.presses)},
+               "element_state": lambda ref, d: {"v": str(len(self.presses))},
+               "press": lambda ref, d: self.presses.append(ref) or 0}
+        for name, fn in fns.items():
+            p = patch.object(screen, name, fn)
+            p.start()
+            self.addCleanup(p.stop)
+        with patch.object(actions, "CLASSIFY_ITEMS", classify), \
+                patch.object(planner, "plan", lambda *a, **k: ("steps", [{"clause": "c", "action": "screen.pick",
+                                                                          "args": args}])):
+            eng = Engine(lambda _: {}, policy=lambda: {**actions.DEFAULT_POLICY, "click": "auto", **(policy or {})})
+            return eng.wait(eng.submit("c", "cli")["id"], 10)
+
+    def test_the_words(self):
+        cases = {"click the third video": {"noun": "video", "ordinal": 3},
+                 "click the third video in the chrome tab": {"noun": "video", "ordinal": 3, "app": "chrome"},
+                 "click the video in the bottom-right": {"noun": "video", "where": "bottom-right"},
+                 "play the last song": {"noun": "song", "ordinal": -1},
+                 "open the 2nd result": {"noun": "result", "ordinal": 2}}
+        for said, want in cases.items():
+            self.assertEqual(planner.pick_args(said), want, said)
+        for said in ["click the video", "click Save", "click the third"]:
+            self.assertIsNone(planner.pick_args(said), said)
+
+    def test_the_third_video_counts_rows_then_columns(self):
+        g = self.grid()
+        v = self.run_pick({"noun": "video", "ordinal": 3}, g)
+        self.assertEqual((v["state"], self.presses), ("completed", [g.items[4].ref]))  # Video C starts row two
+        self.assertEqual(self.sent[0][0], "video")
+
+    def test_the_video_in_the_bottom_right(self):
+        g = self.grid()
+        v = self.run_pick({"noun": "video", "where": "bottom-right"}, g)
+        self.assertEqual(self.presses, [g.items[5].ref])  # Video D
+
+    def test_the_last_one_and_out_of_range(self):
+        g = self.grid()
+        self.run_pick({"noun": "video", "ordinal": -1}, g)
+        self.assertEqual(self.presses, [g.items[5].ref])
+        self.presses.clear()
+        v = self.run_pick({"noun": "video", "ordinal": 9}, g)
+        self.assertEqual((v["steps"][0]["detail"], self.presses), ("only 4 videos on screen", []))
+
+    def test_unsure_or_malformed_classification_presses_nothing(self):
+        g = self.grid()
+        v = self.run_pick({"noun": "video", "ordinal": 1}, g, answer=lambda labels: [(True, 0.5)] * len(labels))
+        self.assertEqual((v["state"], self.presses), ("failed", []))  # below the gate: no videos counted
+        for bad in (lambda l: [(True, float("nan"))] * len(l), lambda l: [("yes", 0.9)] * len(l),
+                    lambda l: [(True, 0.9)], lambda l: None):
+            v = self.run_pick({"noun": "video", "ordinal": 1}, g, answer=bad)
+            self.assertEqual((v["state"], self.presses), ("needs_clarification", []))
+
+    def test_role_nouns_need_no_jev(self):
+        g = self.grid()
+        v = self.run_pick({"noun": "button", "ordinal": 1}, g)
+        self.assertEqual((v["state"], self.presses, self.sent), ("completed", [g.items[6].ref], []))
+
+    def test_only_control_names_go_to_jev(self):
+        g = self.grid()
+        g.items.append(item(8, "secret note", source="ocr", role="text", pressable=False))
+        self.run_pick({"noun": "video", "ordinal": 1}, g)
+        self.assertNotIn("secret note", self.sent[0][1])
+
+    def test_a_named_app_must_be_in_front(self):
+        v = self.run_pick({"noun": "video", "ordinal": 1, "app": "Chrome"}, self.grid())
+        self.assertEqual((v["steps"][0]["detail"], self.presses), ("that app isn't in front", []))
+
+
 if __name__ == "__main__":
     unittest.main()

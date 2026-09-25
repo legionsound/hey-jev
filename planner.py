@@ -397,10 +397,39 @@ def direct(clause):
     return None
 
 
+ORDINALS = {w: i for i, w in enumerate("first second third fourth fifth sixth seventh eighth ninth tenth".split(), 1)}
+NOUNS = r"video|result|link|song|track|post|article|email|message|item|row|tab|button|thumbnail|playlist|channel"
+PICK = re.compile(r"^\W*(?:please\s+)?(?:click|press|tap|open|play|select|choose|pick)\s+(?:on\s+)?the\s+"
+                  r"(?:(?P<ord>" + "|".join(ORDINALS) + r"|last|\d{1,2}(?:st|nd|rd|th))\s+)?(?P<noun>" + NOUNS + r")s?"
+                  r"(?:\s+(?:in|at|on)\s+the\s+(?P<v>top|bottom|middle)(?:[\s-]+(?P<h>left|right))?"
+                  r"(?:\s+(?:corner|of\s+the\s+(?:page|screen|window)))?)?"
+                  r"(?:\s+(?:in|on)\s+(?:the\s+)?(?P<app>[\w .'-]+?)(?:\s+(?:tab|window|app))?)?[\s.!?]*$", re.I)
+
+
+def pick_args(clause):
+    """"the third video", "the last result", "the video in the bottom-right": {"noun", "ordinal" | "where"}, or None.
+    Plain "click the video" with neither an ordinal nor a place isn't a pick: it names one thing."""
+    m = PICK.match(clause)
+    if not m or not (m["ord"] or m["v"]):
+        return None
+    out = {"noun": m["noun"].lower()}
+    if m["ord"]:
+        o = m["ord"].lower()
+        out["ordinal"] = -1 if o == "last" else ORDINALS.get(o) or int(re.match(r"\d+", o).group())
+    if m["v"]:
+        out["where"] = m["v"].lower() + ("-" + m["h"].lower() if m["h"] else "")
+    if m["app"]:
+        out["app"] = m["app"].strip()
+    return out
+
+
 def pick(ans, clause, inherited_browser=None):
     """Trust Jev's target if it is fairly sure, else the single most confident action anywhere.
     "Click" and "tap", or a named UI part ("the Loud mode checkbox"), always mean a control on screen:
     Jev's target question hears "Loud" as volume, and that must never turn a click into a volume change."""
+    p = pick_args(clause)
+    if p:  # "the third video": Jev says which items are videos, the code counts
+        return (ans["target"][1], "screen.pick", p)
     if SUBMIT_WORDS.match(clause):  # Return in the selected field: exact words only, never inferred
         return (ans["target"][1], "screen.submit", {})
     if UI_WORDS.search(clause):

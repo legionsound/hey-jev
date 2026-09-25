@@ -957,6 +957,89 @@ def verify_pointer_click(t, deadline):
                            "why": "clicked; a click at the pointer has nothing specific to check"})
 
 
+CLASSIFY_ITEMS = None  # set by the app: (noun, labels) -> [(is_one, confidence)] per label, from one Jev call
+ROLE_NOUNS = {"button": ("AXButton", "AXMenuButton", "AXPopUpButton"), "link": ("AXLink",),
+              "tab": ("AXTab", "AXRadioButton"), "row": ("AXRow", "AXCell"), "item": None}
+PICK_GATE = 0.65
+ROW_BAND = 30  # points: items whose centres are this close vertically share a row when counting in reading order
+
+
+def reading_order(items):
+    """Rows top to bottom, then left to right: how a person counts "the third video" on a grid or a list."""
+    def key(i):
+        cx, cy = i.frame[0] + i.frame[2] / 2, i.frame[1] + i.frame[3] / 2
+        return (round(cy / ROW_BAND), cx)
+    return sorted(items, key=key)
+
+
+def nearest_to(items, where, frame):
+    """The item closest to a named place in the window: "bottom-right", "top", "middle-left"…"""
+    v, _, h = where.partition("-")
+    ty = {"top": 0.0, "middle": 0.5, "bottom": 1.0}[v]
+    tx = {"left": 0.0, "right": 1.0}.get(h)
+    x, y, w, hh = frame
+
+    def dist(i):
+        cx = (i.frame[0] + i.frame[2] / 2 - x) / max(w, 1)
+        cy = (i.frame[1] + i.frame[3] / 2 - y) / max(hh, 1)
+        return (cy - ty) ** 2 + ((cx - tx) ** 2 if tx is not None else 0)
+    return min(items, key=dist)
+
+
+def _valid_flag(g):
+    """(bool, finite 0-1 score), exactly."""
+    import math
+    return (isinstance(g, (tuple, list)) and len(g) == 2 and isinstance(g[0], bool)
+            and isinstance(g[1], (int, float)) and not isinstance(g[1], bool) and math.isfinite(g[1]) and 0 <= g[1] <= 1)
+
+
+def resolve_screen_pick(args):
+    """"the third video", "the last result", "the video in the bottom-right". Which on-screen controls are videos
+    (results, songs…) is Jev's call, one batched question over the pressable controls' names; counting and place
+    are the code's. The pick becomes an ordinary exact-element press target."""
+    deadline = resolve_deadline()
+    try:
+        snap = screen.observe(ocr=False, deadline=deadline)
+    except (screen.Unavailable, screen.TimedOut, screen.Wedged) as exc:
+        return ("none", f"can't read the screen: {exc}")
+    wanted = (args.get("app") or "").strip().lower()
+    if wanted and wanted not in snap.app.lower() and wanted not in {"the browser", "browser", "this page", "the page",
+                                                                     "page", "here", "this"}:
+        return ("none", "that app isn't in front")
+    noun = args.get("noun", "item")
+    pool = [i for i in snap.items if _live(i) and not i.from_value]
+    roles = ROLE_NOUNS.get(noun, "jev")
+    if roles is None:
+        group = pool
+    elif roles != "jev":
+        group = [i for i in pool if i.role in roles]
+    else:
+        if not CLASSIFY_ITEMS or not pool:
+            return ("none", f"no {noun}s on screen")
+        labels = [i.label for i in pool][:60]
+        try:
+            got = CLASSIFY_ITEMS(noun, labels)
+        except Exception:
+            got = None
+        if not isinstance(got, list) or len(got) != len(labels) or not all(_valid_flag(g) for g in got):
+            return ("choices", [])  # a malformed answer asks again; nothing is pressed
+        group = [i for i, (yes, conf) in zip(pool, got) if yes is True and conf >= PICK_GATE]
+    if not group:
+        return ("none", f"no {noun}s on screen")
+    if "where" in args:
+        chosen = nearest_to(group, args["where"], snap.window_frame)
+    else:
+        ordered = reading_order(group)
+        k = args.get("ordinal", 1)
+        if k == -1:
+            chosen = ordered[-1]
+        elif isinstance(k, int) and 1 <= k <= len(ordered):
+            chosen = ordered[k - 1]
+        else:
+            return ("none", f"only {len(ordered)} {noun}{'s' if len(ordered) != 1 else ''} on screen")
+    return ("target", _screen_target(snap, chosen))
+
+
 def run_screen_list(t, deadline):
     try:
         snap = screen.observe(ocr=True, deadline=deadline)
@@ -1034,6 +1117,8 @@ ACTIONS = {
     "screen.list": entry("look", plain, run_screen_list, verify_screen_list, "the list is what was read", 8),
     "screen.press": entry("click", resolve_screen_press, run_screen_press, verify_screen_press,
                           "the window changed after the press; not that the intended result happened", 6),
+    "screen.pick": entry("click", resolve_screen_pick, run_screen_press, verify_screen_press,
+                         "the picked control changed after the press; which one was picked is Jev's classification", 6),
     "screen.scroll": entry("scroll", resolve_screen_scroll, run_screen_scroll, verify_screen_scroll,
                            "the view's scroll position changed", 6),
     "pointer.click": entry("click", resolve_pointer_click, run_pointer_click, verify_pointer_click,
@@ -1094,7 +1179,7 @@ def describe(action, target):
             "screen.type": "Type “{text}” into {field} in {app}",
             "screen.submit": "Press Return in the selected field in {app}",
             "task.run": "Work on: {goal} (up to {steps} steps)",
-            "screen.scroll": "Scroll {direction} in {app}", "pointer.click": "Click where the pointer is, in {app}"}.get(action, action.replace(".", ": ").replace("_", " "))
+            "screen.pick": "Click “{label}” in {app}", "screen.scroll": "Scroll {direction} in {app}", "pointer.click": "Click where the pointer is, in {app}"}.get(action, action.replace(".", ": ").replace("_", " "))
     return what.format(name=name, url=t.get("url") or "the website", level=level, label=t.get("label") or "that",
                        text=t.get("text") or "", field=f"“{t['label']}”" if t.get("label") else "the selected field",
                        app=t.get("app") or "the app", goal=t.get("goal") or "this", steps=t.get("steps") or 15,

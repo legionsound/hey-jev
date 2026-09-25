@@ -122,6 +122,19 @@ def task_jev(state, questions):
     return ans
 
 
+def classify_items(noun, labels):
+    """One Jev call: for each on-screen control name, is it one {noun}? -> [(bool, confidence)] in order.
+    Only the control names are sent."""
+    from engine import current_rid
+    state = json.dumps({"candidates": [{"id": f"c{k}", "text": l} for k, l in enumerate(labels)]}, ensure_ascii=False)
+    q = {f"c{k}": {"type": "noul", "instructions": f"Is candidate c{k} one {noun} on this page (not a channel name, "
+                                                     f"menu, button, duration, count or other part of the page)?"}
+         for k in range(len(labels))}
+    ans, ms, cost = jev(state, q)
+    diagnostics.record(current_rid(), "classify_items", "ok", ms, noun=noun, options=len(labels))
+    return [ans.get(f"c{k}") for k in range(len(labels))]
+
+
 def classify(clause):
     from engine import current_rid
     try:
@@ -453,6 +466,7 @@ def make_engine(notify=None, ask=None, show=None):
 
     import actions
     actions.CHOOSE = choose_control
+    actions.CLASSIFY_ITEMS = classify_items
     eng = Engine(classify, policy=confirm_policy, ask=ask, tiebreak=tiebreak,
                  threshold=lambda: float("inf") if tiebreak_threshold() >= 100 else tiebreak_threshold() / 100,
                  answer=answer if ANSWER_PROVIDER == "openrouter" else None, on_event=on_event)

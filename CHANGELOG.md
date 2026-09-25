@@ -60,7 +60,7 @@ A ground-up rework of how commands run, plus screen control. Everything a comman
 
 ### Settings and window
 
-- Settings rebuilt in the System Settings style: panes for Providers, Answers, Voice, Confirmations, Apps and Transcription, in that order. Pane edits are save-gated (Cancel/close discards); the status-window voice volume slider and mute button apply immediately.
+- Settings rebuilt in the System Settings style: panes for Providers, Answers, Voice, Confirmations, Apps and Transcription, in that order. Pane edits are save-gated (Cancel/close discards); the voice volume slider and mute control — status window, menu bar, and Settings > Voice — apply immediately and are not undone by Cancel.
 - Every model the app uses (Jev, answers, Whisper, Fish voice model, OCR level) is a setting, defaulting to the original values.
 - Status window redesigned with Liquid Glass.
 - Menu bar icon is now a person-speaking symbol.

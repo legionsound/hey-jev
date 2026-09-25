@@ -61,9 +61,14 @@ mic ─► Whisper / Apple dictation ─► wake phrase ─► planner ─► en
   `verify` (polled readback → done/wait/failed/unverified; `None` only
   where no readback exists), `proves` (what the readback actually
   establishes), and a timeout.
-- **Native calls**: every native call in `run`/`verify` is a subprocess
-  with `timeout = deadline - now`; at the deadline the worker kills and
-  reaps its own subprocess and reports `unknown`. Apple Events go through
+- **Native calls**: subprocess calls in `run`/`verify` (`open`,
+  `osascript`, …) run with `timeout = deadline - now`; at the deadline
+  the worker kills and reaps its own subprocess and reports `unknown`.
+  Screen/AX calls in `screen.py` instead run on daemon threads via
+  `bounded()`: a thread cannot be killed, so an over-deadline call is
+  abandoned and tracked, and the pending-effect barrier holds every
+  later dispatch until the outstanding effect lands or the wait
+  (`engine.py: PENDING_WAIT`) expires. Apple Events go through
   `osascript` (Spotify, volume, dark mode, Chrome tabs) and System Events
   keystrokes; direct AX work goes through ApplicationServices
   (`screen.py`), screenshots/capture through Quartz, app identity through

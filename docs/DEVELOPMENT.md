@@ -44,9 +44,9 @@ folder moves.
 ```
 
 Stdlib `unittest`, several hundred tests covering engine, planner,
-actions, screen control, settings, and speech. Use the project venv (or
-the shared one at `/Users/johnmeyer/Developer/Hey Jev/.venv/bin/python`
-run from the worktree) — system python3 has no AppKit/Foundation, so
+actions, screen control, settings, and speech. Use the checkout's own
+`.venv` (created by the setup instructions above) — system python3 has
+no AppKit/Foundation, so
 every macOS-dependent test module fails to import there. That is
 environmental, not a regression.
 

@@ -5,19 +5,22 @@ the status window / menu bar. Settings panes: Providers, Answers, Voice,
 Confirmations, Apps, Transcription — in that order
 (`assistant_ui.py: SETTINGS_PANES`).
 
-## Settings panes (save-gated)
+## Settings panes (save-gated, with live exceptions)
 
 The six Settings panes apply on save: closing or Cancel discards
-unsaved changes. (The status-window voice volume slider and mute button
-are the exception: they apply immediately, live.)
+unsaved changes. Exceptions, which apply the moment they are touched:
+the voice volume slider and mute control, in the status window, the
+menu bar, and Settings > Voice — Cancel does not undo them.
 
 ### Providers
 
 - Jev provider: OpenRouter or direct TypeSafe key, plus the Jev model id
-  per provider (`model_settings.py: save_jev_model`). Stored in Keychain
-  via `secrets_store.py`.
-- First launch opens Settings and asks for keys. Keys are stored in the
-  Mac Keychain, never in files or logs.
+  per provider (`model_settings.py: save_jev_model`). Model ids live in
+  preferences; API keys live in the Mac Keychain via `secrets_store.py`.
+- First launch opens Settings and asks for keys. Keys entered there go
+  to the Keychain — but a value in the environment or `.env` overrides
+  the Keychain (`secrets_store.get_secret`), so keys can also come from
+  files. Keys never appear in logs.
 
 ### Answers
 
@@ -34,8 +37,9 @@ are the exception: they apply immediately, live.)
   (`s2.1-pro-free` default; `save_fish_model`).
 - Voice cues: All, Some (pick each), or None — whether the voice
   performs cues like chuckling, laughing, sighing.
-- Status-window volume slider and mute apply immediately and sync to the
-  menu bar slider; they are not part of the save-gated panes.
+- The Voice pane's volume slider and mute checkbox apply immediately
+  (same live control as the status window and menu bar); they are not
+  undone by Cancel.
 
 ### Confirmations
 
@@ -52,7 +56,10 @@ are the exception: they apply immediately, live.)
 
 - Extra folders to search for installed apps (`save_app_folders`), beyond
   the built-in Applications folders, running apps, and Spotlight.
-- Advanced-open toggle (`save_advanced_open`).
+
+(The Advanced disclosure in Settings > Answers — expanded/collapsed
+state of the answer parameter controls — is `save_advanced_open`, not
+an Apps setting.)
 
 ### Transcription
 

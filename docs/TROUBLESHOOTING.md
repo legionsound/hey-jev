@@ -27,8 +27,9 @@
 
 - Accessibility must be on (System Settings > Privacy & Security >
   Accessibility). Without it, no screen control works.
-- Optional Screen Recording adds Vision OCR text for what Accessibility
-  does not expose; without it, OCR-only items are `not_a_control`.
+- Optional Screen Recording lets Vision OCR read on-screen text that
+  Accessibility does not expose. It never makes OCR-only text pressable:
+  OCR-only items stay `not_a_control`.
 - "Click 4" refused with `screen_changed`: the window changed while you
   spoke. Re-open "Show what Jev sees" and say the number again.
 - Clicks over Hey Jev's own windows, the overlay, or menus are refused
@@ -51,7 +52,8 @@
 - Settings > Confirmations: check the category (click, type, submit,
   task, risky default Ask first; open, navigate, media, volume, display,
   timer, scroll default Automatic).
-- Risky labels (buy, send, delete…) always ask regardless of settings.
+- Risky labels (buy, send, delete…) ask by default; setting `risky` to
+  Automatic overrides this.
 - A picked quit target always asks, whatever the quit policy.
 
 ## `jevctl` issues
@@ -71,8 +73,8 @@
 
 ## Tests fail on a fresh checkout
 
-- Run the suite with the project venv, which has PyObjC:
-  `/Users/johnmeyer/Developer/Hey\ Jev/.venv/bin/python -m unittest discover -q`
+- Run the suite with the checkout's venv, which has PyObjC:
+  `.venv/bin/python -m unittest discover -q`
   from the repo root. System python3 lacks AppKit/Foundation and every
   macOS-dependent test module fails to import there — that is
   environmental, not a code regression.

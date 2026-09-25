@@ -25,12 +25,15 @@ For exact behavior rules see `ENGINE_CONTRACT.md`.
 
 ## Web (`url_adapter.py`, `actions.py`)
 
-- "Go to google.com" opens the URL and checks the browser tab actually
-  shows that address (strict comparison after documented normalizations).
+- "Go to google.com" opens the URL and verifies the result where the
+  browser allows it (Chrome: tab id + strict URL comparison after
+  documented normalizations; Safari and others: `unverified`).
 - "Go to YouTube" resolves a dotless name through a curated site map;
   unknown names are never guessed.
 - "Search Google for …" opens a literal search URL.
-- Naming a browser ("… in Safari") wins. Only Chrome reports a completed
+- Naming a browser ("… in Safari") wins. Naming a browser Hey Jev does
+  not drive refuses the navigation (`unsupported_browser`) — nothing
+  opens. Otherwise: only Chrome reports a completed
   load (unique tab id + URL match); Safari opens a new tab and reports
   `unverified`; other browsers are opened and reported `unverified`.
   Page content and load state are not checked.
@@ -44,9 +47,10 @@ For exact behavior rules see `ENGINE_CONTRACT.md`.
   numbered overlay (menu bar > Show what Jev sees). Numbers bind to the
   list visible when speech started; a changed list refuses (`screen_changed`).
 - `screen.type`: types literal text into a named or focused field via
-  `AXSelectedText` (no keystrokes, nothing submitted). Password fields are
+  `AXSelectedText` (no keystrokes, nothing submitted), replacing the
+  current selection. Password fields are
   never typed into or read. Verified only when the field holds exactly the
-  old text plus the typed text.
+  old text with the selected range replaced by the typed text.
 - `screen.submit`: "press return" sends `AXConfirm` to the focused
   element. Verified only when the field goes away or its text changes;
   that never means a message or purchase was accepted.
@@ -57,7 +61,9 @@ For exact behavior rules see `ENGINE_CONTRACT.md`.
   double). Always `unverified`; refused over Hey Jev's own windows,
   overlays, or menus.
 - `screen.pick`: "click the third video", "the video in the bottom-right"
-  — Jev picks among control cards above a confidence gate, then it runs
+  — Jev answers which controls match the noun (one batched yes/no per
+  control name, threshold 0.65); the code then counts in reading order
+  or takes the nearest to the named place, and the pick runs
   as an ordinary press with identity re-check and readback.
 - Direct commands ("scroll down", "click here") skip classification and
   run directly, because their words leave nothing for Jev to choose.
@@ -99,7 +105,8 @@ For exact behavior rules see `ENGINE_CONTRACT.md`.
   sleep, click, type, submit, task, risky. Reading the screen (`look`)
   has no effect and never asks.
 - Risky-labeled controls (buy, send, delete, pay, submit, post, share,
-  install, sign out, similar) always ask. That list adds confirmation; it
+  install, sign out, similar) ask by default — but setting `risky` to
+  Automatic overrides this. That list only adds confirmation; it
   never proves other clicks harmless.
 - Multi-step requests stop at the first step that did not verifiably
   complete (`unverified` stops too); the rest are `skipped`.

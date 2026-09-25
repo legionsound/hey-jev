@@ -15,6 +15,12 @@ _owner = None  # who started the current sound, so a sample's Stop never cuts of
 # Performance cues each voice provider understands, as written in reply lines ("[chuckling] There you go").
 CUES = {"fish": ["chuckling", "laughing", "sighing", "cheerful", "clear throat"]}
 CUE_MODES = ("all", "some", "none")
+# Every bracketed performance tag a provider's voice acts on, including ones our lines don't use. Only these are
+# cues: any other bracketed text ("use [optional] here") is dialogue and is always spoken as written.
+PERFORMANCE_TAGS = {"fish": set(CUES["fish"]) | {
+    "whispering", "shouting", "screaming", "soft tone", "in a hurry tone", "sobbing", "crying loudly", "panting",
+    "groaning", "crowd laughing", "background laughter", "audience laughing", "excited", "sad", "angry",
+    "surprised", "delighted", "joyful", "nervous", "worried", "confused", "curious", "proud", "relaxed"}}
 _TAG = re.compile(r"\[([a-z][a-z ]*)\]\s*")
 
 
@@ -45,13 +51,14 @@ def set_cues(provider, mode, on=()):
 
 
 def with_cues(text, provider="fish"):
-    """The line as this provider should hear it: cues switched off are removed. "all" leaves it untouched."""
+    """The line as this provider should hear it: cues switched off are removed. "all" leaves it untouched.
+    A line that was only switched-off cues comes back empty, and callers speak nothing for it."""
     c = cues(provider)
     if c["mode"] == "all":
         return text
-    keep = set(c["on"])
-    out = _TAG.sub(lambda m: m.group(0) if m.group(1) in keep else "", text)
-    return re.sub(r"\s{2,}", " ", out).strip() or text.strip()
+    keep, tags = set(c["on"]), PERFORMANCE_TAGS.get(provider, set())
+    out = _TAG.sub(lambda m: "" if m.group(1) in tags and m.group(1) not in keep else m.group(0), text)
+    return re.sub(r"\s{2,}", " ", out).strip()
 
 
 def volume():

@@ -347,7 +347,8 @@ def prepare_reminder(t, said):
         raw = r.json()["choices"][0]["message"]["content"]
         data = json.loads(raw[raw.index("{"):raw.rindex("}") + 1])
         t["label"] = data.get("label") or t["label"]
-        fetch_tts(voice_output.with_cues(data["alert"], "fish"))  # cache the audio now, as it will be spoken
+        if voice_output.with_cues(data["alert"], "fish"):
+            fetch_tts(voice_output.with_cues(data["alert"], "fish"))  # cache the audio now, as it will be spoken
         t["line"] = data["alert"]
         print(f"\n  reminder ready: {t['label']!r} -> {t['line']!r}")
     except Exception as e:
@@ -492,7 +493,10 @@ def play_sample(op, hold):
 def speak(text):
     if voice_output.muted() or voice_output.volume() == 0:
         return 0
-    path, ms, cached = fetch_tts(voice_output.with_cues(text, "fish"))
+    line = voice_output.with_cues(text, "fish")
+    if not line:
+        return 0  # nothing left to say once the switched-off cues are gone
+    path, ms, cached = fetch_tts(line)
     voice_output.play(path)
     return ms
 
@@ -506,8 +510,11 @@ def warm_cache():
                 continue  # lines with a live value are generated when needed
             if voice_output.muted():
                 return
+            spoken = voice_output.with_cues(line, "fish")
+            if not spoken:
+                continue
             try:
-                made += 0 if fetch_tts(voice_output.with_cues(line, "fish"))[2] else 1
+                made += 0 if fetch_tts(spoken)[2] else 1
             except Exception as e:
                 print(f"  cache miss for {line!r}: {e}")
     if made:

@@ -33,6 +33,18 @@ class CueTests(unittest.TestCase):
         self.assertEqual(voice_output.with_cues("[clear throat] Sorry, say that again?"), "Sorry, say that again?")
         self.assertEqual(voice_output.with_cues("[whispering] psst"), "psst")  # a cue we don't list is still a cue
 
+    def test_a_line_of_only_cues_is_empty_and_brackets_that_arent_cues_stay(self):
+        voice_output.set_cues("fish", "none")
+        self.assertEqual(voice_output.with_cues("[laughing]"), "")
+        self.assertEqual(voice_output.with_cues("Use [optional] for this argument"), "Use [optional] for this argument")
+        self.assertEqual(voice_output.with_cues("[sighing] Use [optional] here"), "Use [optional] here")
+        with patch.object(voice_output, "play") as play, patch("siri.fetch_tts") as fetch, \
+                patch.object(voice_output, "muted", lambda: False), patch.object(voice_output, "volume", lambda: 1.0):
+            import siri
+            self.assertEqual(siri.speak("[laughing]"), 0)
+        fetch.assert_not_called()
+        play.assert_not_called()
+
     def test_some_keeps_only_the_chosen_cues(self):
         voice_output.set_cues("fish", "some", ["cheerful", "not a cue"])
         self.assertEqual(voice_output.cues("fish"), {"mode": "some", "on": ["cheerful"]})

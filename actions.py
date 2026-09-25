@@ -480,6 +480,25 @@ def _screen_target(snap, item):
             "confirm": bool(RISKY.search(item.label))}
 
 
+def _choice(snap, item):
+    """A spoken option ("name (where)") that keeps its exact target, so a later "the first one" presses exactly it."""
+    return {"name": f"{item.label} ({_where(item, snap.window_frame)})", "target": _screen_target(snap, item)}
+
+
+def resolve_pinned(t):
+    """An answer to "which one?": the exact control offered then, only if it is still there, unchanged."""
+    deadline = resolve_deadline()
+    try:
+        snap = screen.observe(pid=t["pid"], ocr=False, deadline=deadline)
+    except (screen.Unavailable, screen.TimedOut, screen.Wedged) as exc:
+        return ("none", f"can't read the screen: {exc}")
+    item = next((i for i in snap.items if i.token == t["element"]), None)
+    if ((snap.started, snap.window_token) != (t["started"], t["window"]) or item is None or not _live(item)
+            or [round(v) for v in item.frame] != t["frame"] or (item.role, item.label) != (t["role"], t["label"])):
+        return ("none", "that one isn't on screen anymore")
+    return ("target", _screen_target(snap, item))
+
+
 def _live(item):
     return item.source != "ocr" and item.pressable and item.enabled
 
@@ -525,12 +544,22 @@ def describe_cards(controls, context, frame):
     out = []
     for c in controls:
         x, y, w, h = c.frame
+        top, bottom = y - CARD_ABOVE, y + h + CARD_BELOW
+        for o in shareable:  # a card ends where the next like control starts: the row above or below is its own card
+            ox, oy, ow, oh = o.frame
+            if (o is c or o.role != c.role or min(w, ow) < 0.6 * max(w, ow)  # a short channel link isn't a peer
+                    or min(h, oh) < 0.8 * max(h, oh) or min(x + w, ox + ow) - max(x, ox) < 0.5 * min(w, ow)):
+                continue
+            if oy >= y + h / 2:
+                bottom = min(bottom, oy)
+            elif oy + oh <= y + h / 2:
+                top = max(top, oy + oh)
         near = []
         for o in shareable:
             if o.label == c.label or o.from_value or o.secure:  # never a field's or document's value
                 continue
             ox, oy = o.frame[0] + o.frame[2] / 2, o.frame[1] + o.frame[3] / 2
-            if x - CARD_SIDE <= ox <= x + w + CARD_SIDE and y - CARD_ABOVE <= oy <= y + h + CARD_BELOW:
+            if x - CARD_SIDE <= ox <= x + w + CARD_SIDE and top <= oy <= bottom:
                 near.append((abs(oy - (y + h / 2)), o.label[:60]))
         words = [t for _, t in sorted(near)][:CARD_WORDS]
         out.append(f"“{c.label[:100]}”" + (f", near: {' · '.join(words)}" if words else "") + f", {_where(c, frame)}")
@@ -539,6 +568,8 @@ def describe_cards(controls, context, frame):
 
 def resolve_screen_press(args):
     """A number from the last list the user saw, or a spoken control name, to one exact control the app declared."""
+    if "pinned" in args:
+        return resolve_pinned(args["pinned"])
     deadline = resolve_deadline()
     try:
         snap = screen.observe(ocr=False, deadline=deadline)
@@ -600,7 +631,7 @@ def resolve_screen_press(args):
     if not exact:
         return ("none", "nothing on screen does that" if intent else "no control by that name")
     if len({i.token for i in exact}) > 1:
-        return ("choices", [{"name": f"{i.label} ({_where(i, snap.window_frame)})"} for i in exact[:4]])
+        return ("choices", [_choice(snap, i) for i in exact[:4]])
     return ("target", _screen_target(snap, exact[0]))
 
 
@@ -1049,6 +1080,8 @@ def resolve_screen_pick(args):
     """"the third video", "the last result", "the video in the bottom-right". Which on-screen controls are videos
     (results, songs…) is Jev's call, one batched question over the pressable controls' names; counting and place
     are the code's. The pick becomes an ordinary exact-element press target."""
+    if "pinned" in args:
+        return resolve_pinned(args["pinned"])
     deadline = resolve_deadline()
     try:
         snap = screen.observe(ocr=False, deadline=deadline)
@@ -1074,7 +1107,7 @@ def resolve_screen_pick(args):
             return ("none", f"no {noun}s on screen")
         # Jev judges every item, PICK_MAX per call (jev skill: batch within limits, never silently truncate)
         pool = reading_order(pool)
-        labels = [i.label for i in pool]
+        labels = describe_cards(pool, snap, snap.window_frame)  # each name with its channel and nearby words
         got = []
         for k in range(0, len(labels), PICK_MAX):
             part = labels[k:k + PICK_MAX]
@@ -1089,11 +1122,11 @@ def resolve_screen_pick(args):
         unsure = [i for i, (yes, conf) in zip(pool, got) if conf < PICK_GATE]  # neither a match nor a non-match
     if not group:
         if unsure:
-            return ("choices", [{"name": f"{i.label} ({_where(i, snap.window_frame)})"} for i in unsure[:4]])
+            return ("choices", [_choice(snap, i) for i in unsure[:4]])
         return ("none", f"no {noun}s on screen")
 
     def ask(items):  # an unsure item could change the answer: ask rather than count past it
-        return ("choices", [{"name": f"{i.label} ({_where(i, snap.window_frame)})"} for i in items[:4]])
+        return ("choices", [_choice(snap, i) for i in items[:4]])
     # One order for the whole pool, filtered, never regrouped: rows form around their tallest item, so ordering a
     # subset can reorder what's left (Astra, 2026-09-25).
     sure_ids, unsure_ids = {id(i) for i in group}, {id(i) for i in unsure}

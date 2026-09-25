@@ -16,6 +16,7 @@ LEDGER_MAX = 10_000
 CONFIRM_TTL = 60.0
 POLL = 0.2
 TIEBREAK_EFFECTS = ("open", "quit")  # app.open / app.quit: the duplicate-app chooser
+ANSWER_WINDOW = 45.0  # seconds a "which one?" stays answerable
 PENDING_WAIT = 10.0  # how long a new dispatch waits for an earlier, still-outstanding effect before refusing
 _local = threading.local()
 
@@ -49,6 +50,7 @@ class Engine:
         self.tiebreak, self.threshold = tiebreak, threshold
         self.on_event = on_event or (lambda *a: None)
         self.interrupt_answer = None  # set by the app: stops an answer backend that is blocked mid-request
+        self.offered = None  # the last "which one?" with exact targets: {"action", "choices", "until"}
         self.actions = actions
         self.effect_pending = pending  # an earlier effect that may still land holds every later dispatch
         self.task_jev = None  # (state_text, questions) -> answers: Jev for multi-step tasks, set by the app
@@ -235,7 +237,16 @@ class Engine:
     def _run(self, rec):
         self._emit("start", self._view(rec), None)
         t = time.monotonic()
-        kind, payload = planner.plan(rec["text"], self.classify, can_answer=self.answer is not None)
+        with self.lock:
+            offered, self.offered = self.offered, None  # an answer is good once; any other command drops the question
+        pick = None
+        if offered and time.monotonic() < offered["until"]:
+            pick = planner.answer_pick(rec["text"], [c["name"] for c in offered["choices"]])
+        if pick is not None:
+            kind, payload = "steps", [{"clause": rec["text"], "action": offered["action"],
+                                       "args": {"pinned": offered["choices"][pick]["target"]}}]
+        else:
+            kind, payload = planner.plan(rec["text"], self.classify, can_answer=self.answer is not None)
         diagnostics.record(rec["id"], "plan", kind, (time.monotonic() - t) * 1000,
                            steps=[s["action"] for s in payload] if kind == "steps" else None,
                            detail=payload if kind != "steps" else None)
@@ -549,6 +560,9 @@ class Engine:
         picked = None
         if got[0] == "choices" and action["effect"] not in TIEBREAK_EFFECTS:  # only duplicate apps are Jev's to break
             self._set(step, state="needs_clarification", facts={"choices": got[1]})
+            if got[1] and all(isinstance(c.get("target"), dict) for c in got[1]):  # "the first one" can answer it
+                with self.lock:
+                    self.offered = {"action": act, "choices": got[1], "until": time.monotonic() + ANSWER_WINDOW}
             return "needs_clarification"
         if got[0] == "choices":
             t = time.monotonic()

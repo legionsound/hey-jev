@@ -197,7 +197,8 @@ class PickAuditTests(unittest.TestCase):
     def pick(self, args, flags, truncated=False, n=3):
         from types import SimpleNamespace as NS
         snap = NS(items=self.items(n), app="Browser", window_frame=(0, 0, 500, 500), pid=1, started=1,
-                  window_token="w", truncated=truncated)
+                  window_token="w", truncated=truncated, field_frames=[], text_frames=[],
+                  walk_complete=True)
         with patch.object(actions.screen, "observe", return_value=snap), \
                 patch.object(actions, "CLASSIFY_ITEMS", return_value=flags), \
                 patch.object(actions, "_live", lambda i: True):
@@ -224,7 +225,7 @@ class PickAuditTests(unittest.TestCase):
                              frame=f, token=n, secure=False)
         items = [mk("A", (0, 0, 50, 100)), mk("B", (300, 40, 50, 10)), mk("C", (400, 20, 50, 10))]
         snap = NS(items=items, app="Browser", window_frame=(0, 0, 500, 500), pid=1, started=1, window_token="w",
-                  truncated=False)
+                  truncated=False, field_frames=[], text_frames=[], walk_complete=True)
         with patch.object(actions.screen, "observe", return_value=snap), patch.object(actions, "_live", lambda i: True), \
                 patch.object(actions, "CLASSIFY_ITEMS", return_value=[(True, .99), (True, .99), (False, .55)]):
             self.assertEqual(actions.resolve_screen_pick({"noun": "video", "ordinal": -1})[0], "choices")

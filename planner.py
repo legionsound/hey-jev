@@ -536,3 +536,32 @@ def plan(text, classify, can_answer=False):
                 browser = bid
         steps.append(got)
     return ("steps", steps)
+
+
+ANSWER_FILLER = re.compile(r"^\W*(?:(?:yes|yeah|ok(?:ay)?|um|uh|please|click|press|tap|play|open|pick|choose|select|go\s+with|"
+                           r"i\s+(?:mean|meant|want)|the|that|this)\s+)*|(?:\s+(?:one|video|please|thanks?))*[\s.!?]*$", re.I)
+
+
+def answer_pick(text, names):
+    """The user's reply to "which one?": "the first one", "second", "the last one", "number 2", or words from exactly
+    one option's name. -> index into names, or None when the reply isn't clearly an answer (it's then a new command)."""
+    said = ANSWER_FILLER.sub("", text or "").strip().lower()
+    if not said or not names:
+        return None
+    m = re.fullmatch(r"(?:number\s+|#\s*)?(\d{1,2})(?:st|nd|rd|th)?", said)
+    if m:
+        k = int(m[1])
+        return k - 1 if 1 <= k <= len(names) else None
+    if said in ("last", "last one"):
+        return len(names) - 1
+    if said in ORDINALS:
+        k = ORDINALS[said]
+        return k - 1 if k <= len(names) else None
+    if len(said) < 3 or said in ("the", "that", "this", "one", "yes", "yeah", "okay", "please"):
+        return None
+    hits = [n for n, name in enumerate(names) if f" {said} " in f" {screen_norm(name)} "]
+    return hits[0] if len(hits) == 1 else None
+
+
+def screen_norm(text):
+    return " ".join(re.sub(r"[^\w\s]", " ", (text or "").lower()).split())

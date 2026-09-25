@@ -1052,7 +1052,8 @@ class PickTests(unittest.TestCase):
     def run_pick(self, args, current, answer=None, policy=None):
         def classify(noun, labels):
             self.sent.append((noun, list(labels)))
-            return answer(labels) if answer else [(l.startswith("Video"), 0.95) for l in labels]
+            names = [card_name(c) for c in labels]
+            return answer(names) if answer else [(l.startswith("Video"), 0.95) for l in names]
         fns = {"observe": lambda pid=None, ocr=True, deadline=None: current,
                "signature": lambda pid, d: {"n": len(self.presses)},
                "element_state": lambda ref, d: {"v": str(len(self.presses))},
@@ -1066,6 +1067,39 @@ class PickTests(unittest.TestCase):
                                                                           "args": args}])):
             eng = Engine(lambda _: {}, policy=lambda: {**actions.DEFAULT_POLICY, "click": "auto", **(policy or {})})
             return eng.wait(eng.submit("c", "cli")["id"], 10)
+
+    def test_which_one_can_be_answered_and_presses_exactly_that_one(self):
+        g = self.grid()
+        fns = {"observe": lambda pid=None, ocr=True, deadline=None: g,
+               "signature": lambda pid, d: {"n": len(self.presses)},
+               "element_state": lambda ref, d: {"v": str(len(self.presses))},
+               "press": lambda ref, d: self.presses.append(ref) or 0}
+        for name, fn in fns.items():
+            p = patch.object(screen, name, fn)
+            p.start()
+            self.addCleanup(p.stop)
+        plans = []
+
+        def plan(text, *a, **k):
+            plans.append(text)
+            return ("steps", [{"clause": text, "action": "screen.pick", "args": {"noun": "video", "ordinal": 0}}])
+        classify = lambda noun, cards: [(card_name(c).startswith("Video"), 0.95) for c in cards]
+        with patch.object(actions, "CLASSIFY_ITEMS", classify), patch.object(planner, "plan", plan):
+            eng = Engine(lambda _: {}, policy=lambda: {**actions.DEFAULT_POLICY, "click": "auto"})
+            v = eng.wait(eng.submit("play the video", "cli")["id"], 10)
+            self.assertEqual((v["state"], self.presses), ("needs_clarification", []))
+            v = eng.wait(eng.submit("the second one", "cli")["id"], 10)
+            self.assertEqual((v["state"], self.presses), ("completed", [g.items[2].ref]))  # Video B, second offered
+            self.assertEqual(plans, ["play the video"])  # the answer never went through the planner
+            v = eng.wait(eng.submit("the first one", "cli")["id"], 10)  # answered once: now it's a new command
+            self.assertEqual(plans, ["play the video", "the first one"])
+
+    def test_answer_words(self):
+        names = ["Enter the Dome (bottom-left)", "Soup in ten minutes (top-left)", "Knit a scarf (middle-right)"]
+        for said, want in [("the first one", 0), ("second", 1), ("the last one", 2), ("number 3", 2), ("2", 1),
+                           ("the soup one", 1), ("click the Knit a scarf one", 2), ("the fourth one", None),
+                           ("open Safari", None), ("the", None), ("t", None)]:
+            self.assertEqual(planner.answer_pick(said, names), want, said)
 
     def test_the_words(self):
         cases = {"click the third video": {"noun": "video", "ordinal": 3},
@@ -1162,6 +1196,11 @@ class PickTests(unittest.TestCase):
         self.assertEqual((v["steps"][0]["detail"], self.presses), ("that app isn't in front", []))
 
 
+def card_name(card):
+    """The control's own quoted name from a Jev card."""
+    return card.split("”")[0].lstrip("“")
+
+
 class CardTests(unittest.TestCase):
     def test_a_card_carries_the_words_around_a_control_and_where_it_is(self):
         title = item(1, "Opus 5.5 is here", role="AXLink", frame=(600, 100, 250, 20))
@@ -1186,6 +1225,58 @@ class CardTests(unittest.TestCase):
         s.window_frame = (0, 0, 900, 800)
         cards = actions.describe_cards([title], s, s.window_frame)
         self.assertIn("near: Frame Set", cards[0])
+
+    def layout(self, rows):
+        s = snap([item(n + 1, label, role=role, frame=frame) for n, (label, role, frame) in enumerate(rows)])
+        s.window_frame = (0, 0, 1200, 900)
+        return s
+
+    def card_for(self, s, label):
+        target = next(i for i in s.items if i.label == label)
+        return actions.describe_cards([target], s, s.window_frame)[0]
+
+    def test_grid_layout_channel_under_title_stays_in_its_column(self):
+        s = self.layout([("Enter the Dome", "AXLink", (0, 100, 250, 40)), ("Blender", "AXLink", (0, 144, 80, 14)),
+                         ("Soup in ten minutes", "AXLink", (300, 100, 250, 40)), ("Cooking", "AXLink", (300, 144, 80, 14))])
+        self.assertIn("Blender", self.card_for(s, "Enter the Dome"))
+        self.assertNotIn("Blender", self.card_for(s, "Soup in ten minutes"))
+
+    def test_list_layout_thumbnail_left_title_and_channel_right(self):
+        rows = []
+        for k, (title, ch) in enumerate([("Enter the Dome", "Blender"), ("Soup in ten minutes", "Cooking"),
+                                         ("Knit a scarf", "Crafts")]):
+            y = 100 + 110 * k
+            rows += [(f"thumb {k}", "AXImage", (0, y, 180, 100)), (title, "AXLink", (200, y, 400, 20)),
+                     (ch, "AXLink", (200, y + 26, 90, 14))]
+        s = self.layout(rows)
+        self.assertIn("Cooking", self.card_for(s, "Soup in ten minutes"))
+        self.assertNotIn("Blender", self.card_for(s, "Soup in ten minutes"))
+        self.assertNotIn("Crafts", self.card_for(s, "Soup in ten minutes"))
+
+    def test_creator_line_above_the_title(self):
+        s = self.layout([("Blender", "AXLink", (0, 100, 80, 14)), ("Enter the Dome", "AXLink", (0, 118, 300, 20))])
+        self.assertIn("Blender", self.card_for(s, "Enter the Dome"))
+
+    def test_dense_non_video_list_rows_never_share_words(self):
+        names = ["Invoice.pdf", "Blender notes.txt", "Taxes 2026.xlsx", "Photo.heic"]
+        s = self.layout([(n, "AXRow", (0, 100 + 22 * k, 500, 20)) for k, n in enumerate(names)])
+        for n in names:
+            card = self.card_for(s, n)
+            self.assertNotIn("near:", card, card)  # each row is its own card; the next row isn't context
+
+    def test_a_pick_matches_by_channel_alone_and_not_its_neighbour(self):
+        s = self.layout([("Enter the Dome", "AXLink", (0, 100, 250, 40)), ("Blender", "AXLink", (0, 144, 80, 14)),
+                         ("Soup in ten minutes", "AXLink", (300, 100, 250, 40)), ("Cooking", "AXLink", (300, 144, 80, 14))])
+        sent = []
+
+        def classify(noun, cards):  # a stand-in Jev: a title card whose own name or surrounding words say Blender
+            sent.extend(cards)
+            return [(card_name(c) not in ("Blender", "Cooking") and "Blender" in c, 0.95) for c in cards]
+        with patch.object(screen, "observe", lambda pid=None, ocr=True, deadline=None: s), \
+                patch.object(actions, "CLASSIFY_ITEMS", classify):
+            got = actions.resolve_screen_pick({"noun": "video", "kind": "Blender", "ordinal": 0})
+        self.assertEqual((got[0], got[1]["label"]), ("target", "Enter the Dome"))
+        self.assertTrue(any(c.startswith("“Enter the Dome”, near: Blender") for c in sent))
 
     def test_the_chooser_gets_cards_and_presses_that_exact_one(self):
         with patch.object(diagnostics, "record", lambda *a, **k: None):

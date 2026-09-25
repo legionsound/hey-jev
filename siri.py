@@ -233,12 +233,16 @@ def task_jev(state, questions):
 
 
 def classify_items(noun, labels):
-    """One Jev call: for each on-screen control name, is it one {noun}? -> [(bool, confidence)] in order.
-    Only the control names are sent."""
+    """One Jev call: for each on-screen control card (its name, the shareable words right around it, where it sits),
+    is it one {noun}? -> [(bool, confidence)] in order. The words around it let "the Blender video" match a video
+    whose channel, not title, says Blender."""
     from engine import current_rid
     state = json.dumps({"candidates": [{"id": f"c{k}", "text": l} for k, l in enumerate(labels)]}, ensure_ascii=False)
-    q = {f"c{k}": {"type": "noul", "instructions": f"Is candidate c{k} one {noun} on this page (not a channel name, "
-                                                     f"menu, button, duration, count or other part of the page)?"}
+    q = {f"c{k}": {"type": "noul", "instructions": f"Candidate c{k} is a control's quoted name, then the words right "
+                                                     f"around it (such as its channel) and where it is. Is the quoted "
+                                                     f"control itself one {noun}? Its name or the words around it may "
+                                                     f"say what it is. A channel name, menu, button, duration or count "
+                                                     f"is not one."}
          for k in range(len(labels))}
     ans, ms, cost = jev(state, q)
     diagnostics.record(current_rid(), "classify_items", "ok", ms, noun=noun, options=len(labels))

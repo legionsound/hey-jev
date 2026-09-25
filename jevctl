@@ -5,7 +5,8 @@
   jevctl command --text-file cmd.txt     (use - for stdin)
   jevctl status ID [--wait 30]
   jevctl cancel ID
-  jevctl trials [--since MINUTES] [--last N] [--json]   (reads the log; the app needn't be running)
+  jevctl trials [--since MINUTES] [--last N] [--json]   (reads the log; the app needn't be running;
+                                                       filters pick whole requests by first event, with their build)
 
 Exit: 0 completed/answered, 1 other final state, 2 still pending (query status with the same id), 3 app unavailable.
 """
@@ -66,8 +67,8 @@ def main():
     ca = sub.add_parser("cancel")
     ca.add_argument("id")
     tr = sub.add_parser("trials", help="readable history of recent attempts, from the diagnostics log")
-    tr.add_argument("--since", type=float, help="only the last N minutes")
-    tr.add_argument("--last", type=int, help="only the last N requests")
+    tr.add_argument("--since", type=float, help="only requests whose first event is within the last N minutes")
+    tr.add_argument("--last", type=int, help="only the N requests that began most recently")
     tr.add_argument("--json", action="store_true")
     a = ap.parse_args()
     if a.op == "trials":

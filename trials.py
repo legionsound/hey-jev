@@ -14,13 +14,20 @@ LOW = 0.65  # the planner's gate: answers below it are marked
 
 
 def load(path=LOG, since_minutes=None, last=None):
-    """-> [startup records and request dicts] in time order."""
+    """-> request dicts oldest first, each run of one instance's requests headed by that instance's startup.
+
+    Requests are rebuilt whole from the full log first, keyed by (instance, rid) so a reused id after a restart
+    stays two attempts, and each carries its instance's startup as "build". Filters then pick whole requests by
+    their first event: --since keeps those that began within the window, --last the N that began most recently.
+    The heading startup is kept even when it is older than the window.
+    """
     cutoff = None
     if since_minutes is not None:
         cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=since_minutes)
-    events, requests = [], {}
+    startups, requests = {}, {}
     try:
-        lines = open(path, encoding="utf-8").read().splitlines()
+        with open(path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
     except FileNotFoundError:
         return []
     for line in lines:
@@ -29,31 +36,39 @@ def load(path=LOG, since_minutes=None, last=None):
         except ValueError:
             continue
         ts = datetime.datetime.fromisoformat(d.get("ts", "1970-01-01T00:00:00+00:00"))
-        if cutoff and ts < cutoff:
-            continue
+        inst = d.get("instance")
         if d.get("stage") == "startup" and d.get("outcome") == "starting":
-            events.append({"kind": "startup", "ts": ts, "revision": d.get("revision"), "dirty": d.get("dirty"),
-                           "instance": d.get("instance"), "backend": d.get("transcription")})
+            startups.setdefault(inst, {"kind": "startup", "ts": ts, "revision": d.get("revision"),
+                                       "dirty": d.get("dirty"), "instance": inst, "backend": d.get("transcription")})
             continue
         rid = d.get("rid")
         if not rid:
             continue
-        r = requests.get(rid)
+        r = requests.get((inst, rid))
         if r is None:
-            r = requests[rid] = {"kind": "request", "ts": ts, "rid": rid, "instance": d.get("instance"), "records": []}
-            events.append(r)
+            r = requests[inst, rid] = {"kind": "request", "ts": ts, "rid": rid, "instance": inst, "records": []}
         r["records"].append(d)
+    reqs = sorted(requests.values(), key=lambda r: r["ts"])
+    for r in reqs:
+        r["build"] = startups.get(r["instance"])
+    if cutoff:
+        reqs = [r for r in reqs if r["ts"] >= cutoff]
     if last:
-        reqs = [e for e in events if e["kind"] == "request"][-last:]
-        keep = {id(e) for e in reqs}
-        first = reqs[0]["ts"] if reqs else None
-        events = [e for e in events if id(e) in keep or (e["kind"] == "startup" and first and e["ts"] <= first)][-(last + 1):]
+        reqs = reqs[-last:]
+    events, prev = [], object()
+    for r in reqs:
+        if r["instance"] != prev and r["build"]:
+            events.append(r["build"])  # repeated if instances interleave, so each block reads under its own build
+        prev = r["instance"]
+        events.append(r)
     return events
 
 
 def summarize(r):
     """One request -> a dict of the parts a person reads."""
-    s = {"rid": r["rid"][:8], "time": r["ts"].astimezone().strftime("%H:%M:%S"), "steps": [], "jev": []}
+    b = r.get("build") or {}
+    s = {"rid": r["rid"], "instance": r["instance"], "build": b.get("revision"), "dirty": b.get("dirty"),
+         "time": r["ts"].astimezone().strftime("%H:%M:%S"), "steps": [], "jev": []}
     for d in r["records"]:
         stage, out = d.get("stage"), d.get("outcome")
         if stage == "submit":

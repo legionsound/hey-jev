@@ -163,13 +163,24 @@ def choose_folder(prompt):
     return panel.URL().path() if panel.runModal() == 1 else None  # NSModalResponseOK
 
 
+def open_url(url):
+    """Open a URL (System Settings deep links). Tests replace this so nothing opens."""
+    AppKit.NSWorkspace.sharedWorkspace().openURL_(AppKit.NSURL.URLWithString_(url))
+
+
+def run_async(work):
+    """Run blocking work off the main thread. Tests replace this to run it inline."""
+    threading.Thread(target=work, daemon=True).start()
+
+
 def show_settings_window(sheet):
     """Bring Settings forward. Tests replace this so no window appears."""
     sheet.makeKeyAndOrderFront_(None)
     NSApp.activateIgnoringOtherApps_(True)
 SETTINGS_PANES = (("providers", "Providers", "key.fill"), ("answers", "Answers", "sparkles"),
                   ("voice", "Voice", "speaker.wave.2.fill"), ("confirm", "Confirmations", "checkmark.shield"),
-                  ("apps", "Apps", "square.grid.2x2"), ("transcription", "Transcription", "waveform"))
+                  ("apps", "Apps", "square.grid.2x2"), ("transcription", "Transcription", "waveform"),
+                  ("permissions", "Permissions", "lock.shield"))
 
 
 class FlippedView(NSView):
@@ -215,6 +226,72 @@ def form_group(parent, top, header, rows, row_h=40):
             line.setBoxType_(2)  # separator
             box.addSubview_(line)
     return top + row_h * len(rows) + 22
+
+
+PERM_ROW_H, PERM_STATUS_W, PERM_REQUEST_W, PERM_OPEN_W = 50, 92, 84, 110
+
+
+def permission_group(parent, top, target):
+    """The Permissions pane: one row per permission with its name, why (or what to do next), live status, and its
+    own Request and Open Settings buttons. Returns ({key: {"why", "status", "request", "open"}}, y below it)."""
+    import permissions
+    width = PANE_W - 2 * GROUP_X
+    rows = permissions.rows()
+    box = GroupView.alloc().initWithFrame_(NSMakeRect(GROUP_X, top, width, PERM_ROW_H * len(rows)))
+    parent.addSubview_(box)
+    left_w = width - 28 - PERM_STATUS_W - PERM_REQUEST_W - PERM_OPEN_W - 16
+    out = {}
+    for i, (key, name, why, _anchor) in enumerate(rows):
+        y = i * PERM_ROW_H
+        box.addSubview_(text(name, NSMakeRect(14, y + 8, left_w, 17), 13))
+        why_view = text(why, NSMakeRect(14, y + 27, left_w, 15), 11, NSColor.secondaryLabelColor())
+        why_view.setToolTip_(why)
+        box.addSubview_(why_view)
+        x = width - 14 - PERM_OPEN_W
+        opener = NSButton.buttonWithTitle_target_action_("Open Settings", target, "openPermissionPane:")
+        opener.setFrame_(NSMakeRect(x, y + 11, PERM_OPEN_W, 28))
+        opener.setIdentifier_(f"perm-open:{key}")
+        opener.setToolTip_(f"Opens System Settings at Privacy & Security, {_anchor_title(_anchor)}.")
+        x -= PERM_REQUEST_W + 4
+        request = NSButton.buttonWithTitle_target_action_("Request", target, "requestPermission:")
+        request.setFrame_(NSMakeRect(x, y + 11, PERM_REQUEST_W, 28))
+        request.setIdentifier_(f"perm-request:{key}")
+        request.setToolTip_(f"Shows macOS's permission prompt for {name}.")
+        x -= PERM_STATUS_W + 8
+        state = text("Checking…", NSMakeRect(x, y + 16, PERM_STATUS_W, 17), 13, NSColor.secondaryLabelColor())
+        state.setAlignment_(2)
+        for view in (state, request, opener):
+            box.addSubview_(view)
+        if i:
+            line = NSBox.alloc().initWithFrame_(NSMakeRect(14, y, width - 28, 1))
+            line.setBoxType_(2)
+            box.addSubview_(line)
+        out[key] = {"why": why_view, "status": state, "request": request, "open": opener}
+    return out, top + PERM_ROW_H * len(rows) + 22
+
+
+def _anchor_title(anchor):
+    return {"SpeechRecognition": "Speech Recognition", "ScreenCapture": "Screen & System Audio Recording"}.get(
+        anchor, anchor)
+
+
+def permission_row_text(key, name, why, status, running, acted):
+    """(status label, second line, Request enabled) for one row, from observed status only. acted: the user pressed
+    Request or Open Settings for this row in this Settings window."""
+    import permissions
+    label_text = permissions.LABELS.get(status, "Unknown")
+    app = name.split(": ", 1)[1] if key.startswith("automation:") else None
+    if app and (status == "not_running" or not running):
+        if key == "automation:com.apple.systemevents":  # a background helper: macOS starts it on first use
+            return label_text, "macOS asks the first time it's used.", False
+        return label_text, f"Open {app}, then Request.", False
+    if status == "restricted":
+        return label_text, "Blocked by a profile or Screen Time.", False
+    if key == "screen" and status == "denied" and acted:
+        return label_text, "Turned it on? Quit and reopen Hey Jev.", True
+    if status == "denied" and key not in ("screen", "accessibility"):  # answered once, macOS won't prompt again
+        return label_text, "Turn it on in System Settings.", False
+    return label_text, why, status != "granted"
 
 
 def content_bottom(view):
@@ -408,7 +485,7 @@ def status_panel(target):
     text.setIdentifier_("status")
     content.addSubview_(text)
     for x, w, title, action, ident in ((16, 120, "I turned it on", "permissionEnabled:", "enabled"),
-                                       (190, 96, "Open Settings", "openPermissionSettings:", "open"),
+                                       (146, 134, "Open Permissions", "openPermissionSettings:", "open"),
                                        (290, 74, "Recheck", "recheckInspect:", "recheck")):
         b = NSButton.buttonWithTitle_target_action_(title, target, action)
         b.setFrame_(NSMakeRect(x, 12, w, 28))
@@ -728,8 +805,7 @@ class AppDelegate(NSObject):
     @objc.python_method
     def _show_settings(self):
         if getattr(self, "settings_sheet", None):
-            self.settings_sheet.makeKeyAndOrderFront_(None)
-            NSApp.activateIgnoringOtherApps_(True)
+            show_settings_window(self.settings_sheet)
             return
         sheet = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(0, 0, PANE_W, PANE_H + FOOTER_H),
@@ -1061,6 +1137,13 @@ class AppDelegate(NSObject):
                        "isn't available it stays off and says why, and never sends your voice online.")
         self._show_backend()
 
+        pm = panes["permissions"]
+        self.perm_rows, y = permission_group(pm, 20, self)
+        self.perm_acted, self.perm_status = set(), {}
+        footnote(pm, y, "Request shows macOS's own prompt; once you've answered it, macOS won't ask again, so use Open "
+                        "Settings to change it. Automation rows need that app open. Status updates when you come back "
+                        "to this window.")
+
         self.settings_message = text("", NSMakeRect(20, 18, PANE_W - 240, 20), 12, NSColor.systemRedColor())
         content.addSubview_(self.settings_message)
         for title, action, x in (("Cancel", "closeSettings:", PANE_W - 196), ("Save", "saveSettings:", PANE_W - 104)):
@@ -1075,6 +1158,7 @@ class AppDelegate(NSObject):
         self._sync_voice_pane()
         sheet.center()
         show_settings_window(sheet)
+        self._refresh_permissions()
         if get_secret("OPENROUTER_API_KEY"):
             self.refreshModels_(None)
 
@@ -1098,9 +1182,80 @@ class AppDelegate(NSObject):
         return item
 
     def showPane_(self, item):
-        ident = item.itemIdentifier()
+        self._select_pane(item.itemIdentifier())
+
+    @objc.python_method
+    def _select_pane(self, ident):
+        self.settings_sheet.toolbar().setSelectedItemIdentifier_(ident)
         self.settings_tabs.selectTabViewItemWithIdentifier_(ident)
         self.settings_sheet.setTitle_(next(p[1] for p in SETTINGS_PANES if p[0] == ident))
+        if ident == "permissions":
+            self._refresh_permissions()
+
+    # Permissions pane. Status is read off the main thread on window focus and after each Request; no timers.
+    @objc.python_method
+    def _refresh_permissions(self):
+        if not getattr(self, "perm_rows", None):
+            return
+        import permissions
+        op = self.ops["perm"] = next(OPS)
+
+        def work():
+            try:
+                found = permissions.snapshot()
+                up = {b: permissions.running(b) for b, *_ in permissions.AUTOMATION}
+            except Exception:
+                found, up = {}, {}
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                "permissionsRead:", {"op": op, "status": found, "running": up}, False)
+        run_async(work)
+
+    def permissionsRead_(self, payload):
+        if not getattr(self, "settings_sheet", None) or payload["op"] != self.ops.get("perm"):
+            return  # closed, or an older read: never paints over a newer one
+        import permissions
+        self.perm_status = dict(payload["status"])
+        for key, name, why, _anchor in permissions.rows():
+            row = self.perm_rows[key]
+            status = self.perm_status.get(key, "unknown")
+            up = payload["running"].get(key.split(":", 1)[1], False) if key.startswith("automation:") else True
+            label_text, line, enabled = permission_row_text(key, name, why, status, up, key in self.perm_acted)
+            row["status"].setStringValue_(label_text)
+            row["status"].setTextColor_(NSColor.systemGreenColor() if status == "granted" else
+                                        NSColor.secondaryLabelColor())
+            row["why"].setStringValue_(line)
+            row["why"].setToolTip_(line)
+            row["request"].setEnabled_(enabled)
+
+    def requestPermission_(self, sender):
+        import permissions
+        key = sender.identifier().split(":", 1)[1]
+        self.perm_acted.add(key)
+        sender.setEnabled_(False)
+        done = lambda: self.performSelectorOnMainThread_withObject_waitUntilDone_("permissionAsked:", key, False)
+        if key.startswith("automation:"):  # blocks until the prompt is answered
+            run_async(lambda: None if permissions.request(key, done) else done())
+            return
+        try:
+            permissions.request(key, done)
+        except Exception as exc:
+            self.perm_rows[key]["why"].setStringValue_(f"Couldn't ask: {type(exc).__name__}")
+            self._refresh_permissions()
+
+    def permissionAsked_(self, key):
+        if key == "dictation":
+            self.speechAccessDone_(None)  # the Transcription pane and a blocked recognizer see it too
+        self._refresh_permissions()
+
+    def openPermissionPane_(self, sender):
+        import permissions
+        key = sender.identifier().split(":", 1)[1]
+        self.perm_acted.add(key)
+        open_url(permissions.settings_url(key))
+
+    def windowDidBecomeKey_(self, notification):
+        if notification.object() is getattr(self, "settings_sheet", None):
+            self._refresh_permissions()
 
     def jevSourceChanged_(self, _sender):
         self._sync_key_rows()
@@ -1933,10 +2088,13 @@ class AppDelegate(NSObject):
         threading.Thread(target=work, daemon=True).start()
 
     def openPermissionSettings_(self, _sender):
-        pane = INSPECT_STATUS.get(getattr(self, "inspect_status", None), (None,))[0]
-        if pane:
-            import screen
-            AppKit.NSWorkspace.sharedWorkspace().openURL_(AppKit.NSURL.URLWithString_(screen.SETTINGS_PANES[pane]))
+        """The status panel's button: Hey Jev's own Permissions pane, where every permission has its buttons."""
+        self.showPermissions_(None)
+
+    def showPermissions_(self, _sender):
+        self.showSettings_(None)
+        if getattr(self, "settings_sheet", None):
+            self._select_pane("permissions")
 
     def permissionEnabled_(self, _sender):
         self.said_enabled = True

@@ -6,8 +6,8 @@ gate, confirmation policy, readback), and stops at the first step that isn't ver
 
 State sent to Jev: the goal, the app name, the numbered item texts with role and rough position, recent actions and
 what was already tried on this screen. Never field values or password fields: AX never labels an editable item by its
-value, and OCR lines inside any editable or secure field's frame are dropped. Limitation: a text field the app doesn't
-expose through Accessibility has no frame to exclude, so its text can reach Jev as an OCR line.
+value, and an OCR line is shared only when a complete field scan found no field under it and Accessibility vouches
+for its place as ordinary text. Text in regions nothing vouches for (including apps that expose nothing) stays local.
 Screen text is data only: it can't change the goal, the rules or what is allowed.
 """
 import json
@@ -49,16 +49,26 @@ def _overlaps(a, b):
     return ax < bx + bw and bx < ax + aw and ay < by + bh and by < ay + ah
 
 
+def _centre_in(frame, box):
+    x, y, w, h = frame
+    cx, cy = x + w / 2, y + h / 2
+    return box[0] <= cx <= box[0] + box[2] and box[1] <= cy <= box[1] + box[3]
+
+
 def shareable(snap):
-    """The items Jev may read. Every AX item (labels never come from field values). OCR lines only when the AX walk
-    was complete, and never one overlapping any editable or secure field (all of them, before any cap). When the walk
-    was cut short, unknown fields may exist, so no OCR text is shared at all. A field the app doesn't expose to
-    Accessibility can't be detected; its text could still be read off the pixels. -> (items, field_frames)"""
+    """The items Jev may read. Every AX item (labels never come from field values). An OCR line only when the field
+    scan was complete, it overlaps no editable or secure field, and Accessibility vouches for its place: its centre
+    lies in a region the app declares as ordinary text or a control. Text anywhere else, including in apps that
+    expose nothing, stays on the Mac. -> (items, field_frames)"""
     fields = list(snap.field_frames) + [i.frame for i in snap.items if i.role in FIELD_ROLES or i.secure]
     ocr_ok = snap.walk_complete
-    out = [i for i in snap.items
-           if i.source != "ocr" or (ocr_ok and not any(_overlaps(i.frame, f) for f in fields))]
-    return out[:MAX_ITEMS], fields
+
+    def allowed(i):
+        if i.source != "ocr":
+            return True
+        return (ocr_ok and not any(_overlaps(i.frame, f) for f in fields)
+                and any(_centre_in(i.frame, t) for t in snap.text_frames))
+    return [i for i in snap.items if allowed(i)][:MAX_ITEMS], fields
 
 
 def _where(item, frame):

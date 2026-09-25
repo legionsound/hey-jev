@@ -179,6 +179,7 @@ class Snapshot:
     window_ref: object = field(default=None, repr=False)
     started: str = ""  # process start time
     field_frames: list = field(default_factory=list, repr=False)  # every editable/secure field, before any cap
+    text_frames: list = field(default_factory=list, repr=False)  # regions Accessibility says are ordinary text
     walk_complete: bool = True  # False when the AX walk hit its node or time cap: unknown fields may exist
 
     @property
@@ -509,7 +510,7 @@ def observe(pid=None, ocr=True, deadline=None):
     try:
         field_scan = bounded(scan_fields, deadline, win)
     except TimedOut:
-        field_scan = ([], False)
+        field_scan = ([], False, [])
     t_ax = time.monotonic()
     texts, ocr_state = [], "off"
     if ocr:
@@ -524,10 +525,11 @@ def observe(pid=None, ocr=True, deadline=None):
         if i.source != "ocr":
             ref_extra = next((v for c in controls if c.ref is i.ref for v in [extra[id(c)]]), (True, False, False))
             i.enabled, i.from_value, i.secure = ref_extra
-    fields, fields_complete = field_scan
+    fields, fields_complete, text_frames = field_scan
     return Snapshot(pid, app, bundle, title, wframe, items[:MAX_ITEMS], truncated or len(items) > MAX_ITEMS, ocr_state,
                     {"ax": round((t_ax - t0) * 1000), "ocr": round((time.monotonic() - t_ax) * 1000)},
-                    window_ref=win, started=started, field_frames=fields, walk_complete=fields_complete)
+                    window_ref=win, started=started, field_frames=fields, walk_complete=fields_complete,
+                    text_frames=text_frames)
 
 
 def remember(snap):
@@ -696,29 +698,38 @@ def current_window(pid, deadline):
 
 
 FIELD_ROLES = ("AXTextField", "AXTextArea", "AXSearchField", "AXComboBox", "AXSecureTextField")
+TEXT_ROLES = ("AXStaticText", "AXHeading", "AXLink", "AXButton", "AXMenuItem", "AXMenuBarItem", "AXCell", "AXRow",
+              "AXCheckBox", "AXRadioButton", "AXPopUpButton", "AXTab", "AXImage")
 
 
 def scan_fields(win, node_cap=6000, time_cap=0.5):
-    """Every text or password field in the window, before any label, action, visibility or dedup filter.
-    -> (frames, complete). complete is False when the scan hit a cap or met a node whose role or a field whose frame
-    couldn't be read: then unknown fields may exist, and no text read off the pixels may be shared."""
-    frames, queue, seen, end, complete = [], [win], 0, time.monotonic() + time_cap, True
+    """Every text or password field in the window, and every region Accessibility says is ordinary, non-editable
+    text, before any label, action, visibility or dedup filter. Reads keep their status: an unreadable role,
+    subrole or child list, or a field without a frame, or a cap, makes the scan incomplete.
+    -> (field_frames, complete, text_frames)."""
+    fields, texts, queue, seen, end, complete = [], [], [win], 0, time.monotonic() + time_cap, True
     while queue:
         if seen >= node_cap or time.monotonic() >= end:
-            return frames, False
+            return fields, False, texts
         el = queue.pop(0)
         seen += 1
         rs, role = _read(el, "AXRole")
-        if rs != "ok":
-            complete = False
-            continue
         ss, sub = _read(el, "AXSubrole")
+        if rs != "ok" or ss not in ("ok", "absent"):
+            complete = False  # can't tell whether this is a (secure) field
+            continue
+        f = _frame(el)
         if str(role) in FIELD_ROLES or str(sub or "") == "AXSecureTextField":
-            f = _frame(el)
             if f is None:
                 complete = False
             else:
-                frames.append(f)
-        queue.extend(_children(el))
-    return frames, complete
+                fields.append(f)
+        elif str(role) in TEXT_ROLES and f is not None:
+            texts.append(f)
+        cs, kids = _read(el, "AXChildren")
+        if cs == "ok" and isinstance(kids, (list, tuple)) or hasattr(kids, "__iter__") and cs == "ok":
+            queue.extend(list(kids))
+        elif cs != "absent":
+            complete = False  # an unreadable subtree could hide a field
+    return fields, complete, texts
 

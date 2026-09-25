@@ -18,8 +18,10 @@ def item(n, label, source="ax", role="AXButton", frame=(10, 10, 80, 30), pressab
 WIN = object()
 
 
-def snap(items, window=WIN, pid=7, started="s"):
-    return screen.Snapshot(pid, "Pad", "com.pad", "Pad", (0, 0, 400, 300), items, window_ref=window, started=started)
+def snap(items, window=WIN, pid=7, started="s", vouched=True):
+    """vouched: Accessibility declares the whole window ordinary text, so OCR lines may be shared (unless in a field)."""
+    return screen.Snapshot(pid, "Pad", "com.pad", "Pad", (0, 0, 400, 300), items, window_ref=window, started=started,
+                           text_frames=[(0, 0, 400, 300)] if vouched else [])
 
 
 class Screen:
@@ -188,16 +190,35 @@ class TaskTests(unittest.TestCase):
                 self.role, self.frame, self.kids, self.sub = role, frame, list(kids), sub
         field = N("AXTextField", (10, 100, 300, 30))  # no label: walk_actionable never returns it
         win = N("AXWindow", (0, 0, 400, 300), [field])
-        reads = {"AXRole": lambda n: ("ok", n.role), "AXSubrole": lambda n: ("absent", None)}
+        reads = {"AXRole": lambda n: ("ok", n.role), "AXSubrole": lambda n: ("absent", None),
+                 "AXChildren": lambda n: ("ok", n.kids) if n.kids else ("absent", None)}
         with patch.object(screen, "_read", lambda el, name: reads[name](el)), \
-                patch.object(screen, "_frame", lambda el: el.frame), patch.object(screen, "_children", lambda el: el.kids):
-            frames, complete = screen.scan_fields(win)
+                patch.object(screen, "_frame", lambda el: el.frame):
+            frames, complete, _texts = screen.scan_fields(win)
         self.assertEqual((frames, complete), ([(10, 100, 300, 30)], True))
         bad = N("AXWindow", (0, 0, 400, 300), [N("AXGroup", (0, 0, 1, 1))])
         reads["AXRole"] = lambda n: ("unknown", None) if n.role == "AXGroup" else ("ok", n.role)
         with patch.object(screen, "_read", lambda el, name: reads[name](el)), \
-                patch.object(screen, "_frame", lambda el: el.frame), patch.object(screen, "_children", lambda el: el.kids):
-            self.assertEqual(screen.scan_fields(bad), ([], False))  # an unreadable node: fields can't all be known
+                patch.object(screen, "_frame", lambda el: el.frame):
+            self.assertFalse(screen.scan_fields(bad)[1])  # an unreadable node: fields can't all be known
+        reads["AXRole"] = lambda n: ("ok", n.role)
+        reads["AXChildren"] = lambda n: ("unknown", None) if n.role == "AXGroup" else (("ok", n.kids) if n.kids
+                                                                                       else ("absent", None))
+        hidden = N("AXWindow", (0, 0, 400, 300), [N("AXGroup", (0, 0, 400, 300), [N("AXTextField", (1, 1, 50, 20))])])
+        with patch.object(screen, "_read", lambda el, name: reads[name](el)), \
+                patch.object(screen, "_frame", lambda el: el.frame):
+            self.assertFalse(screen.scan_fields(hidden)[1])  # an unreadable child list could hide a field
+        reads["AXChildren"] = lambda n: ("ok", n.kids) if n.kids else ("absent", None)
+        reads["AXSubrole"] = lambda n: ("unknown", None) if n.role == "AXTextField" else ("absent", None)
+        with patch.object(screen, "_read", lambda el, name: reads[name](el)), \
+                patch.object(screen, "_frame", lambda el: el.frame):
+            self.assertFalse(screen.scan_fields(win)[1])  # an unreadable subrole could be a password field
+
+    def test_ocr_nothing_vouches_for_stays_local(self):
+        loose = item(2, "PRIVATE words", source="ocr", role="text", pressable=False, frame=(10, 200, 200, 20))
+        Screen(self, [snap([item(1, "Next"), loose], vouched=False)])  # e.g. an app exposing no text regions
+        self.run_task("go on", [{"kind": ("stuck", 0.9)}])
+        self.assertNotIn("PRIVATE", json.dumps(self.sent[0][0]))
 
     def test_ocr_is_withheld_when_fields_cant_all_be_known(self):
         text = item(2, "account number 1234", source="ocr", role="text", pressable=False, frame=(10, 200, 200, 20))

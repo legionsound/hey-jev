@@ -60,7 +60,7 @@ class JevCheckTests(Base):
             self.d.key_fields["TYPESAFE_API_KEY"].setStringValue_("ts-typed")
             self.d.checkJev_(None)
             self.assertTrue(pump(lambda: self.d.jev_check_result.stringValue() != "Checking…"))
-        check.assert_called_once_with("typesafe", "ts-typed", "jev-latest")
+        check.assert_called_once_with("typesafe", "ts-typed", "jev-1.13.0")
         self.assertEqual(self.d.jev_check_result.stringValue(), "Connected · 142 ms")
         self.assertTrue(self.d.jev_check_button.isEnabled())
 
@@ -731,7 +731,7 @@ class ModelSettingsSaveTests(Base):
 
     def test_defaults_shown_and_nothing_saved_until_changed(self):
         self.assertEqual(self.d.jev_model_fields["openrouter"].stringValue(), "typesafe/jev-1.13")
-        self.assertEqual(self.d.jev_model_fields["typesafe"].stringValue(), "jev-latest")
+        self.assertEqual(self.d.jev_model_fields["typesafe"].stringValue(), "jev-1.13.0")
         self.assertEqual(self.d.fish_model_popup.titleOfSelectedItem(), "s2.1-pro-free")
         self.assertEqual(self.d.ocr_popup.titleOfSelectedItem(), "Accurate")
         mocks = self.save()
@@ -926,10 +926,10 @@ class ModelPrefsTests(unittest.TestCase):
         store.stringForKey_.return_value = None
         with patch.object(ms, "PREFS", store):
             self.assertEqual((ms.jev_model("openrouter"), ms.jev_model("typesafe"), ms.fish_model(), ms.whisper_model(),
-                              ms.ocr_level()), ("typesafe/jev-1.13", "jev-latest", "s2.1-pro-free", "small.en", "accurate"))
+                              ms.ocr_level()), ("typesafe/jev-1.13", "jev-1.13.0", "s2.1-pro-free", "small.en", "accurate"))
             store.stringForKey_.return_value = "not a real choice!"
             self.assertEqual((ms.jev_model("typesafe"), ms.fish_model(), ms.whisper_model(), ms.ocr_level()),
-                             ("jev-latest", "s2.1-pro-free", "small.en", "accurate"))
+                             ("jev-1.13.0", "s2.1-pro-free", "small.en", "accurate"))
             for bad in (lambda: ms.save_fish_model("x"), lambda: ms.save_whisper_model("large"),
                         lambda: ms.save_ocr_level("slow"), lambda: ms.save_jev_model("typesafe", "a b")):
                 with self.assertRaises(ValueError):

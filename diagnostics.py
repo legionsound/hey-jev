@@ -1,8 +1,9 @@
 """Local diagnostic log: one JSON line per stage of each request, keyed by the engine's request id.
 
 ~/Library/Logs/Hey Jev/requests.jsonl, folder 0700, files 0600, rotated at max_bytes with `backups` old files.
-Never records keys, authorization headers, raw audio or provider payloads. Never raises: a logging failure can't
-break a command.
+Never records keys, authorization headers, raw audio or provider payloads. It does keep what you said (the submit
+and recognize records' transcript) and Jev's answers, so a failed command can be traced; screen text is kept only as
+lengths. Never raises: a logging failure can't break a command.
 """
 import datetime
 import json

@@ -22,7 +22,7 @@ def keychain_value(name):
 
 
 def get_secret(name):
-    return os.getenv(name) or keychain_value(name)  # .env wins, so editing it always takes effect
+    return keychain_value(name) or os.getenv(name)  # Keychain first; .env/environment is a development fallback
 
 
 def save_secret(name, value):
@@ -33,8 +33,12 @@ def save_secret(name, value):
         return
     if name in SETTINGS and value not in SETTINGS[name]:
         raise ValueError(f"invalid {name}: {value}")
+    # The value goes through security's stdin command mode, never argv: argv is visible to every process (ps).
+    if any(c in value for c in "\n\r\"\\"):
+        raise ValueError(f"invalid characters in {name}")
     result = subprocess.run(
-        ["security", "add-generic-password", "-U", "-a", name, "-s", SERVICE, "-w", value],
+        ["security", "-i"],
+        input=f'add-generic-password -U -a {name} -s {SERVICE} -w "{value}"\n',
         capture_output=True,
         text=True,
     )

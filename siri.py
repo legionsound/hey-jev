@@ -2,7 +2,7 @@
 
 Voice and `jevctl` both submit text to one engine (engine.py); this file owns the microphone, transcription and speech.
 """
-import datetime, os, re, sys, json, time, queue, random, argparse, subprocess, threading, hashlib, collections, contextlib
+import datetime, math, os, re, sys, json, time, queue, random, argparse, subprocess, threading, hashlib, collections, contextlib
 import requests
 from dotenv import load_dotenv
 from secrets_store import get_secret, get_setting, missing_secrets
@@ -51,24 +51,93 @@ def jev_route(provider):
     return "https://api.typesafe.ai/v1/systemone", model_settings.jev_model("typesafe")
 
 
+class JevError(ValueError):
+    """No decision was produced (bad request, missing key, malformed answer). Never read this as a "no"."""
+
+
+# Local safety caps from the jev skill (~/.agents/skills/jev): conservative UTF-8 byte ceilings, not token counts.
+JEV_MAX_QUESTIONS = 128
+JEV_STATE_QUESTION_BYTES = 24000
+JEV_REQUEST_BYTES = 48000
+
+
+def _enc(value):
+    return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode()
+
+
+def _need(ok, why):
+    if not ok:
+        raise JevError(why)
+
+
+def _num(v, lo, hi):
+    return type(v) in (int, float) and math.isfinite(v) and lo <= v <= hi
+
+
+def validate_jev_request(body):
+    """Shape and size checks before anything is sent (ported from the jev skill's jev.py). Refuses; never truncates."""
+    qs = body["questions"]
+    _need(isinstance(qs, dict) and 0 < len(qs) <= JEV_MAX_QUESTIONS, "too many Jev questions for one request")
+    for q in qs.values():
+        kind, crit = q.get("type"), q.get("criteria")
+        if kind == "choice":
+            _need(isinstance(crit, dict) and 2 <= len(crit) <= 255, "a Jev choice needs 2-255 options")
+        elif kind == "score":
+            _need(isinstance(crit, list) and 2 <= len(crit) <= 10, "a Jev score needs 2-10 levels")
+        else:
+            _need(kind == "noul", "unknown Jev question type")
+        _need(len(_enc(body["state"])) + len(_enc(q)) <= JEV_STATE_QUESTION_BYTES, "Jev request too large")
+    _need(len(_enc(body)) <= JEV_REQUEST_BYTES, "Jev request too large")
+
+
+def validate_jev_response(body, j):
+    """Every answer must match its question: ids, types, options, ranges, distributions. Else no decision."""
+    answers = j.get("answers") if isinstance(j, dict) else None
+    _need(isinstance(answers, dict) and set(answers) == set(body["questions"]), "Jev answer ids don't match")
+    for k, q in body["questions"].items():
+        a = answers[k]
+        _need(isinstance(a, dict) and a.get("type") == q["type"], "Jev answer type mismatch")
+        if q["type"] == "noul":
+            _need(_num(a.get("noul"), 0, 1), "bad Jev yes-probability")
+            continue
+        _need(_num(a.get("confidence"), 0, 1), "bad Jev confidence")
+        expected = set(q["criteria"]) if q["type"] == "choice" else {str(i) for i in range(len(q["criteria"]))}
+        probs = a.get("probabilities")
+        _need(isinstance(probs, dict) and set(probs) == expected and all(_num(v, 0, 1) for v in probs.values())
+              and abs(sum(probs.values()) - 1) <= .02, "bad Jev distribution")
+        if q["type"] == "choice":
+            _need(a.get("choice") in expected and probs[a["choice"]] >= max(probs.values()) - .001, "bad Jev choice")
+        else:
+            _need(_num(a.get("score"), 0, len(expected) - 1) and isinstance(a.get("legend"), dict)
+                  and set(a["legend"]) == expected, "bad Jev score")
+
+
 def jev(text, questions=None, *, provider=None, key=None, model=None, timeout=30):
+    """One Jev call. -> ({id: (value, p)}, ms, cost). Raises on any failure: a failure is never an answer.
+    Choice/score: p = Jev's confidence, relative to that question's own options only.
+    Noul: value = yes/no, p = probability of that value (Noul has no separate confidence).
+    No retries: an ambiguous transport failure has an unknown outcome (jev skill)."""
     t = time.time()
     provider = provider or JEV_PROVIDER
     url, saved_model = jev_route(provider)
-    model = model or saved_model
+    body = {"model": model or saved_model, "state": text, "questions": questions or planner.QUESTIONS}
     key = key or (JEV_OR_KEY if provider == "openrouter" else TS_KEY)
-    r = requests.post(url, json={"model": model, "state": text, "questions": questions or planner.QUESTIONS},
-                      headers={"Authorization": f"Bearer {key}"}, timeout=timeout, allow_redirects=False)
+    _need(bool(key), "no Jev key saved for this source")
+    validate_jev_request(body)
+    r = requests.post(url, json=body, headers={"Authorization": f"Bearer {key}"}, timeout=timeout,
+                      allow_redirects=False)
     r.raise_for_status()
     j = r.json()
+    validate_jev_response(body, j)
     ans = {}
     for k, a in j["answers"].items():
-        if a["type"] == "noul":  # probability, confidence is distance from 0.5
-            ans[k] = (a["noul"] >= 0.5, max(a["noul"], 1 - a["noul"]))
+        if a["type"] == "noul":
+            p = a["noul"]
+            ans[k] = (p >= 0.5, p if p >= 0.5 else 1 - p)
         elif a["type"] == "score":  # index into the rubric, legend maps it back to the label
-            ans[k] = (a["legend"][str(int(round(a["score"])))], a.get("confidence", 0))
+            ans[k] = (a["legend"][str(int(round(a["score"])))], a["confidence"])
         else:
-            ans[k] = (a["choice"], a.get("confidence", 0))
+            ans[k] = (a["choice"], a["confidence"])
     cost = j.get("usage", {}).get("input_tokens", 0) * 0.042 / 1e6
     return ans, int((time.time() - t) * 1000), cost
 
@@ -116,12 +185,13 @@ def tiebreak(clause, choices):
         if h["last_opened"]:
             bits.append(f"last opened {h['last_opened']}")
         criteria[f"app_{i}"] = ", ".join(bits)
+    criteria["none"] = "none of these, or it can't be told apart"
     q = {"pick": {"type": "choice", "instructions": "Several installed apps match. Which one did the user most likely mean?",
                   "criteria": criteria}}
     ans, ms, cost = jev(clause, q)
     choice, conf = ans["pick"]
-    print(f"  jev tiebreak {clause!r}: {choice} {conf:.2f} ({ms}ms ${cost:.6f})")
-    return int(choice.split("_")[1]), conf
+    print(f"  jev tiebreak: {choice} {conf:.2f} ({ms}ms ${cost:.6f})")
+    return None if choice == "none" else (int(choice.split("_")[1]), conf)
 
 
 def choose_control(spoken, labels, intent=False):
@@ -140,7 +210,7 @@ def choose_control(spoken, labels, intent=False):
         ans, ms, _ = jev(spoken, q)
     except Exception as exc:
         diagnostics.record(current_rid(), "choose_control", "error", error=repr(exc), options=len(names))
-        return None, 0.0
+        raise  # a failed call is "couldn't check", never "no control does that" (jev skill)
     pick, conf = ans["control"]
     diagnostics.record(current_rid(), "choose_control", "ok", ms, options=len(names), confidence=round(conf, 2),
                        intent=intent)
@@ -177,11 +247,11 @@ def classify(clause):
     try:
         ans, ms, cost = jev(clause)
     except Exception as exc:
-        diagnostics.record(current_rid(), "classify", "error", clause=clause, provider=JEV_PROVIDER, error=repr(exc))
+        diagnostics.record(current_rid(), "classify", "error", provider=JEV_PROVIDER, error=repr(exc))
         raise
-    diagnostics.record(current_rid(), "classify", "ok", ms, clause=clause, provider=JEV_PROVIDER,
+    diagnostics.record(current_rid(), "classify", "ok", ms, provider=JEV_PROVIDER,
                        answers={k: [v, round(c, 2)] for k, (v, c) in ans.items()})
-    print(f"  jev {clause!r}: {ms}ms ${cost:.6f}")
+    print(f"  jev classify: {ms}ms ${cost:.6f}")
     for k, (v, c) in ans.items():
         print(f"    {k:15} {str(v):22} {c:.2f}{'' if c >= planner.GATE else '  <- below gate'}")
     return ans

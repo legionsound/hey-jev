@@ -151,6 +151,9 @@ def offer(goal, snap, items, focused_field, typed=(), apps=()):
 
 
 def questions(kinds, press, fields=None, openable=None):
+    """One batch. item/app/field depend on kind, so each is asked conditionally ("If pressing is right...") and only
+    the one matching the chosen kind is used; the rest are discarded. Deliberate speculative batching (jev skill:
+    dependent questions normally need a second stage) to save a round trip per step; code re-validates the pick."""
     q = {"kind": {"type": "choice",
                   "instructions": "You are working toward the goal one action at a time. Which kind of action makes "
                                   "the most progress right now? Never one listed as already tried on this screen.",

@@ -449,8 +449,8 @@ RISKY = re.compile(r"\b(buy|purchase|order|pay|checkout|check out|send|submit|po
                    r"empty|discard|uninstall|format|sign out|log out|transfer|confirm|accept|agree|install|share|reply all)\b",
                    re.I)
 CHOOSE = None  # set by the app: (spoken, [labels]) -> (index or None, confidence). Only control names are sent.
-CHOOSE_GATE = 0.65
-INTENT_GATE = 0.75  # no control was named: Jev must be surer before a press happens
+CHOOSE_GATE = 0.65  # provisional, uncalibrated (jev skill); confirmation, not this number, authorizes risky presses
+INTENT_GATE = 0.75  # no control was named: Jev must be surer before a press happens (also provisional)
 RESOLVE_BUDGET = 3.0  # one deadline over every native read a resolve makes
 RESOLVE_UNTIL = None  # set by the engine while a task step resolves: never past the task's shared deadline
 
@@ -992,7 +992,8 @@ def verify_pointer_click(t, deadline):
 CLASSIFY_ITEMS = None  # set by the app: (noun, labels) -> [(is_one, confidence)] per label, from one Jev call
 ROLE_NOUNS = {"button": ("AXButton", "AXMenuButton", "AXPopUpButton"), "link": ("AXLink",),
               "tab": ("AXTab", "AXRadioButton"), "row": ("AXRow", "AXCell"), "item": None}
-PICK_GATE = 0.65
+PICK_GATE = 0.65  # provisional, uncalibrated (jev skill): measure on labeled pages before trusting
+PICK_MAX = 60
 def reading_order(items):
     """Rows top to bottom, then left to right: how a person counts "the third video" on a grid or a list.
     Rows come from the items themselves, not fixed screen bands: an item joins the current row when its centre
@@ -1052,7 +1053,15 @@ def resolve_screen_pick(args):
     else:
         if not CLASSIFY_ITEMS or not pool:
             return ("none", f"no {noun}s on screen")
-        labels = [i.label for i in pool][:60]
+        # Jev judges at most PICK_MAX items. Take them in reading order so "the third video" among the first
+        # PICK_MAX is the true third; "last" and "nearest" need the whole page, so a cut page refuses those.
+        pool = reading_order(pool)
+        cut = len(pool) > PICK_MAX
+        if cut and ("where" in args or args.get("ordinal", 1) == -1):
+            return ("none", f"too many things on screen to find the {'last' if 'where' not in args else 'right'} "
+                            f"{noun}; scroll closer first")
+        pool = pool[:PICK_MAX]
+        labels = [i.label for i in pool]
         try:
             got = CLASSIFY_ITEMS(noun, labels)
         except Exception:
@@ -1060,6 +1069,8 @@ def resolve_screen_pick(args):
         if not isinstance(got, list) or len(got) != len(labels) or not all(_valid_flag(g) for g in got):
             return ("choices", [])  # a malformed answer asks again; nothing is pressed
         group = [i for i, (yes, conf) in zip(pool, got) if yes is True and conf >= PICK_GATE]
+        if cut and isinstance(args.get("ordinal", 1), int) and args.get("ordinal", 1) > len(group):
+            return ("none", f"too many things on screen to count that far; scroll closer first")
     if not group:
         return ("none", f"no {noun}s on screen")
     if "where" in args:

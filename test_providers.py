@@ -21,18 +21,19 @@ class ProviderTests(unittest.TestCase):
 
     def test_jev_uses_selected_endpoint_and_key(self):
         response = {
-            "answers": {"intent": {"type": "choice", "choice": "hello", "confidence": 0.9}},
+            "answers": {"intent": {"type": "choice", "choice": "hello", "confidence": 0.9,
+                                  "probabilities": {"hello": 0.9, "x": 0.1}}},
             "usage": {"input_tokens": 100},
         }
         with patch.object(siri.requests, "post") as post:
             post.return_value.json.return_value = response
             for provider, url, model, key in (
                 ("openrouter", "https://openrouter.ai/api/alpha/decisions", "typesafe/jev-1.13", "or-test"),
-                ("typesafe", "https://api.typesafe.ai/v1/systemone", "jev-latest", "ts-test"),
+                ("typesafe", "https://api.typesafe.ai/v1/systemone", "jev-1.13.0", "ts-test"),
             ):
                 with self.subTest(provider=provider), patch.object(siri, "JEV_PROVIDER", provider), \
                         patch.object(siri, "JEV_OR_KEY", "or-test"), patch.object(siri, "TS_KEY", "ts-test"):
-                    answers, _, _ = siri.jev("hello", {"intent": {"type": "choice"}})
+                    answers, _, _ = siri.jev("hello", {"intent": {"type": "choice", "instructions": "which", "criteria": {"hello": "hi", "x": "other"}}})
                     self.assertEqual(answers["intent"], ("hello", 0.9))
                     args, kwargs = post.call_args
                     self.assertEqual(args[0], url)
@@ -43,11 +44,12 @@ class ProviderTests(unittest.TestCase):
     def test_key_requests_disable_redirects(self):
         with patch.object(siri.requests, "post") as post:
             post.return_value.json.return_value = {
-                "answers": {"intent": {"type": "choice", "choice": "x", "confidence": 0.9}},
+                "answers": {"intent": {"type": "choice", "choice": "x", "confidence": 0.9,
+                                             "probabilities": {"hello": 0.1, "x": 0.9}}},
                 "usage": {"input_tokens": 0}}
             with patch.object(siri, "JEV_PROVIDER", "typesafe"), \
                     patch.object(siri, "TS_KEY", "ts-test"):
-                siri.jev("hello", {"intent": {"type": "choice"}})
+                siri.jev("hello", {"intent": {"type": "choice", "instructions": "which", "criteria": {"hello": "hi", "x": "other"}}})
             _, kwargs = post.call_args
             self.assertIs(kwargs.get("allow_redirects"), False)
         with patch.object(siri.requests, "post") as post:

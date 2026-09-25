@@ -2,7 +2,7 @@
 import re
 import urllib.parse
 
-GATE = 0.65
+GATE = 0.65  # provisional, uncalibrated (jev skill): a starting value to measure, not a reliability claim
 MAX_CLAUSES = 5
 
 QUESTIONS = {
@@ -442,9 +442,10 @@ def pick(ans, clause, inherited_browser=None):
         return s
     target, tconf = ans["target"]
     s = step_for(ans, target, clause, inherited_browser) if tconf >= 0.5 else None
-    if s is None:
-        cands = [x for x in (step_for(ans, t, clause, inherited_browser) for t in TARGETS) if x]
-        s = max(cands, key=lambda x: x[0]) if cands else None
+    if s is None:  # target unsure: act only if exactly one reading fits. Confidences from different questions
+        # (app_action vs volume_action ...) have different option sets and can't be compared (jev skill)
+        cands = {(x[1], repr(x[2])): x for x in (step_for(ans, t, clause, inherited_browser) for t in TARGETS) if x}
+        s = next(iter(cands.values())) if len(cands) == 1 else None
     return s
 
 

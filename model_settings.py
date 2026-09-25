@@ -222,7 +222,7 @@ def save_wake_settings(phrase, aliases):
     return phrase, aliases
 
 
-TIEBREAK_DEFAULT, TIEBREAK_MIN, TIEBREAK_MAX = 85, 50, 100
+TIEBREAK_DEFAULT, TIEBREAK_MIN, TIEBREAK_MAX = 85, 50, 100  # Johnny's pick; uncalibrated (jev skill)
 
 
 def tiebreak_threshold():
@@ -301,7 +301,7 @@ def save_app_folders(paths):
 
 # Models the app uses beyond the answer model. Each default is today's hard-coded value, so nothing changes until
 # the user picks something.
-JEV_MODELS = {"openrouter": "typesafe/jev-1.13", "typesafe": "jev-latest"}
+JEV_MODELS = {"openrouter": "typesafe/jev-1.13", "typesafe": "jev-1.13.0"}  # pinned: jev-latest can change behavior
 MODEL_ID_RE = re.compile(r"[A-Za-z0-9._:/+-]{1,80}")
 FISH_MODELS = ("s2.1-pro-free", "s2.1-pro", "s2-pro", "s1", "drama-3-preview")  # docs.fish.audio TTS "model" header
 WHISPER_SIZES = {"tiny.en": "75 MB", "base.en": "145 MB", "small.en": "480 MB", "medium.en": "1.5 GB"}

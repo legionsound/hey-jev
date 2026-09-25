@@ -1066,6 +1066,23 @@ class PickTests(unittest.TestCase):
         for said in ["click the video", "click Save", "click the third"]:
             self.assertIsNone(planner.pick_args(said), said)
 
+    def big_page(self, n=70):
+        return snap([item(k + 1, f"Video {k}", role="AXLink", frame=(10, 10 + 30 * k, 150, 20)) for k in range(n)])
+
+    def test_a_cut_page_refuses_last_instead_of_counting_part_of_it(self):
+        v = self.run_pick({"noun": "video", "ordinal": -1}, self.big_page())
+        self.assertEqual((v["state"], self.presses, self.sent), ("failed", [], []))
+
+    def test_a_cut_page_still_counts_early_ordinals_in_reading_order(self):
+        g = self.big_page()
+        v = self.run_pick({"noun": "video", "ordinal": 2}, g)
+        self.assertEqual((v["state"], self.presses), ("completed", [g.items[1].ref]))
+        self.assertEqual(len(self.sent[0][1]), actions.PICK_MAX)
+
+    def test_a_cut_page_refuses_an_ordinal_past_what_was_judged(self):
+        v = self.run_pick({"noun": "video", "ordinal": 65}, self.big_page())
+        self.assertEqual((v["state"], self.presses), ("failed", []))
+
     def test_the_third_video_counts_rows_then_columns(self):
         g = self.grid()
         v = self.run_pick({"noun": "video", "ordinal": 3}, g)

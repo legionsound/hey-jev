@@ -9,10 +9,11 @@ This spec adds Apple on-device and agent-session backends behind one boundary.
 ## Scope
 
 - Settings > Answers: Off, OpenRouter, Apple on-device, Codex session, Claude session.
-- Answers only. Jev classification, action execution, confirmation gates and the
-  Fish voice are unchanged and stay separate settings. Choosing Apple does not make
-  the app offline.
-- No provider result ever becomes an action.
+- Jev classification, Hey Jev's own actions, confirmation gates and the Fish voice
+  are unchanged and stay separate settings. Choosing Apple does not make the app offline.
+- OpenRouter and Apple only answer. Codex and Claude sessions are full agents that
+  may act through their own tools, with their permission prompts shown to the user.
+  Hey Jev never turns any provider's text into one of its own actions.
 
 ## Boundary (`answers.py`)
 
@@ -67,31 +68,32 @@ current fallback text). A timer label never starts an agent session.
   Never attaches to any existing Buzz, Codex or Claude session.
 - Deadline default 45 s; "thinking" cue while waiting.
 
-### Milestone 1: answer-only
+### Full sessions (Johnny, 2026-09-25)
 
-Tools are disabled by runtime configuration, not by prompt or by the permission
-callback alone (pre-authorized tools, MCP servers, hooks or user config can bypass
-it). Per adapter, the session is started with runtime settings that disable tools,
-MCP servers and hooks. If an adapter cannot enforce that, the provider is shown as
-unavailable. No file reads either: the session runs in an empty temporary working
-directory with no project context. Any `session/request_permission` that still
-arrives gets a valid negotiated answer (the offered reject option, else cancelled).
-Acceptance proves it per adapter: prompts to read a file, write a file or run a
-command produce no read, no file and no command. Proof comes from the effective runtime
-configuration and observed execution events, not from the agent saying it refused;
-an empty cwd alone does not stop absolute-path reads.
+Johnny chose full sessions: each agent runs with its own harness exactly as it does
+in a terminal or in Buzz, with the user's tools, hooks, MCP servers, instructions
+and memory loaded. Hey Jev is only the client.
 
-### Later: tools-enabled sessions
-
-Separate, explicit choice. Needs a chosen workspace, visible tool activity, voice or
-on-screen approvals, Stop, and its own conversation id. Not claimed until built and
-tested.
+- Settings per agent: working folder (default: home), on/off. Nothing else is
+  overridden; the agent's own config and permission mode apply.
+- Permission requests (`session/request_permission`) appear in the existing
+  confirmation pop-down with the agent's own options; voice "yes"/"no" works as for
+  engine confirmations. No reply within the confirmation window = the offered reject
+  option. Hey Jev never auto-approves.
+- Visible activity: the status window shows the agent's current tool call and plan
+  while it works.
+- Long jobs: Hey Jev says a short "working on it", keeps listening, and speaks a
+  one or two sentence summary when the turn ends; the full reply stays in the app.
+  Stop cancels the turn (`session/cancel`), then kills the adapter if it doesn't settle.
+- One session per agent per app run; "New conversation" starts a fresh one. Never
+  attaches to an existing Buzz, Codex or Claude session.
+- Reminder labels never go to an agent.
 
 ## Slices
 
 1. `answers.py` boundary; move both OpenRouter call sites behind it. No behaviour change.
 2. ACP client + fake-adapter tests (scripted JSON-RPC over pipes), then Claude and
-   Codex live, answer-only.
+   Codex live as full sessions with visible permission prompts.
 3. Apple helper + provider, if the probe passes.
 4. Settings rows, availability reasons, New conversation.
 

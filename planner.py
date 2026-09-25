@@ -370,8 +370,8 @@ SCROLL = re.compile(r"^\W*(?:please\s+)?scroll\s+(?P<dir>up|down)(?:\s+(?P<amt>a
                     r"to\s+the\s+(?:top|bottom|end)))?(?:\s+(?:on|in)\s+(?P<app>.+?))?[\s.!?]*$", re.I)
 SCROLL_EDGE = re.compile(r"^\W*(?:please\s+)?(?:scroll|go|jump)\s+to\s+the\s+(?P<edge>top|bottom)(?:\s+(?:on|in|of)\s+"
                          r"(?P<app>.+?))?[\s.!?]*$", re.I)
-POINTER = re.compile(r"^\W*(?:please\s+)?(?P<how>double[\s-]?|right[\s-]?|left[\s-]?)?click(?:\s+(?:the\s+mouse|here|"
-                     r"there|it|that))?[\s.!?]*$", re.I)
+POINTER = re.compile(r"^\W*(?:please\s+)?(?P<how>double[\s-]?|right[\s-]?|left[\s-]?)?click(?:\s+(?:the\s+mouse|here))?"
+                     r"[\s.!?]*$", re.I)  # not "click it/that/there": those can name something already discussed
 
 
 def direct(clause):

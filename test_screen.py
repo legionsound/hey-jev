@@ -1,4 +1,5 @@
 """Screen control: the walk, the merge, the planner's words, and press/list through the real engine with a fake screen."""
+import time
 import unittest
 from unittest.mock import patch
 
@@ -834,6 +835,12 @@ class ScrollAndPointerTests(unittest.TestCase):
         p.start()
         self.addCleanup(p.stop)
 
+    def patch_all(self, fns):
+        for name, fn in fns.items():
+            p = patch.object(screen, name, fn)
+            p.start()
+            self.addCleanup(p.stop)
+
     def run_action(self, action, args, policy=None):
         with patch.object(planner, "plan", lambda *a, **k: ("steps", [{"clause": "c", "action": action, "args": args}])):
             eng = Engine(lambda _: {}, policy=lambda: {**actions.DEFAULT_POLICY, "click": "auto", **(policy or {})})
@@ -848,64 +855,117 @@ class ScrollAndPointerTests(unittest.TestCase):
                            ("right click here", ("pointer.click", {"button": "right", "double": False}))]:
             kind, steps = planner.plan(said, lambda c: called.append(c) or {})
             self.assertEqual((kind, steps[0]["action"], steps[0]["args"]), ("steps", *want), said)
-        self.assertEqual(called, [])  # Jev isn't asked what "scroll down" means
-        self.assertIsNone(planner.direct("click Save"))
+        self.assertEqual(called, [])
+        for said in ["click Save", "click it", "click that", "click there"]:
+            self.assertIsNone(planner.direct(said), said)  # "it/that/there" can name something discussed
 
-    def scroll_setup(self, positions, err=0, app="Pad"):
-        pos = list(positions)
-        sent = []
+    def test_every_setting_row_is_still_there(self):
+        for e in ("scroll", "click", "type", "submit", "task", "in_task", "risky"):
+            self.assertIn(e, actions.EFFECTS)
+            self.assertIn(e, actions.EFFECT_LABELS)
+        self.assertEqual(actions.DEFAULT_POLICY["in_task"], "auto")
+
+    def scroll_setup(self, positions, err=0, app="Pad", front=None, window=None):
+        pos, sent = list(positions), []
         s = snap([item(1, "x")], app=app)
-        for name, fn in {"observe": lambda pid=None, ocr=True, deadline=None: s,
-                         "scroll_target": lambda w: ("bar", "bar-el"),
-                         "scroll_position": lambda how, el: pos[0] if len(pos) == 1 else pos.pop(0),
-                         "scroll": lambda how, el, d, a, dl: sent.append((d, a)) or err,
-                         "process_start": lambda pid, d: s.started}.items():
-            p = patch.object(screen, name, fn)
-            p.start()
-            self.addCleanup(p.stop)
+        self.patch_all({"observe": lambda pid=None, ocr=True, deadline=None: s,
+                        "scroll_target": lambda w: ("bar", "bar-el"),
+                        "scroll_position": lambda how, el, pick=None: pos[0] if len(pos) == 1 else pos.pop(0),
+                        "scroll": lambda how, el, d, a, dl: sent.append((d, a)) or err,
+                        "process_start": lambda pid, d: s.started,
+                        "frontmost": lambda: (front or s.pid, "Pad", "com.pad"),
+                        "current_window": lambda pid, d: window or s.window_token})
         return sent
 
-    def test_scroll_completes_only_when_the_view_moved(self):
+    def test_scroll_completes_only_when_the_bar_moved(self):
         sent = self.scroll_setup([0.0, 0.25])
         v = self.run_action("screen.scroll", {"direction": "down", "amount": "normal"})
         self.assertEqual((v["state"], sent), ("completed", [("down", "normal")]))
         self.scroll_setup([0.5])
         self.assertEqual(self.run_action("screen.scroll", {"direction": "down"})["state"], "unverified")
 
-    def test_scroll_at_the_edge_says_so_and_sends_nothing_else(self):
+    def test_scroll_at_the_edge_says_so(self):
         self.scroll_setup([1.0], err=screen.AX_NO_VALUE)
         v = self.run_action("screen.scroll", {"direction": "down"})
         self.assertEqual((v["state"], v["steps"][0]["detail"]), ("failed", "already at the bottom"))
 
-    def test_scroll_in_a_named_app_that_isnt_in_front_does_nothing(self):
-        sent = self.scroll_setup([0.0, 0.3], app="Safari")
-        v = self.run_action("screen.scroll", {"direction": "down", "app": "Chrome"})
-        self.assertEqual((v["state"], v["steps"][0]["detail"], sent), ("failed", "that app isn't in front", []))
+    def test_scroll_rechecks_the_front_app_and_window_before_acting(self):
+        sent = self.scroll_setup([0.0, 0.3], front=999)
+        self.assertEqual((self.run_action("screen.scroll", {"direction": "down"})["state"], sent), ("failed", []))
+        sent = self.scroll_setup([0.0, 0.3], window="another")
+        self.assertEqual((self.run_action("screen.scroll", {"direction": "down"})["state"], sent), ("failed", []))
+
+    def test_an_unreadable_scroll_bar_is_never_written(self):
+        writes = []
+
+        class AS:
+            def AXUIElementSetAttributeValue(self, el, name, v):
+                writes.append(v)
+                return 0
+        for value in [("unknown", None), ("ok", float("nan")), ("ok", 7.0), ("ok", True)]:
+            with patch.object(screen, "_AS", lambda: AS()), patch.object(screen, "_read", lambda el, n: value), \
+                    patch.object(screen, "_settable", lambda el, n: True), patch.object(screen, "_abandoned", []):
+                with self.assertRaises(screen.Unavailable):
+                    screen.scroll("bar", "el", "down", "normal", time.monotonic() + 1)
+        with patch.object(screen, "_AS", lambda: AS()), patch.object(screen, "_read", lambda el, n: ("ok", 1.0)), \
+                patch.object(screen, "_settable", lambda el, n: True), patch.object(screen, "_abandoned", []):
+            self.assertEqual(screen.scroll("bar", "el", "down", "normal", time.monotonic() + 1), screen.AX_NO_VALUE)
+        self.assertEqual(writes, [])
+
+    def test_web_scroll_counts_only_the_targeted_element_moving_into_view(self):
+        s = snap([item(1, "x")])
+        frames = {"pick": [(0, 900, 100, 20), (0, 400, 100, 20)], "area": (0, 0, 800, 800)}
+        self.patch_all({"observe": lambda pid=None, ocr=True, deadline=None: s,
+                        "scroll_target": lambda w: ("web", "area"),
+                        "process_start": lambda pid, d: s.started, "frontmost": lambda: (s.pid, "Pad", "com.pad"),
+                        "current_window": lambda pid, d: s.window_token,
+                        "scroll": lambda how, el, d, a, dl: (screen._last_pick.__setitem__(slice(None), ["pick", (0, 900, 100, 20)]), 0)[1],
+                        "_frame": lambda el: frames["area"] if el == "area" else frames["pick"][-1]})
+        self.assertEqual(self.run_action("screen.scroll", {"direction": "down"})["state"], "completed")
+        frames["pick"] = [(0, 900, 100, 20)]  # it never came into view: other layout changes don't count
+        self.assertEqual(self.run_action("screen.scroll", {"direction": "down"})["state"], "unverified")
+
+    def test_a_covered_spot_is_never_a_click_target(self):
+        import Quartz
+        wins = [{"kCGWindowLayer": 3, "kCGWindowOwnerPID": 50, "kCGWindowNumber": 1,
+                 "kCGWindowBounds": {"X": 0, "Y": 0, "Width": 500, "Height": 500}},
+                {"kCGWindowLayer": 0, "kCGWindowOwnerPID": 7, "kCGWindowNumber": 2,
+                 "kCGWindowBounds": {"X": 0, "Y": 0, "Width": 800, "Height": 800}}]
+        with patch.object(Quartz, "CGWindowListCopyWindowInfo", lambda *a: wins):
+            self.assertEqual(screen.app_at((100, 100)), (None, None))
+            self.assertEqual(screen.app_at((600, 600)), (7, 2))
 
     def pointer_setup(self, points, change=True):
         pts, clicks, sig = list(points), [], {"n": 0}
-        for name, fn in {"pointer": lambda: pts[0] if len(pts) == 1 else pts.pop(0),
-                         "app_at": lambda p: (7, 99), "_app_info": lambda pid: ("Pad", "com.pad"),
-                         "signature": lambda pid, d: dict(sig),
-                         "click_at": lambda p, b, dbl, d: (clicks.append((p, b, dbl)), change and sig.update(n=1), 0)[2]}.items():
-            p = patch.object(screen, name, fn)
-            p.start()
-            self.addCleanup(p.stop)
+        self.patch_all({"pointer": lambda: pts[0] if len(pts) == 1 else pts.pop(0),
+                        "app_at": lambda p: (7, 99), "_app_info": lambda pid: ("Pad", "com.pad"),
+                        "process_start": lambda pid, d: "s", "signature": lambda pid, d: dict(sig),
+                        "click_at": lambda p, b, dbl, d, expect=None: (clicks.append((p, b, dbl)),
+                                                                       change and sig.update(n=1), 0)[2]})
         return clicks
 
-    def test_click_at_the_pointer_right_where_it_is(self):
+    def test_click_at_the_pointer_is_delivered_never_done(self):
         clicks = self.pointer_setup([(100.4, 200.6)])
         v = self.run_action("pointer.click", {"button": "left", "double": False})
-        self.assertEqual((v["state"], clicks), ("completed", [((100, 201), "left", False)]))
+        self.assertEqual((v["state"], clicks), ("unverified", [((100, 201), "left", False)]))
+        self.assertEqual(v["steps"][0]["facts"]["observed"], ["n"])  # recorded, but a timer could do the same
 
     def test_a_pointer_that_moved_after_the_ok_never_clicks(self):
         clicks = self.pointer_setup([(100, 200), (400, 300)])
         v = self.run_action("pointer.click", {"button": "left"})
         self.assertEqual((v["state"], v["steps"][0]["detail"], clicks), ("failed", "the pointer moved", []))
 
-    def test_a_click_that_changes_nothing_is_unverified(self):
-        self.pointer_setup([(100, 200)], change=False)
-        self.assertEqual(self.run_action("pointer.click", {"button": "left"})["state"], "unverified")
+    def test_the_pointer_moving_between_events_stops_the_click(self):
+        import Quartz
+        posted, where = [], [(100, 100)]
+        with patch.object(Quartz, "CGEventPost", lambda tap, e: (posted.append(e), where.__setitem__(0, (900, 900)))), \
+                patch.object(screen, "pointer", lambda: where[0]), patch.object(screen, "app_at", lambda p: (7, 99)), \
+                patch.object(screen, "_abandoned", []):
+            with self.assertRaises(screen.Moved) as ctx:
+                screen.click_at((100, 100), "left", True, time.monotonic() + 2, expect=(7, 99))
+        self.assertEqual((len(posted), ctx.exception.args[0]), (2, 2))  # the first click went down and up, no second
+
+
 
 
 if __name__ == "__main__":

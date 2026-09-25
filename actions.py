@@ -801,11 +801,12 @@ _scrolled = {}  # id(target) -> position before
 
 def resolve_screen_scroll(args):
     """The frontmost window's main scrollable view. A named app ("in Chrome") must be the one in front."""
-    deadline = time.monotonic() + RESOLVE_BUDGET
+    deadline = resolve_deadline()
     try:
         snap = screen.observe(ocr=False, deadline=deadline)
         wanted = (args.get("app") or "").strip().lower()
-        if wanted and wanted not in snap.app.lower() and wanted not in {"the browser", "browser", "this page", "the page", "page", "here", "this", "it"}:
+        if wanted and wanted not in snap.app.lower() and wanted not in {"the browser", "browser", "this page", "the page",
+                                                                         "page", "here", "this", "it"}:
             return ("none", "that app isn't in front")
         kind, el = screen.bounded(lambda: screen.scroll_target(snap.window_ref), deadline)
     except (screen.Unavailable, screen.TimedOut, screen.Wedged) as exc:
@@ -817,19 +818,33 @@ def resolve_screen_scroll(args):
                        "amount": args.get("amount", "normal")})
 
 
+def _same_front(t, deadline):
+    """The target's app is still in front, the same process, with the same window: checked right before an effect,
+    after any wait or confirmation, Automatic included."""
+    if screen.frontmost()[0] != t["pid"] or screen.process_start(t["pid"], deadline) != t["started"]:
+        return "another app is in front now"
+    if screen.current_window(t["pid"], deadline) != t["window"]:
+        return "the window changed"
+    return None
+
+
 def run_screen_scroll(t, deadline):
     ref = screen.element_for(t.get("element"))
     if ref is None:
         raise Failed("unknown view")
     try:
-        if screen.process_start(t["pid"], deadline) != t["started"]:
-            raise Failed("the app restarted")
-        before = screen.bounded(lambda: screen.scroll_position(t["how"], ref), deadline)
+        why = _same_front(t, deadline)
+        if why:
+            raise Failed(why)
+        before = screen.bounded(lambda: screen.scroll_position(t["how"], ref), deadline) if t["how"] == "bar" else None
     except (screen.Unavailable, screen.TimedOut, screen.Wedged) as exc:
         raise Failed(f"screen read failed before scrolling: {exc}")
-    _scrolled[id(t)] = (before, time.monotonic(), ref)
+    if t["how"] == "bar" and before is None:
+        raise Failed("can't read the scroll position")
     try:
         err = screen.scroll(t["how"], ref, t["direction"], t["amount"], deadline)
+    except screen.Unavailable as exc:
+        raise Failed(str(exc))  # checked before anything was written
     except screen.Wedged as exc:
         raise Failed(str(exc))
     except screen.TimedOut as exc:
@@ -840,50 +855,68 @@ def run_screen_scroll(t, deadline):
         raise Failed(f"the view refused to scroll (AX error {err})")
     if err != 0:
         raise Uncertain(f"AX error {err} after scrolling")
+    pick, pick_before = screen._last_pick if t["how"] == "web" else (None, None)
+    _scrolled[id(t)] = (before if t["how"] == "bar" else pick_before, time.monotonic(), ref, pick)
 
 
 def verify_screen_scroll(t, deadline):
-    before, at, ref = _scrolled.get(id(t), (None, 0, None))
-    after = screen.bounded(lambda: screen.scroll_position(t["how"], ref), deadline)
-    if before is not None and after is not None and after != before:
+    """Native: the bar value moved. Web: the element the scroll targeted moved and is now inside the view. A failed
+    read or any other change proves nothing."""
+    before, at, ref, pick = _scrolled.get(id(t), (None, 0, None, None))
+    if t["how"] == "bar":
+        after = screen.bounded(lambda: screen.scroll_position("bar", ref), deadline)
+        moved = before is not None and after is not None and after != before
+    else:
+        after = screen.bounded(lambda: screen.scroll_position("web", ref, pick), deadline)
+        view = screen.bounded(lambda: screen._frame(ref), deadline)
+        moved = (before is not None and after is not None and after != tuple(round(x) for x in before) and view is not None
+                 and view[1] <= after[1] < view[1] + view[3])
+    if moved:
         _scrolled.pop(id(t), None)
         return ("done", {"moved": True})
     if time.monotonic() - at < SETTLE:
         return ("wait", {})
     _scrolled.pop(id(t), None)
-    return ("unverified", {"delivered": True, "why": "the view didn't move (maybe already at the edge)"})
+    return ("unverified", {"delivered": True, "why": "couldn't confirm the view moved"})
 
 
 _clicked = {}  # id(target) -> (signature before, dispatched_at)
 
 
 def resolve_pointer_click(args):
-    """Wherever the pointer is: the app and window under it, and the exact point."""
+    """Wherever the pointer is: the ordinary window on top under it, its process, and the exact point."""
     try:
         point = screen.pointer()
         pid, wid = screen.app_at(point)
         if pid is None:
-            return ("none", "nothing under the pointer")
+            return ("none", "something is covering that spot")
         app, _ = screen._app_info(pid)
+        started = screen.process_start(pid, time.monotonic() + 1)
     except Exception as exc:
         return ("none", f"can't read the pointer: {exc}")
-    return ("target", {"pid": pid, "app": app, "window_number": wid, "point": [round(point[0]), round(point[1])],
-                       "button": args.get("button", "left"), "double": bool(args.get("double")),
-                       "confirm": False})
+    return ("target", {"pid": pid, "started": started, "app": app, "window_number": wid,
+                       "point": [round(point[0]), round(point[1])], "button": args.get("button", "left"),
+                       "double": bool(args.get("double")), "confirm": False})
 
 
 def run_pointer_click(t, deadline):
     point = screen.pointer()
-    pid, wid = screen.app_at(point)
-    if [round(point[0]), round(point[1])] != t["point"] or (pid, wid) != (t["pid"], t["window_number"]):
+    if [round(point[0]), round(point[1])] != t["point"] or screen.app_at(point) != (t["pid"], t["window_number"]):
         raise Failed("the pointer moved")  # after a confirmation, never click somewhere the user didn't approve
     try:
+        if screen.process_start(t["pid"], deadline) != t["started"]:
+            raise Failed("the app restarted")
         before = screen.signature(t["pid"], deadline)
     except (screen.TimedOut, screen.Wedged, screen.Unavailable) as exc:
         raise Failed(f"screen read failed before clicking: {exc}")
     _clicked[id(t)] = (before, time.monotonic())
     try:
-        screen.click_at(tuple(t["point"]), t["button"], t["double"], deadline)
+        screen.click_at(tuple(t["point"]), t["button"], t["double"], deadline,
+                        expect=(t["pid"], t["window_number"]))
+    except screen.Moved as exc:
+        if exc.args and exc.args[0]:
+            raise Uncertain("the pointer moved partway through the click")
+        raise Failed("the pointer moved")
     except screen.Wedged as exc:
         raise Failed(str(exc))
     except screen.TimedOut as exc:
@@ -891,16 +924,19 @@ def run_pointer_click(t, deadline):
 
 
 def verify_pointer_click(t, deadline):
+    """A click at an arbitrary spot has no postcondition that can be checked: it is always reported as delivered,
+    with whatever changed in that window recorded, and never as done."""
     before, at = _clicked.get(id(t), (None, 0))
-    after = screen.signature(t["pid"], deadline)
-    changed = sorted(k for k in (before or {}) if before.get(k) != after.get(k))
-    if changed:
-        _clicked.pop(id(t), None)
-        return ("done", {"changed": changed, "means": "the app under the pointer changed after the click"})
     if time.monotonic() - at < SETTLE:
         return ("wait", {})
     _clicked.pop(id(t), None)
-    return ("unverified", {"delivered": True, "why": "clicked; nothing in that window changed"})
+    try:
+        after = screen.signature(t["pid"], deadline)
+        observed = sorted(k for k in (before or {}) if before.get(k) != after.get(k))
+    except Exception:
+        observed = []
+    return ("unverified", {"delivered": True, "observed": observed,
+                           "why": "clicked; a click at the pointer has nothing specific to check"})
 
 
 def run_screen_list(t, deadline):
@@ -992,7 +1028,7 @@ ACTIONS = {
 }
 
 EFFECTS = ("open", "navigate", "media", "volume", "display", "timer", "scroll", "click", "type", "submit", "task",
-           "risky", "quit", "lock", "sleep")
+           "in_task", "risky", "quit", "lock", "sleep")
 DEFAULT_POLICY = {e: ("ask" if e in ("quit", "lock", "sleep", "click", "type", "submit", "task", "risky") else "auto")
                   for e in EFFECTS}  # in_task "auto": the task's one OK covers its clicks, typing and Return
 DEFAULT_POLICY["look"] = "auto"  # reading the screen has no effect, so it is not a setting

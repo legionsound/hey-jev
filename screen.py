@@ -737,6 +737,7 @@ def scan_fields(win, node_cap=6000, time_cap=0.5):
 
 # --------------------------------------------------------------------------- scrolling and the pointer
 SCROLL_STEP = {"little": 0.08, "normal": 0.25, "lot": 0.6}
+_last_pick = [None, None]  # [web element the last scroll targeted, its frame before]: its movement is the evidence
 
 
 def _all(el, role, cap=3000):
@@ -765,17 +766,16 @@ def scroll_target(window):
     return ("web", webs[0]) if webs else (None, None)
 
 
-def scroll_position(kind, el):
-    """Something that changes when the view scrolls: the bar's value, or the first on-screen web element's top."""
+def scroll_position(kind, el, pick=None):
+    """Evidence of scrolling. Native: the bar's value (None if unreadable). Web: the frame of the element the scroll
+    targeted, which moves into view when the page really scrolled (None when there is no such element yet)."""
     if kind == "bar":
-        v = _attr(el, "AXValue")
-        return round(float(v), 4) if isinstance(v, (int, float)) else None
-    view = _frame(el)
-    if not view:
+        st, v = _read(el, "AXValue")
+        return round(float(v), 4) if st == "ok" and isinstance(v, (int, float)) and not isinstance(v, bool) else None
+    if pick is None:
         return None
-    texts = [f for f in (_frame(n) for n in _all(el, "AXStaticText", cap=1500)) if f]
-    visible = [f for f in texts if view[1] <= f[1] < view[1] + view[3]][:5]
-    return tuple(round(f[1]) for f in visible) or None  # where the first visible lines sit: they shift on a scroll
+    f = _frame(pick)
+    return tuple(round(x) for x in f) if f else None
 
 
 def scroll(kind, el, direction, amount, deadline):
@@ -784,8 +784,15 @@ def scroll(kind, el, direction, amount, deadline):
     def run():
         AS = _AS()
         if kind == "bar":
-            v = _attr(el, "AXValue")
-            v = float(v) if isinstance(v, (int, float)) else 0.0
+            import math
+            st, v = _read(el, "AXValue")
+            if st != "ok" or isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) \
+                    or not 0 <= v <= 1:
+                raise Unavailable("can't read the scroll position")  # never write from a guess
+            if (direction == "down" and v >= 1) or (direction == "up" and v <= 0):
+                return AX_NO_VALUE  # already at the edge: nothing is written
+            if not _settable(el, "AXValue"):
+                raise Unavailable("the scroll bar can't be moved")
             step = SCROLL_STEP.get(amount, 0.25) * (1 if direction == "down" else -1)
             target = 1.0 if amount == "end" and direction == "down" else 0.0 if amount == "end" else min(1, max(0, v + step))
             return int(AS.AXUIElementSetAttributeValue(el, "AXValue", target))
@@ -805,6 +812,9 @@ def scroll(kind, el, direction, amount, deadline):
         if not beyond:
             return AX_NO_VALUE  # nothing further that way: already at the edge
         pick = beyond[-1][0] if amount == "end" else min(beyond, key=lambda p: abs(p[1][1] - aim))[0]
+        if "AXScrollToVisible" not in _actions(pick):
+            raise Unavailable("that page can't be scrolled this way")
+        _last_pick[:] = [pick, _frame(pick)]
         return int(AS.AXUIElementPerformAction(pick, "AXScrollToVisible"))
     return bounded(run, deadline, effect=True)
 
@@ -817,31 +827,46 @@ def pointer():
 
 
 def app_at(point):
-    """(pid, window number) of the ordinary window under a point, front to back, or (None, None)."""
+    """(pid, window number) of the topmost window under a point, or (None, None) when that window is Hey Jev's own,
+    an overlay, a menu or anything but an ordinary window: a click there wouldn't land where the target says."""
     import Quartz
     x, y = point
     opts = Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements
-    for w in Quartz.CGWindowListCopyWindowInfo(opts, Quartz.kCGNullWindowID) or []:
+    for w in Quartz.CGWindowListCopyWindowInfo(opts, Quartz.kCGNullWindowID) or []:  # front to back
         b = w.get("kCGWindowBounds") or {}
-        if w.get("kCGWindowLayer") != 0 or w.get("kCGWindowOwnerPID") == os.getpid():
+        if not (b.get("X", 0) <= x < b.get("X", 0) + b.get("Width", 0) and b.get("Y", 0) <= y < b.get("Y", 0) + b.get("Height", 0)):
             continue
-        if b.get("X", 0) <= x < b.get("X", 0) + b.get("Width", 0) and b.get("Y", 0) <= y < b.get("Y", 0) + b.get("Height", 0):
-            return int(w["kCGWindowOwnerPID"]), int(w["kCGWindowNumber"])
+        if float(w.get("kCGWindowAlpha", 1)) == 0:
+            continue  # fully transparent windows take no clicks
+        if w.get("kCGWindowLayer") != 0 or w.get("kCGWindowOwnerPID") == os.getpid():
+            return None, None  # covered by an overlay, a menu or our own window
+        return int(w["kCGWindowOwnerPID"]), int(w["kCGWindowNumber"])
     return None, None
 
 
-def click_at(point, button, double, deadline):
-    """A real mouse click at the pointer's current place (it is where the user put it; nothing moves)."""
+def click_at(point, button, double, deadline, expect=None):
+    """A real mouse click exactly at `point`, where the user's pointer is. Immediately before each press the pointer
+    must still be there and `expect` (pid, window number) still the topmost window under it; otherwise the click stops
+    (raises Moved, with the events already posted). A press that went down is always released, never left held."""
     def run():
         import Quartz
         down, up, btn = ((Quartz.kCGEventLeftMouseDown, Quartz.kCGEventLeftMouseUp, Quartz.kCGMouseButtonLeft)
                          if button == "left" else
                          (Quartz.kCGEventRightMouseDown, Quartz.kCGEventRightMouseUp, Quartz.kCGMouseButtonRight))
+        posted = 0
         for n in (1, 2) if double else (1,):
+            here = pointer()  # checked before each press; a press already down is always released
+            if (round(here[0]), round(here[1])) != (round(point[0]), round(point[1])) or \
+                    (expect is not None and app_at(here) != tuple(expect)):
+                raise Moved(posted)
             for kind in (down, up):
                 e = Quartz.CGEventCreateMouseEvent(None, kind, point, btn)
                 Quartz.CGEventSetIntegerValueField(e, Quartz.kCGMouseEventClickState, n)
                 Quartz.CGEventPost(Quartz.kCGHIDEventTap, e)
+                posted += 1
         return 0
     return bounded(run, deadline, effect=True)
 
+
+class Moved(Exception):
+    """The pointer or the window under it changed during a click. args[0]: events already posted."""

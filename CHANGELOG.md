@@ -64,6 +64,7 @@ A ground-up rework of how commands run, plus screen control. Everything a comman
 - Every model the app uses (Jev, answers, Whisper, Fish voice model, OCR level) is a setting, defaulting to the original values.
 - Status window redesigned with Liquid Glass.
 - Menu bar icon is now a person-speaking symbol.
+- App icon replaced with the approved frosted voice-and-screen design; editable SVG source included in assets/.
 - App renamed to just "Hey Jev" (bundle id unchanged).
 
 ### Development

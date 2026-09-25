@@ -5,6 +5,7 @@ import os
 import queue
 import sys
 import threading
+import time
 
 import AppKit
 import objc
@@ -254,6 +255,89 @@ def numbers_window(facts):
     return win
 
 
+INSPECT_COLORS = {"press": NSColor.systemBlueColor, "field": NSColor.systemOrangeColor,
+                  "ax": NSColor.systemTealColor, "shared": NSColor.systemGrayColor, "local": NSColor.tertiaryLabelColor}
+
+
+def inspect_window(view):
+    """Click-through boxes, numbers and names over every item, coloured by what Hey Jev knows about it: blue can be
+    pressed, orange is a text field, teal is other Accessibility, grey is text read off the screen and shared with
+    Jev, faint is text that stays on the Mac. A readout gives the app, count, read time and age."""
+    items = view["items"]
+    top = AppKit.NSScreen.screens()[0].frame().size.height
+    x0 = min(i["frame"][0] for i in items) - 30
+    y0 = min(i["frame"][1] for i in items) - 18
+    x1 = max(i["frame"][0] + i["frame"][2] for i in items) + 6
+    y1 = max(i["frame"][1] + i["frame"][3] for i in items) + 26
+    win = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+        NSMakeRect(x0, top - y1, x1 - x0, y1 - y0), 0, 2, False)
+    win.setOpaque_(False)
+    win.setBackgroundColor_(NSColor.clearColor())
+    win.setIgnoresMouseEvents_(True)
+    win.setLevel_(AppKit.NSStatusWindowLevel)
+    win.setCollectionBehavior_(1 << 0 | 1 << 4)
+    win.setReleasedWhenClosed_(False)
+    win.setSharingType_(0)  # NSWindowSharingNone: never captured, so it can't be read back as screen text
+    content, h = win.contentView(), y1 - y0
+    for i in items:
+        kind = ("press" if i["pressable"] else "field" if i.get("field") else "ax") if i["source"] != "ocr" \
+            else ("shared" if i["shared"] else "local")
+        color = INSPECT_COLORS[kind]()
+        fx, fy, fw, fh = i["frame"]
+        box = NSView.alloc().initWithFrame_(NSMakeRect(fx - x0, h - (fy - y0) - fh, fw, fh))
+        box.setWantsLayer_(True)
+        box.layer().setBorderColor_(color.CGColor())
+        box.layer().setBorderWidth_(1.5)
+        box.layer().setCornerRadius_(3)
+        content.addSubview_(box)
+        text = f"{i['n']} {i['label'][:28]}" if i["source"] != "ocr" else str(i["n"])  # text shows its own words
+        tag = NSTextField.labelWithString_(text)
+        tag.setFont_(NSFont.monospacedDigitSystemFontOfSize_weight_(10, 0.5))
+        tag.setTextColor_(NSColor.whiteColor())
+        tag.setWantsLayer_(True)
+        tag.layer().setBackgroundColor_(color.CGColor())
+        tag.layer().setCornerRadius_(4)
+        tag.sizeToFit()
+        tw = tag.frame().size.width + 6
+        if i["source"] == "ocr":  # a small number just left of the line, so dense text stays readable
+            tag.setFrame_(NSMakeRect(max(0, fx - x0 - tw - 2), h - (fy - y0) - min(fh, 14), tw, 14))
+        else:
+            tag.setFrame_(NSMakeRect(fx - x0, h - (fy - y0) + 1, tw, 14))
+        content.addSubview_(tag)
+    hud = NSTextField.labelWithString_(hud_text(view))
+    hud.setFont_(NSFont.systemFontOfSize_weight_(11, 0.5))
+    hud.setTextColor_(NSColor.whiteColor())
+    hud.setWantsLayer_(True)
+    hud.layer().setBackgroundColor_(NSColor.colorWithWhite_alpha_(0, 0.7).CGColor())
+    hud.layer().setCornerRadius_(5)
+    hud.sizeToFit()
+    hud.setFrame_(NSMakeRect(0, 2, hud.frame().size.width + 60, 18))  # along the bottom, clear of the tags
+    hud.setIdentifier_("hud")
+    content.addSubview_(hud)
+    return win
+
+
+STALE_AFTER = 2.5
+
+
+def hud_text(view):
+    age = max(0.0, time.time() - view.get("at", time.time()))
+    text = f"Jev sees: {view.get('app', '?')} · {len(view['items'])} items · read in {view.get('ms', 0)} ms · {age:.1f} s ago"
+    if age > STALE_AFTER:
+        text += " · STALE (paused while a command runs)"
+    if not view.get("complete", True):
+        text += " · field scan incomplete: OCR withheld"
+    return text
+
+
+def update_inspect_hud(win, view):
+    stale = time.time() - view.get("at", time.time()) > STALE_AFTER
+    win.setAlphaValue_(0.35 if stale else 1.0)
+    for sub in win.contentView().subviews():
+        if sub.identifier() == "hud":
+            sub.setStringValue_(hud_text(view))
+
+
 class AppDelegate(NSObject):
     def applicationDidFinishLaunching_(self, _notification):
         self.controls = queue.Queue()
@@ -468,6 +552,8 @@ class AppDelegate(NSObject):
         hint = menu.addItemWithTitle_action_keyEquivalent_("Timer chimes remain audible", None, "")
         hint.setEnabled_(False)
         menu.addItem_(NSMenuItem.separatorItem())
+        self.inspect_item = menu.addItemWithTitle_action_keyEquivalent_("Show what Jev sees", "toggleInspect:", "")
+        self.inspect_item.setTarget_(self)
         for title, action in (("Show status", "showMain:"), ("Settings…", "showSettings:")):
             menu.addItemWithTitle_action_keyEquivalent_(title, action, "").setTarget_(self)
         self.menu_only_item = menu.addItemWithTitle_action_keyEquivalent_("Menu bar only", "toggleMenuOnly:", "")
@@ -1606,6 +1692,53 @@ class AppDelegate(NSObject):
         self.model_info.setStringValue_(f"Selected: {self.selected_model}" + (f" · {context:,} context tokens" if context else ""))
         self._sync_advanced_summary()
 
+    def toggleInspect_(self, _sender):
+        """Live inspection on/off: numbered, labelled boxes over what Hey Jev reads, refreshed about once a second."""
+        import inspector
+        if getattr(self, "inspector", None) is None:
+            def busy():
+                siri = sys.modules.get("siri")
+                return bool(siri and siri.ENGINE and siri.ENGINE.active())
+            self.inspector = inspector.Inspector(
+                lambda view: self.performSelectorOnMainThread_withObject_waitUntilDone_("showInspect:", view or {}, False),
+                busy=busy)
+        if self.inspector.running:
+            self.inspector.stop()
+            self.inspect_item.setState_(0)
+        else:
+            self.inspector.start()
+            self.inspect_item.setState_(1)
+
+    def showInspect_(self, view):
+        """Paint on the main thread, only if this view's generation is still current: a callback queued before the
+        toggle went off (or before a restart) never paints over the cleared state."""
+        ins = getattr(self, "inspector", None)
+        if view and (ins is None or not ins.current(view.get("gen", -1))):
+            return
+        old = getattr(self, "inspect_window", None)
+        self.inspect_window = inspect_window(view) if view and view.get("items") else None
+        self.inspect_view = view if self.inspect_window is not None else None
+        if self.inspect_window is not None:
+            if not getattr(self, "number_windows", None):  # badges own the numbers while they show: HUD waits
+                self.inspect_window.orderFrontRegardless()
+            if getattr(self, "inspect_timer", None) is None:
+                self.inspect_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                    0.5, self, "inspectTick:", None, True)
+        if old is not None:
+            old.orderOut_(None)
+        self.publish_displayed()  # painted, hidden, cleared: "click N" follows what is actually visible
+        if self.inspect_window is None and getattr(self, "inspect_timer", None) is not None:
+            self.inspect_timer.invalidate()
+            self.inspect_timer = None
+
+    def inspectTick_(self, _timer):
+        """Keep the age honest between refreshes: it counts from the actual read, and an old view is marked stale
+        and dimmed (reads pause while a command runs)."""
+        w, view = getattr(self, "inspect_window", None), getattr(self, "inspect_view", None)
+        if w is None or view is None:
+            return
+        update_inspect_hud(w, view)
+
     @objc.python_method
     def show_numbers(self, facts):
         """Engine worker thread: badge each listed item with its number, over the window, for a few seconds."""
@@ -1617,12 +1750,34 @@ class AppDelegate(NSObject):
         self.number_windows = [numbers_window(facts)] if facts.get("items") else []
         for w in self.number_windows:
             w.orderFrontRegardless()
-        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(12.0, self, "hideNumbers:", None, False)
+        if self.number_windows and getattr(self, "inspect_window", None) is not None:
+            self.inspect_window.orderOut_(None)  # one numbered view at a time: the HUD steps aside for the badges
+        self.numbers_version = facts.get("version") if self.number_windows else None
+        self.publish_displayed()
+        if getattr(self, "numbers_timer", None) is not None:
+            self.numbers_timer.invalidate()  # an earlier badge set's timer must not hide these early
+        self.numbers_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            12.0, self, "hideNumbers:", None, False)
 
     def hideNumbers_(self, _timer):
         for w in getattr(self, "number_windows", []):
             w.orderOut_(None)
-        self.number_windows = []
+        self.number_windows, self.numbers_version, self.numbers_timer = [], None, None
+        if getattr(self, "inspect_window", None) is not None:
+            self.inspect_window.orderFrontRegardless()  # badges gone: the HUD's numbers are back
+        self.publish_displayed()
+
+    @objc.python_method
+    def publish_displayed(self):
+        """Tell screen which numbered list is visible now. Badges sit on top of the HUD, so while both show, numbers
+        mean the badges; when the badges expire the HUD's list is back in charge; with neither, nothing is bound."""
+        import screen
+        if getattr(self, "number_windows", None):
+            screen.set_displayed(getattr(self, "numbers_version", None))  # badges without a version bind nothing
+        elif getattr(self, "inspect_window", None) is not None:
+            screen.set_displayed(self.inspect_view.get("version"))
+        else:
+            screen.set_displayed(None)
 
     @objc.python_method
     def ask_confirm(self, pending):

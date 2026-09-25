@@ -397,10 +397,41 @@ def direct(clause):
     return None
 
 
+ORDINALS = {w: i for i, w in enumerate("first second third fourth fifth sixth seventh eighth ninth tenth".split(), 1)}
+NOUNS = r"video|result|link|song|track|post|article|email|message|item|row|tab|button|thumbnail|playlist|channel"
+PICK = re.compile(r"^\W*(?:please\s+)?(?:click|press|tap|open|play|select|choose|pick)\s+(?:on\s+)?the\s+"
+                  r"(?:(?P<ord>" + "|".join(ORDINALS) + r"|last|\d{1,2}(?:st|nd|rd|th))\s+)?(?P<q>(?:(?!(?:" + NOUNS + r")s?\b)[\w'-]+\s+){1,2}?)?(?P<noun>" + NOUNS + r")s?\b"
+                  r"(?:\s+(?:in|at|on)\s+the\s+(?P<v>top|bottom|middle)(?:[\s-]+(?P<h>left|right))?"
+                  r"(?:\s+(?:corner|of\s+the\s+(?:page|screen|window)))?)?"
+                  r"(?:\s+(?:in|on)\s+(?:the\s+)?(?P<app>[\w .'-]+?)(?:\s+(?:tab|window|app))?)?[\s.!?]*$", re.I)
+
+
+def pick_args(clause):
+    """"the third video", "the last result", "the video in the bottom-right": {"noun", "ordinal" | "where"}, or None.
+    Plain "click the video" with neither an ordinal nor a place isn't a pick: it names one thing."""
+    m = PICK.match(clause)
+    if not m or not (m["ord"] or m["v"]):
+        return None
+    out = {"noun": m["noun"].lower()}
+    if m["q"]:
+        out["kind"] = m["q"].strip()  # "the third YouTube video": Jev hears "YouTube video"
+    if m["ord"]:
+        o = m["ord"].lower()
+        out["ordinal"] = -1 if o == "last" else ORDINALS.get(o) or int(re.match(r"\d+", o).group())
+    if m["v"]:
+        out["where"] = m["v"].lower() + ("-" + m["h"].lower() if m["h"] else "")
+    if m["app"]:
+        out["app"] = m["app"].strip()
+    return out
+
+
 def pick(ans, clause, inherited_browser=None):
     """Trust Jev's target if it is fairly sure, else the single most confident action anywhere.
     "Click" and "tap", or a named UI part ("the Loud mode checkbox"), always mean a control on screen:
     Jev's target question hears "Loud" as volume, and that must never turn a click into a volume change."""
+    p = pick_args(clause)
+    if p:  # "the third video": Jev says which items are videos, the code counts
+        return (ans["target"][1], "screen.pick", p)
     if SUBMIT_WORDS.match(clause):  # Return in the selected field: exact words only, never inferred
         return (ans["target"][1], "screen.submit", {})
     if UI_WORDS.search(clause):
@@ -417,7 +448,7 @@ def pick(ans, clause, inherited_browser=None):
     return s
 
 
-def judge(ans, clause, can_answer=False, inherited_browser=None):
+def judge(ans, clause, can_answer=False, inherited_browser=None, implied=False):
     """One clause -> ("step", step) | ("reply", key) | ("answer", None) | ("clarify", reason)."""
     cat, cconf = ans["category"]
     if ans["target"][0] == "timer" and ans["target"][1] >= GATE and not ans["compound"][0]:
@@ -435,6 +466,11 @@ def judge(ans, clause, can_answer=False, inherited_browser=None):
     s = pick(ans, clause, inherited_browser)
     if s and s[1] == "clarify":
         return ("clarify", s[2])
+    if not s and implied and cat == "mac_command" and cconf >= GATE and len(clause.split()) >= 2:
+        # a command nothing built in does ("reload this page", "mute this video"): Jev picks the one control on
+        # screen that does it, or none. The press runs with the usual checks and click confirmation. Single-clause
+        # requests of two words or more only: a lone word ("google") or a stray clause in a list never presses.
+        return ("step", {"clause": clause, "action": "screen.press", "args": {"intent": clause}})
     if not s:
         return ("answer", None) if can_answer and cat == "information_request" else ("clarify", "no_action")
     return ("step", {"clause": clause, "action": s[1], "args": s[2]})
@@ -458,6 +494,8 @@ def plan(text, classify, can_answer=False):
     goal = task.goal_of(text)
     if goal:  # an explicit task opening: Jev drives it step by step, nothing is split or classified here
         return ("steps", [{"clause": text, "action": "task.run", "args": {"goal": goal}}])
+    if re.fullmatch(r"\W*(?:please\s+)?(?:take\s+over|work\s+on)[\s:,.!?]*", text or "", re.I):
+        return ("clarify", "task_no_goal")
     clauses = split_clauses(text)
     if not clauses:
         return ("clarify", "empty")
@@ -467,7 +505,7 @@ def plan(text, classify, can_answer=False):
         d = direct(clauses[0])  # the words say exactly what to do: no classification needed
         if d:
             return ("steps", [{"clause": clauses[0], "action": d[0], "args": d[1]}])
-        kind, got = judge(classify(clauses[0]), clauses[0], can_answer)
+        kind, got = judge(classify(clauses[0]), clauses[0], can_answer, implied=True)
         return ("steps", [got]) if kind == "step" else (kind, got)
     steps = []
     browser = None  # same-request only: an earlier "open Safari/Chrome" applies to later website steps

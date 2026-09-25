@@ -450,6 +450,7 @@ RISKY = re.compile(r"\b(buy|purchase|order|pay|checkout|check out|send|submit|po
                    re.I)
 CHOOSE = None  # set by the app: (spoken, [labels]) -> (index or None, confidence). Only control names are sent.
 CHOOSE_GATE = 0.65
+INTENT_GATE = 0.75  # no control was named: Jev must be surer before a press happens
 RESOLVE_BUDGET = 3.0  # one deadline over every native read a resolve makes
 RESOLVE_UNTIL = None  # set by the engine while a task step resolves: never past the task's shared deadline
 
@@ -498,6 +499,43 @@ def valid_choice(got, n):
     return (idx, float(conf))
 
 
+def _shown_list(args):
+    """The numbered list a number refers to. Spoken: exactly the list displayed when the user started speaking
+    (args["shown"] is its version), refused when the display changed mid-sentence, nothing was shown, or the version
+    is too old. Typed (no "shown" at all): the current list. -> Snapshot, None, or "stale"."""
+    if "shown" not in args:
+        return screen.last()
+    v = args["shown"]
+    if not isinstance(v, int) or isinstance(v, bool):
+        return "stale"
+    return screen.shown(v) or "stale"
+
+
+CARD_BELOW, CARD_ABOVE, CARD_SIDE, CARD_WORDS = 70, 20, 12, 3
+
+
+def describe_cards(controls, context, frame):
+    """One short description per control for Jev: its own name, the shareable words right around it (the channel
+    under a video title, the price next to a product), and where it sits. Neighbours come only from what a task may
+    share with Jev (AX labels, and OCR text the field scan and text regions vouch for), minus any label that came
+    from an element's value: names, never contents."""
+    import task as task_mod
+    shareable, _ = task_mod.shareable(context)
+    out = []
+    for c in controls:
+        x, y, w, h = c.frame
+        near = []
+        for o in shareable:
+            if o.label == c.label or o.from_value or o.secure:  # never a field's or document's value
+                continue
+            ox, oy = o.frame[0] + o.frame[2] / 2, o.frame[1] + o.frame[3] / 2
+            if x - CARD_SIDE <= ox <= x + w + CARD_SIDE and y - CARD_ABOVE <= oy <= y + h + CARD_BELOW:
+                near.append((abs(oy - (y + h / 2)), o.label[:60]))
+        words = [t for _, t in sorted(near)][:CARD_WORDS]
+        out.append(f"“{c.label[:100]}”" + (f", near: {' · '.join(words)}" if words else "") + f", {_where(c, frame)}")
+    return out
+
+
 def resolve_screen_press(args):
     """A number from the last list the user saw, or a spoken control name, to one exact control the app declared."""
     deadline = resolve_deadline()
@@ -507,36 +545,44 @@ def resolve_screen_press(args):
         return ("none", f"can't read the screen: {exc}")
     controls = [i for i in snap.items if _live(i)]
     if args.get("number") is not None:
-        shown = screen.last()
-        if shown is None or not 1 <= args["number"] <= len(shown.items):
+        shown = _shown_list(args)
+        if shown == "stale":
+            return ("none", "the numbers changed since you spoke; ask what you can click again")
+        seen = next((i for i in shown.items if i.n == args["number"]), None) if shown is not None else None
+        if seen is None:
             return ("none", "no such number on the last list")
-        seen = shown.items[args["number"] - 1]
         if seen.source == "ocr":
             return ("none", "not_a_control")
         if (shown.pid, shown.started, shown.window_token) != (snap.pid, snap.started, snap.window_token):
             return ("none", "screen_changed")
         now = next((i for i in controls if i.token == seen.token and i.key() == seen.key()), None)
         return ("target", _screen_target(snap, now)) if now else ("none", "screen_changed")
-    said = screen._norm(args.get("label"))
+    intent = args.get("intent")
+    said = screen._norm(intent or args.get("label"))
     if not said:
         return ("none", "no control named")
-    exact = [i for i in controls if screen._norm(i.label) == said]
-    if not exact:
+    exact = [] if intent else [i for i in controls if screen._norm(i.label) == said]
+    if not exact and not intent:
         exact = [i for i in controls if f" {said} " in f" {screen._norm(i.label)} "]
     if not exact and CHOOSE:
-        named = [i for i in controls if not i.from_value]  # a field's or document's value is never sent
-        names = list(dict.fromkeys(i.label for i in named))
-        if names:
+        named = [i for i in controls if not i.from_value][:60]  # a field's or document's value is never sent
+        if named:
             try:
-                got = valid_choice(CHOOSE(args.get("label", ""), names), len(names))
+                context = screen.observe(pid=snap.pid, ocr=True, deadline=deadline)  # the words around each control
+            except (screen.Unavailable, screen.TimedOut, screen.Wedged):
+                context = snap
+            cards = describe_cards(named, context, snap.window_frame)
+            try:
+                got = valid_choice(CHOOSE(intent, cards, intent=True) if intent
+                                   else CHOOSE(args.get("label", ""), cards), len(cards))
             except Exception:
                 got = None
             if got is None:
                 return ("choices", [])  # a malformed answer asks again; nothing is pressed
-            if got[0] is not None and got[1] >= CHOOSE_GATE:
-                exact = [i for i in named if i.label == names[got[0]]]
+            if got[0] is not None and got[1] >= (INTENT_GATE if intent else CHOOSE_GATE):
+                exact = [named[got[0]]]
     if not exact:
-        return ("none", "no control by that name")
+        return ("none", "nothing on screen does that" if intent else "no control by that name")
     if len({i.token for i in exact}) > 1:
         return ("choices", [{"name": f"{i.label} ({_where(i, snap.window_frame)})"} for i in exact[:4]])
     return ("target", _screen_target(snap, exact[0]))
@@ -620,10 +666,12 @@ def resolve_screen_type(args):
     try:
         snap = screen.observe(ocr=False, deadline=deadline)
         if args.get("number") is not None:  # a field from the list the user (or a task) saw
-            shown = screen.last()
-            if shown is None or not 1 <= args["number"] <= len(shown.items):
+            shown = _shown_list(args)
+            if shown == "stale":
+                return ("none", "the numbers changed since you spoke; ask what you can click again")
+            seen = next((i for i in shown.items if i.n == args["number"]), None) if shown is not None else None
+            if seen is None:
                 return ("none", "no such number on the last list")
-            seen = shown.items[args["number"] - 1]
             if (shown.pid, shown.started, shown.window_token) != (snap.pid, snap.started, snap.window_token):
                 return ("none", "screen_changed")
             now = next((i for i in snap.items if i.token == seen.token and i.key() == seen.key()), None)
@@ -941,6 +989,93 @@ def verify_pointer_click(t, deadline):
                            "why": "clicked; a click at the pointer has nothing specific to check"})
 
 
+CLASSIFY_ITEMS = None  # set by the app: (noun, labels) -> [(is_one, confidence)] per label, from one Jev call
+ROLE_NOUNS = {"button": ("AXButton", "AXMenuButton", "AXPopUpButton"), "link": ("AXLink",),
+              "tab": ("AXTab", "AXRadioButton"), "row": ("AXRow", "AXCell"), "item": None}
+PICK_GATE = 0.65
+def reading_order(items):
+    """Rows top to bottom, then left to right: how a person counts "the third video" on a grid or a list.
+    Rows come from the items themselves, not fixed screen bands: an item joins the current row when its centre
+    lies within the vertical span of the row's first item, so aligned controls stay together wherever the window is."""
+    rows = []
+    for i in sorted(items, key=lambda i: (i.frame[1], i.frame[0])):
+        cy = i.frame[1] + i.frame[3] / 2
+        if rows and rows[-1][0] <= cy <= rows[-1][1]:
+            rows[-1][2].append(i)
+        else:
+            rows.append((i.frame[1], i.frame[1] + i.frame[3], [i]))
+    return [i for _, _, row in rows for i in sorted(row, key=lambda i: i.frame[0] + i.frame[2] / 2)]
+
+
+def nearest_to(items, where, frame):
+    """The item closest to a named place in the window: "bottom-right", "top", "middle-left"…"""
+    v, _, h = where.partition("-")
+    ty = {"top": 0.0, "middle": 0.5, "bottom": 1.0}[v]
+    tx = {"left": 0.0, "right": 1.0}.get(h)
+    x, y, w, hh = frame
+
+    def dist(i):
+        cx = (i.frame[0] + i.frame[2] / 2 - x) / max(w, 1)
+        cy = (i.frame[1] + i.frame[3] / 2 - y) / max(hh, 1)
+        return (cy - ty) ** 2 + ((cx - tx) ** 2 if tx is not None else 0)
+    return min(items, key=dist)
+
+
+def _valid_flag(g):
+    """(bool, finite 0-1 score), exactly."""
+    import math
+    return (isinstance(g, (tuple, list)) and len(g) == 2 and isinstance(g[0], bool)
+            and isinstance(g[1], (int, float)) and not isinstance(g[1], bool) and math.isfinite(g[1]) and 0 <= g[1] <= 1)
+
+
+def resolve_screen_pick(args):
+    """"the third video", "the last result", "the video in the bottom-right". Which on-screen controls are videos
+    (results, songs…) is Jev's call, one batched question over the pressable controls' names; counting and place
+    are the code's. The pick becomes an ordinary exact-element press target."""
+    deadline = resolve_deadline()
+    try:
+        snap = screen.observe(ocr=False, deadline=deadline)
+    except (screen.Unavailable, screen.TimedOut, screen.Wedged) as exc:
+        return ("none", f"can't read the screen: {exc}")
+    wanted = (args.get("app") or "").strip().lower()
+    if wanted and wanted not in snap.app.lower() and wanted not in {"the browser", "browser", "this page", "the page",
+                                                                     "page", "here", "this"}:
+        return ("none", "that app isn't in front")
+    noun = args.get("noun", "item")
+    pool = [i for i in snap.items if _live(i) and not i.from_value]
+    roles = ROLE_NOUNS.get(noun, "jev") if not args.get("kind") else "jev"  # a qualified noun is Jev's to judge
+    noun = f"{args['kind']} {noun}" if args.get("kind") else noun
+    if roles is None:
+        group = pool
+    elif roles != "jev":
+        group = [i for i in pool if i.role in roles]
+    else:
+        if not CLASSIFY_ITEMS or not pool:
+            return ("none", f"no {noun}s on screen")
+        labels = [i.label for i in pool][:60]
+        try:
+            got = CLASSIFY_ITEMS(noun, labels)
+        except Exception:
+            got = None
+        if not isinstance(got, list) or len(got) != len(labels) or not all(_valid_flag(g) for g in got):
+            return ("choices", [])  # a malformed answer asks again; nothing is pressed
+        group = [i for i, (yes, conf) in zip(pool, got) if yes is True and conf >= PICK_GATE]
+    if not group:
+        return ("none", f"no {noun}s on screen")
+    if "where" in args:
+        chosen = nearest_to(group, args["where"], snap.window_frame)
+    else:
+        ordered = reading_order(group)
+        k = args.get("ordinal", 1)
+        if k == -1:
+            chosen = ordered[-1]
+        elif isinstance(k, int) and 1 <= k <= len(ordered):
+            chosen = ordered[k - 1]
+        else:
+            return ("none", f"only {len(ordered)} {noun}{'s' if len(ordered) != 1 else ''} on screen")
+    return ("target", _screen_target(snap, chosen))
+
+
 def run_screen_list(t, deadline):
     try:
         snap = screen.observe(ocr=True, deadline=deadline)
@@ -952,7 +1087,7 @@ def run_screen_list(t, deadline):
 
 def verify_screen_list(t, deadline):
     snap = _listed.pop(id(t), None) or screen.last()
-    return ("done", {"app": snap.app, "count": len(snap.items), "ocr": snap.ocr,
+    return ("done", {"app": snap.app, "count": len(snap.items), "ocr": snap.ocr, "version": snap.version,
                      "items": [i.public() for i in snap.items]})
 
 
@@ -1018,6 +1153,8 @@ ACTIONS = {
     "screen.list": entry("look", plain, run_screen_list, verify_screen_list, "the list is what was read", 8),
     "screen.press": entry("click", resolve_screen_press, run_screen_press, verify_screen_press,
                           "the window changed after the press; not that the intended result happened", 6),
+    "screen.pick": entry("click", resolve_screen_pick, run_screen_press, verify_screen_press,
+                         "the picked control changed after the press; which one was picked is Jev's classification", 6),
     "screen.scroll": entry("scroll", resolve_screen_scroll, run_screen_scroll, verify_screen_scroll,
                            "the view's scroll position changed", 6),
     "pointer.click": entry("click", resolve_pointer_click, run_pointer_click, verify_pointer_click,
@@ -1078,7 +1215,7 @@ def describe(action, target):
             "screen.type": "Type “{text}” into {field} in {app}",
             "screen.submit": "Press Return in the selected field in {app}",
             "task.run": "Work on: {goal} (up to {steps} steps)",
-            "screen.scroll": "Scroll {direction} in {app}", "pointer.click": "Click where the pointer is, in {app}"}.get(action, action.replace(".", ": ").replace("_", " "))
+            "screen.pick": "Click “{label}” in {app}", "screen.scroll": "Scroll {direction} in {app}", "pointer.click": "Click where the pointer is, in {app}"}.get(action, action.replace(".", ": ").replace("_", " "))
     return what.format(name=name, url=t.get("url") or "the website", level=level, label=t.get("label") or "that",
                        text=t.get("text") or "", field=f"“{t['label']}”" if t.get("label") else "the selected field",
                        app=t.get("app") or "the app", goal=t.get("goal") or "this", steps=t.get("steps") or 15,

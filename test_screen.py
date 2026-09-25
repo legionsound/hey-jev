@@ -78,6 +78,21 @@ class PlannerTests(unittest.TestCase):
         ans.update(branch)
         return ans
 
+    def test_a_command_nothing_built_in_does_asks_which_control_does_it(self):
+        none = {f"{t}_action": ("none", 0.9) for t in ("screen", "app", "volume", "display", "media", "timer", "system")}
+        kind, steps = planner.plan("reload this page", lambda _: self.answers("screen", **none))
+        self.assertEqual((kind, steps[0]["action"], steps[0]["args"]),
+                         ("steps", "screen.press", {"intent": "reload this page"}))
+        kind, steps = planner.plan("switch to dark mode", lambda _: self.answers("display", display_action=("dark_on", 0.9)))
+        self.assertEqual(steps[0]["action"], "display.dark_on")  # a built-in action still wins
+        chat = lambda _: {**self.answers("screen", **none), "category": ("chit_chat", 0.9)}
+        self.assertEqual(planner.plan("you're great", chat)[0], "reply")  # only commands ever reach the screen
+        unsure = lambda _: {**self.answers("screen", **none), "category": ("mac_command", 0.5)}
+        self.assertEqual(planner.plan("hmm reload maybe", unsure), ("clarify", "no_action"))
+        self.assertEqual(planner.plan("refresh", lambda _: self.answers("screen", **none)), ("clarify", "no_action"))
+        kind, got = planner.plan("mute, then reload this page", lambda _: self.answers("screen", **none))
+        self.assertEqual((kind, got), ("clarify", "no_action"))  # never inside a multi-step request
+
     def test_click_and_ui_nouns_never_become_other_actions(self):
         # Real Jev heard "click on the Loud mode checkbox" as volume up (0.82): the click must stay a click.
         for said, target in [("click on the Loud mode checkbox", "volume"), ("tap the Play button", "media"),
@@ -241,12 +256,32 @@ class ScreenActionTests(unittest.TestCase):
         v = self.run_text("click compose", "screen.press", {"label": "compose"})
         self.assertEqual((v["state"], v["steps"][0]["target"]["label"]), ("completed", "New Note"))
 
+    def test_an_implied_press_is_the_one_control_jev_says_does_it(self):
+        fake = FakeScreen(self, [item(1, "Back"), item(2, "Reload")])
+        asked = []
+
+        def choose(spoken, labels, intent=False):
+            asked.append((spoken, intent))
+            return (1, 0.9)
+        with patch.object(actions, "CHOOSE", choose):
+            v = self.run_text("reload this page", "screen.press", {"intent": "reload this page"})
+        self.assertEqual(asked, [("reload this page", True)])
+        self.assertEqual((v["state"], v["steps"][0]["target"]["label"], len(fake.presses)), ("completed", "Reload", 1))
+
+    def test_an_implied_press_needs_a_surer_jev_and_never_matches_words(self):
+        fake = FakeScreen(self, [item(1, "reload this page"), item(2, "Reload")])
+        with patch.object(actions, "CHOOSE", lambda spoken, labels, intent=False: (1, 0.7)):
+            v = self.run_text("reload this page", "screen.press", {"intent": "reload this page"})
+        self.assertEqual((v["state"], v["steps"][0]["detail"], fake.presses), ("failed", "nothing on screen does that", []))
+
     def test_chooser_never_sees_field_or_document_values(self):
         FakeScreen(self, [item(1, "New Note"), item(2, "Dear Sam, the merger", role="AXCell", from_value=True)])
         seen = []
         with patch.object(actions, "CHOOSE", lambda spoken, labels: seen.append(labels) or (None, 0.0)):
             self.run_text("click compose", "screen.press", {"label": "compose"})
-        self.assertEqual(seen, [["New Note"]])
+        self.assertEqual(len(seen), 1)
+        self.assertNotIn("Dear Sam", repr(seen))  # neither as a choice nor as a neighbour in a card
+        self.assertEqual(len(seen[0]), 1)
 
     def test_risky_labels_always_ask_even_when_clicks_are_automatic(self):
         fake = FakeScreen(self, [item(1, "Delete everything")])
@@ -980,6 +1015,179 @@ class ScrollAndPointerTests(unittest.TestCase):
         self.assertEqual((len(posted), ctx.exception.args[0]), (2, 2))  # the first click went down and up, no second
 
 
+
+
+class PickTests(unittest.TestCase):
+    """"the third video": Jev classifies the controls, the code counts or finds the place, the press is exact."""
+
+    def setUp(self):
+        p = patch.object(diagnostics, "record", lambda *a, **k: None)
+        p.start()
+        self.addCleanup(p.stop)
+        self.sent, self.presses = [], []
+
+    def grid(self):
+        # a 2x2 grid of videos with channel names and a menu, as a video site lays it out
+        vids = [item(1, "Video A", role="AXLink", frame=(10, 10, 150, 20)), item(2, "Chan A", role="AXLink", frame=(10, 32, 80, 14)),
+                item(3, "Video B", role="AXLink", frame=(200, 12, 150, 20)), item(4, "Chan B", role="AXLink", frame=(200, 34, 80, 14)),
+                item(5, "Video C", role="AXLink", frame=(10, 210, 150, 20)), item(6, "Video D", role="AXLink", frame=(200, 208, 150, 20)),
+                item(7, "Menu", frame=(380, 5, 20, 20))]
+        return snap(vids)
+
+    def run_pick(self, args, current, answer=None, policy=None):
+        def classify(noun, labels):
+            self.sent.append((noun, list(labels)))
+            return answer(labels) if answer else [(l.startswith("Video"), 0.95) for l in labels]
+        fns = {"observe": lambda pid=None, ocr=True, deadline=None: current,
+               "signature": lambda pid, d: {"n": len(self.presses)},
+               "element_state": lambda ref, d: {"v": str(len(self.presses))},
+               "press": lambda ref, d: self.presses.append(ref) or 0}
+        for name, fn in fns.items():
+            p = patch.object(screen, name, fn)
+            p.start()
+            self.addCleanup(p.stop)
+        with patch.object(actions, "CLASSIFY_ITEMS", classify), \
+                patch.object(planner, "plan", lambda *a, **k: ("steps", [{"clause": "c", "action": "screen.pick",
+                                                                          "args": args}])):
+            eng = Engine(lambda _: {}, policy=lambda: {**actions.DEFAULT_POLICY, "click": "auto", **(policy or {})})
+            return eng.wait(eng.submit("c", "cli")["id"], 10)
+
+    def test_the_words(self):
+        cases = {"click the third video": {"noun": "video", "ordinal": 3},
+                 "click the third video in the chrome tab": {"noun": "video", "ordinal": 3, "app": "chrome"},
+                 "click the video in the bottom-right": {"noun": "video", "where": "bottom-right"},
+                 "play the last song": {"noun": "song", "ordinal": -1},
+                 "open the 2nd result": {"noun": "result", "ordinal": 2},
+                 "Click on the third YouTube video": {"noun": "video", "kind": "YouTube", "ordinal": 3},
+                 "click the second Nate Herk video in Chrome": {"noun": "video", "kind": "Nate Herk", "ordinal": 2,
+                                                               "app": "Chrome"}}
+        for said, want in cases.items():
+            self.assertEqual(planner.pick_args(said), want, said)
+        for said in ["click the video", "click Save", "click the third"]:
+            self.assertIsNone(planner.pick_args(said), said)
+
+    def test_the_third_video_counts_rows_then_columns(self):
+        g = self.grid()
+        v = self.run_pick({"noun": "video", "ordinal": 3}, g)
+        self.assertEqual((v["state"], self.presses), ("completed", [g.items[4].ref]))  # Video C starts row two
+        self.assertEqual(self.sent[0][0], "video")
+
+    def test_a_qualified_noun_is_what_jev_is_asked_about(self):
+        g = self.grid()
+        v = self.run_pick({"noun": "video", "kind": "YouTube", "ordinal": 3}, g)
+        self.assertEqual((v["state"], self.presses, self.sent[0][0]), ("completed", [g.items[4].ref], "YouTube video"))
+
+    def test_the_video_in_the_bottom_right(self):
+        g = self.grid()
+        v = self.run_pick({"noun": "video", "where": "bottom-right"}, g)
+        self.assertEqual(self.presses, [g.items[5].ref])  # Video D
+
+    def test_the_last_one_and_out_of_range(self):
+        g = self.grid()
+        self.run_pick({"noun": "video", "ordinal": -1}, g)
+        self.assertEqual(self.presses, [g.items[5].ref])
+        self.presses.clear()
+        v = self.run_pick({"noun": "video", "ordinal": 9}, g)
+        self.assertEqual((v["steps"][0]["detail"], self.presses), ("only 4 videos on screen", []))
+
+    def test_unsure_or_malformed_classification_presses_nothing(self):
+        g = self.grid()
+        v = self.run_pick({"noun": "video", "ordinal": 1}, g, answer=lambda labels: [(True, 0.5)] * len(labels))
+        self.assertEqual((v["state"], self.presses), ("failed", []))  # below the gate: no videos counted
+        for bad in (lambda l: [(True, float("nan"))] * len(l), lambda l: [("yes", 0.9)] * len(l),
+                    lambda l: [(True, 0.9)], lambda l: None):
+            v = self.run_pick({"noun": "video", "ordinal": 1}, g, answer=bad)
+            self.assertEqual((v["state"], self.presses), ("needs_clarification", []))
+
+    def test_role_nouns_need_no_jev(self):
+        g = self.grid()
+        v = self.run_pick({"noun": "button", "ordinal": 1}, g)
+        self.assertEqual((v["state"], self.presses, self.sent), ("completed", [g.items[6].ref], []))
+
+    def test_only_control_names_go_to_jev(self):
+        g = self.grid()
+        g.items.append(item(8, "secret note", source="ocr", role="text", pressable=False))
+        self.run_pick({"noun": "video", "ordinal": 1}, g)
+        self.assertNotIn("secret note", self.sent[0][1])
+
+    def test_a_named_app_must_be_in_front(self):
+        v = self.run_pick({"noun": "video", "ordinal": 1, "app": "Chrome"}, self.grid())
+        self.assertEqual((v["steps"][0]["detail"], self.presses), ("that app isn't in front", []))
+
+
+class CardTests(unittest.TestCase):
+    def test_a_card_carries_the_words_around_a_control_and_where_it_is(self):
+        title = item(1, "Opus 5.5 is here", role="AXLink", frame=(600, 100, 250, 20))
+        channel = item(2, "Nate Herk", role="AXLink", frame=(600, 124, 90, 14))
+        age = item(3, "3 days ago", source="ocr", role="text", pressable=False, frame=(700, 124, 70, 14))
+        far = item(4, "Unrelated sidebar", role="AXLink", frame=(10, 500, 120, 14))
+        s = snap([title, channel, age, far])
+        s.text_frames = [(0, 0, 1000, 1000)]
+        s.window_frame = (0, 0, 900, 800)
+        cards = actions.describe_cards([title], s, s.window_frame)
+        self.assertEqual(len(cards), 1)
+        self.assertTrue(cards[0].startswith("“Opus 5.5 is here”, near: "))
+        self.assertEqual(set(cards[0].split("near: ")[1].rsplit(", ", 1)[0].split(" · ")), {"Nate Herk", "3 days ago"})
+        self.assertTrue(cards[0].endswith(", top-right"))  # the sidebar link far below isn't part of this card
+
+    def test_the_chooser_gets_cards_and_presses_that_exact_one(self):
+        with patch.object(diagnostics, "record", lambda *a, **k: None):
+            a = item(1, "Watch", role="AXLink", frame=(10, 100, 100, 20))
+            b = item(2, "Watch", role="AXLink", frame=(600, 100, 100, 20))
+            ch = item(3, "Nate Herk", role="AXLink", frame=(600, 124, 90, 14))
+            s = snap([a, b, ch])
+            s.window_frame = (0, 0, 800, 600)
+            presses, seen = [], []
+            for name, fn in {"observe": lambda pid=None, ocr=True, deadline=None: s,
+                             "signature": lambda pid, d: {"n": len(presses)},
+                             "element_state": lambda ref, d: {"v": str(len(presses))},
+                             "press": lambda ref, d: presses.append(ref) or 0}.items():
+                p = patch.object(screen, name, fn)
+                p.start()
+                self.addCleanup(p.stop)
+
+            def choose(spoken, cards):
+                seen.append(cards)
+                return (next(k for k, c in enumerate(cards) if "Nate Herk" in c and "Watch" in c), 0.9)
+            with patch.object(actions, "CHOOSE", choose), \
+                    patch.object(planner, "plan", lambda *a, **k: ("steps", [{"clause": "c", "action": "screen.press",
+                                                                              "args": {"label": "the one by Nate Herk"}}])):
+                eng = Engine(lambda _: {}, policy=lambda: {**actions.DEFAULT_POLICY, "click": "auto"})
+                v = eng.wait(eng.submit("c", "cli")["id"], 10)
+        self.assertEqual((v["state"], presses), ("completed", [b.ref]))  # the right one of two identical labels
+
+
+class DisplayTests(unittest.TestCase):
+    def test_overlays_land_on_the_display_above_an_ultrawide_main(self):
+        """Johnny's layout: a 3200x1350 main display and a 2560x1440 one above it (y from -1440 to 0)."""
+        import AppKit
+        import assistant_ui
+        AppKit.NSApplication.sharedApplication()
+        view = {"app": "Chrome", "at": time.time(), "ms": 1, "complete": True, "version": 1,
+                "items": [{"n": 1, "source": "ax", "role": "AXLink", "label": "Video", "frame": [300, -1300, 200, 20],
+                           "pressable": True, "shared": True, "field": False}]}
+        main_h = AppKit.NSScreen.screens()[0].frame().size.height
+        w = assistant_ui.inspect_window(view)
+        f = w.frame()
+        self.assertGreater(f.origin.y, main_h)  # Cocoa y above the main display: the upper screen
+        self.assertLess(f.origin.x, 300)
+        w2 = assistant_ui.numbers_window({"items": view["items"]})
+        self.assertGreater(w2.frame().origin.y, main_h)
+
+    def test_reading_order_and_places_on_a_very_wide_window(self):
+        wide = (0, 0, 3200, 1300)
+        items = [item(k, f"v{k}", frame=(x, y, 300, 20)) for k, (x, y) in
+                 enumerate([(2800, 40), (100, 40), (1500, 42), (100, 700), (2900, 1200)], 1)]
+        self.assertEqual([i.label for i in actions.reading_order(items)], ["v2", "v3", "v1", "v4", "v5"])
+        self.assertEqual(actions.nearest_to(items, "bottom-right", wide).label, "v5")
+        self.assertEqual(actions.nearest_to(items, "top-left", wide).label, "v2")
+
+    def test_nearly_level_items_count_left_to_right_wherever_the_window_sits(self):
+        # Astra's pair: centres y=106 (left) and y=104 (right) straddled a fixed band edge and came out right-first
+        for dy in (0, 1, 15, 29, 600, -1440):
+            items = [item(1, "right", frame=(500, 54 + dy, 300, 100)), item(2, "left", frame=(100, 56 + dy, 300, 100)),
+                     item(3, "below", frame=(100, 200 + dy, 300, 100))]
+            self.assertEqual([i.label for i in actions.reading_order(items)], ["left", "right", "below"], dy)
 
 
 if __name__ == "__main__":

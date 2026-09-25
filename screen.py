@@ -181,6 +181,7 @@ class Snapshot:
     field_frames: list = field(default_factory=list, repr=False)  # every editable/secure field, before any cap
     text_frames: list = field(default_factory=list, repr=False)  # regions Accessibility says are ordinary text
     walk_complete: bool = True  # False when the AX walk hit its node or time cap: unknown fields may exist
+    version: int = 0  # set by remember(): which numbered list the user saw
 
     @property
     def window_token(self):
@@ -544,15 +545,82 @@ def observe(pid=None, ocr=True, deadline=None):
                     text_frames=text_frames)
 
 
+_shown = {}  # version -> Snapshot, the last few lists put in front of the user
+_version = [0]
+KEEP_SHOWN = 8
+
+
 def remember(snap):
+    """This snapshot is now what the user sees numbered. -> its version, which a spoken number is bound to."""
     global LAST
     with _lock:
+        _version[0] += 1
+        snap.version = _version[0]
         LAST = snap
+        _shown[snap.version] = snap
+        _mapping[snap.version] = mapping(snap)
+        # What is on screen now, or was painted recently enough for speech to still refer to it, is never evicted:
+        # the HUD refreshes every second, which would otherwise push out a badge list still showing for 12.
+        now = time.monotonic()
+        pinned = {v for at, v in _displayed if now - at <= PIN_SECONDS} | {_displayed[-1][1]} if _displayed else set()
+        for v in [v for v in sorted(_shown)[:-KEEP_SHOWN] if v not in pinned]:
+            del _shown[v]
+            _mapping.pop(v, None)
+        return snap.version
+
+
+PIN_SECONDS = 60
+
+
+_mapping = {}  # version -> what each number pointed at, so a refresh that changed nothing isn't a change
+
+
+def mapping(snap):
+    """Number -> the thing it points at, keyed the way numbering is: element token, or OCR label and place."""
+    return ((snap.pid, snap.started, snap.window_token),
+            tuple(sorted((i.n, i.token if i.ref is not None else ("ocr", i.label, tuple(round(v) for v in i.frame)))
+                         for i in snap.items)))
 
 
 def last():
     with _lock:
         return LAST
+
+
+_displayed = []  # [(monotonic time, version)]: when each numbered list was actually painted in front of the user
+
+
+def set_displayed(version, at=None):
+    """The UI calls this after it paints a numbered list, and with None when no numbered list is visible any more
+    (hidden, cleared, expired). Only painted lists become what numbers refer to."""
+    with _lock:
+        _displayed.append((time.monotonic() if at is None else at, version))
+        del _displayed[:-50]
+
+
+def displayed_at(t):
+    """The version painted at time t, or None."""
+    with _lock:
+        return next((v for at, v in reversed(_displayed) if at <= t), None)
+
+
+def bind_spoken(t_start, t_end):
+    """The list a spoken number refers to: the version displayed when speech started, provided the display didn't
+    change before speech ended. -> version | "unstable" (it changed while they spoke) | "unbound" (nothing shown)."""
+    v = displayed_at(t_start)
+    if v is None:
+        return "unbound"
+    with _lock:
+        same = _mapping.get(v)
+        changed = any(t_start < at <= t_end and ver != v and (same is None or _mapping.get(ver) != same)
+                      for at, ver in _displayed)
+    return "unstable" if changed else v
+
+
+def shown(version):
+    """The list the user saw at that version, or None when it's too old to be known."""
+    with _lock:
+        return _shown.get(version)
 
 
 # --------------------------------------------------------------------------- acting and reading back

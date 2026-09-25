@@ -124,13 +124,17 @@ def tiebreak(clause, choices):
     return int(choice.split("_")[1]), conf
 
 
-def choose_control(spoken, labels):
-    """Jev picks which on-screen control the user named. Only the control names and the spoken words are sent."""
+def choose_control(spoken, labels, intent=False):
+    """Jev picks which on-screen control the user named, or (intent) the one control that does what they asked.
+    Only the control names and the spoken words are sent."""
     from engine import current_rid
     names = labels[:250]
     ids = [f"c{i}" for i in range(len(names))]  # opaque keys: control text can never collide with a protocol choice
-    q = {"control": {"type": "choice", "instructions": f"Which on-screen control did the user mean by: {spoken}",
-                     "criteria": {**{k: f"the control named “{n}”" for k, n in zip(ids, names)},
+    ask = (f"The user asked: {spoken}. Which one on-screen control, pressed once, does exactly that? Choose none "
+           "unless one control clearly does it." if intent else f"Which on-screen control did the user mean by: {spoken}.")
+    q = {"control": {"type": "choice", "instructions": ask + " Each is described by its name, the words around it, "
+                                                           "and where it is in the window.",
+                     "criteria": {**{k: f"the control {n}" for k, n in zip(ids, names)},
                                   "none": "none of these controls"}}}
     try:
         ans, ms, _ = jev(spoken, q)
@@ -138,7 +142,8 @@ def choose_control(spoken, labels):
         diagnostics.record(current_rid(), "choose_control", "error", error=repr(exc), options=len(names))
         return None, 0.0
     pick, conf = ans["control"]
-    diagnostics.record(current_rid(), "choose_control", "ok", ms, options=len(names), confidence=round(conf, 2))
+    diagnostics.record(current_rid(), "choose_control", "ok", ms, options=len(names), confidence=round(conf, 2),
+                       intent=intent)
     return (ids.index(pick) if pick in ids else None), conf
 
 
@@ -152,6 +157,19 @@ def task_jev(state, questions):
         raise
     print(f"  jev task: {ms}ms ${cost:.6f} " + ", ".join(f"{k}={v} {c:.2f}" for k, (v, c) in ans.items()))
     return ans
+
+
+def classify_items(noun, labels):
+    """One Jev call: for each on-screen control name, is it one {noun}? -> [(bool, confidence)] in order.
+    Only the control names are sent."""
+    from engine import current_rid
+    state = json.dumps({"candidates": [{"id": f"c{k}", "text": l} for k, l in enumerate(labels)]}, ensure_ascii=False)
+    q = {f"c{k}": {"type": "noul", "instructions": f"Is candidate c{k} one {noun} on this page (not a channel name, "
+                                                     f"menu, button, duration, count or other part of the page)?"}
+         for k in range(len(labels))}
+    ans, ms, cost = jev(state, q)
+    diagnostics.record(current_rid(), "classify_items", "ok", ms, noun=noun, options=len(labels))
+    return [ans.get(f"c{k}") for k in range(len(labels))]
 
 
 def classify(clause):
@@ -247,7 +265,7 @@ def step_line(step):
     if action == "screen.list":
         line = say_line("screen.list", count=facts.get("count", 0), app=facts.get("app") or "this window")
         return line + (" Allow Screen Recording and I can read the text too." if facts.get("ocr") == "no_permission" else "")
-    if action == "screen.press":
+    if action in ("screen.press", "screen.pick"):
         return say_line("screen.press")  # never the label: speech goes to a remote voice service
     return say_line(action, app=target.get("name") or target.get("app") or "it", level=target.get("level") or "that")
 
@@ -291,6 +309,8 @@ def line_for(result):
             return say_line("split_please")
         if detail == "bad_percent":
             return say_line("bad_percent")
+        if detail == "task_no_goal":
+            return "[clear throat] Take over what? Say the goal right after, like: take over, turn on dark mode."
         if detail == "unsupported_browser":
             return "[clear throat] I can only open websites in Safari or Chrome."
         if detail == "too_many_steps":
@@ -573,6 +593,7 @@ def make_engine(notify=None, ask=None, show=None):
 
     import actions
     actions.CHOOSE = choose_control
+    actions.CLASSIFY_ITEMS = classify_items
     eng = Engine(classify, policy=confirm_policy, ask=ask, tiebreak=tiebreak,
                  threshold=lambda: float("inf") if tiebreak_threshold() >= 100 else tiebreak_threshold() / 100,
                  answer=answer if ANSWER_PROVIDER == "openrouter" else None, on_event=on_event)
@@ -590,7 +611,8 @@ def is_stop(text):
     return " ".join(re.findall(r"[a-z]+", text.lower())) in STOP_WORDS
 
 
-def turn(eng, text, notify, hold=contextlib.nullcontext, stt_ms=None, admit=None, stop_queued=lambda drop=False: 0):
+def turn(eng, text, notify, hold=contextlib.nullcontext, stt_ms=None, admit=None, stop_queued=lambda drop=False: 0,
+         shown=None):
     """One voice turn: submit, wait, speak from the result. A result that outlives the wait is spoken when it lands,
     inside hold() so it does not talk over the microphone.
     admit(): context manager yielding whether this turn may still be submitted, held across the submit.
@@ -611,7 +633,7 @@ def turn(eng, text, notify, hold=contextlib.nullcontext, stt_ms=None, admit=None
     with admit() as ok:  # a stop or a mode change between hearing and here drops this turn, atomically
         if not ok:
             return
-        first = eng.submit(text, "voice")
+        first = eng.submit(text, "voice", shown=shown)
     diagnostics.record(first.get("id"), "recognize", first["state"], text=text, stt_ms=stt_ms)
     if first["state"] in ("busy", "id_conflict"):  # never queued: nothing to wait for
         line = say_line("busy")
@@ -696,6 +718,7 @@ class Recorder:
         if not self.speech:
             if loud:
                 self.speech, self.silent = list(self.preroll) + [block], 0
+                self.speech_t0 = time.monotonic()  # when this utterance began: numbers bind to what was shown then
             else:
                 self.noise = 0.95 * self.noise + 0.05 * rms  # track the room's background level
                 self.preroll.append(block)
@@ -704,7 +727,7 @@ class Recorder:
         self.silent = 0 if loud else self.silent + 1
         if self.silent >= 8 or len(self.speech) >= 150:  # 0.8s pause ends a phrase, 15s max
             if len(self.speech) - self.silent >= 4:
-                self.segments.put(np.concatenate(self.speech))
+                self.segments.put((np.concatenate(self.speech), self.speech_t0, time.monotonic()))
             self._reset_segment()
 
     def invalidate(self):
@@ -1010,12 +1033,12 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
 
     def turn_worker():
         while True:
-            text, stt_ms, epoch, gen = turns.get()
+            text, stt_ms, epoch, gen, shown = turns.get()
             current[0] = text
             try:
                 print(f"  (stt {stt_ms}ms)")
                 turn(ENGINE, text, notify, hold=hold, stt_ms=stt_ms, admit=admit_for(gen, epoch),
-                     stop_queued=lambda drop=False: stop_queued(drop, own=True))
+                     stop_queued=lambda drop=False: stop_queued(drop, own=True), shown=shown)
             except Exception as exc:
                 print(f"\n  turn failed: {exc}")
                 emit(notify, "Something went wrong", str(exc))
@@ -1025,7 +1048,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
                 current[0] = None
     threading.Thread(target=turn_worker, daemon=True).start()
 
-    def run_turn(text, stt_ms, epoch):
+    def run_turn(text, stt_ms, epoch, shown=None):
         """Ordinary turns wait on the turn worker, which takes the floor only to speak, so the listener stays free.
         "Stop" skips the line: handled here at once, it drops every heard-but-unsubmitted turn and cancels what the
         engine is running or has queued. Each queued turn keeps its epoch and is re-checked just before submitting."""
@@ -1034,21 +1057,27 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
         if is_stop(text) and (ENGINE.active() or stop_queued()):
             turn(ENGINE, text, notify, hold=hold, stt_ms=stt_ms, stop_queued=stop_queued)
             return
-        turns.put((text, stt_ms, epoch, stop_gen[0]))
+        turns.put((text, stt_ms, epoch, stop_gen[0], shown))
 
-    def ptt_turn(audio, epoch):
+    def ptt_turn(audio, epoch, shown=None):
         emit(notify, "Transcribing", "Working out what you said…")
         try:
             text, ms = transcribe(audio, COMMAND_PROMPT)
         except Exception as exc:
             emit(notify, "Couldn't hear that", stt_error(exc))
             return
-        run_turn(text, ms, epoch)
+        run_turn(text, ms, epoch, shown)
 
     def wake_loop():
         while True:
             try:
                 audio = rec.segments.get(timeout=1)
+                import screen as _screen
+                if isinstance(audio, tuple):  # (audio, speech start, speech end) from the recorder
+                    audio, t0, t1 = audio
+                else:
+                    t0 = t1 = time.monotonic()
+                shown = _screen.bind_spoken(t0, t1)  # the list displayed when speech began, if it held still
             except queue.Empty:
                 if armed_until[0] and time.time() > armed_until[0]:
                     armed_until[0] = 0
@@ -1068,7 +1097,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
             if rest is not None:
                 if rest:
                     armed_until[0] = 0
-                    run_turn(rest, ms, epoch)
+                    run_turn(rest, ms, epoch, shown)
                 else:
                     with hold():
                         say(say_line("wake"), notify)
@@ -1076,7 +1105,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
                     emit(notify, "Listening", "Go ahead…")
             elif armed_until[0] and time.time() < armed_until[0]:
                 armed_until[0] = 0
-                run_turn(text, ms, epoch)
+                run_turn(text, ms, epoch, shown)
             elif text:
                 print(f"\n  (not for me: {text!r})")
 
@@ -1088,6 +1117,8 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
         if not floor.locked():
             emit(notify, "Ready", ready_text(rec.wake))
 
+    ptt_t0 = [None]  # when the talk key went down
+
     def start_recording():
         if STT["blocked"]:
             emit(notify, "Dictation unavailable", STT["blocked"])
@@ -1096,6 +1127,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
             ptt_token[0] = None  # its recording was dropped by a mode or backend change
         if rec.enabled and not rec.wake and ptt_token[0] is None:
             ptt_token[0] = floor.start_recording()
+            ptt_t0[0] = time.monotonic()
             if ptt_token[0] is not None:
                 print("\n[listening]", end="", flush=True)
                 emit(notify, "Listening", "Release right Option when you’re done")
@@ -1105,7 +1137,9 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
         audio = floor.stop_recording(token)  # only this key press's own recording
         if audio is not None:
             if len(audio) > SAMPLE_RATE * 0.3:
-                threading.Thread(target=ptt_turn, args=(audio, rec.epoch), daemon=True).start()
+                import screen as _screen
+                shown = _screen.bind_spoken(ptt_t0[0] or time.monotonic(), time.monotonic())
+                threading.Thread(target=ptt_turn, args=(audio, rec.epoch, shown), daemon=True).start()
 
     def timer_done(t):
         with hold():

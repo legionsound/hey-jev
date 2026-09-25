@@ -353,8 +353,8 @@ class PlannerTests(unittest.TestCase):
                          ("clarify", "no_action"))
         self.assertEqual(planner.search_query("search google for"), None)
         # no regressions: in-page search, plain google navigation, Chrome app
-        self.assertEqual(planner.plan("search in page", lambda _: ans_for()),
-                         ("clarify", "no_action"))
+        kind, got = planner.plan("search in page", lambda _: ans_for())  # never a web search; at most Jev
+        self.assertEqual((got[0]["action"], got[0]["args"]), ("screen.press", {"intent": "search in page"}))  # picks a control
         kind, got = planner.plan("go to google.com", lambda _: ans_for())
         self.assertEqual(got[0]["args"]["url"], "google.com")
         kind, got = planner.plan("open Google Chrome",
@@ -475,3 +475,11 @@ class BridgeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReplyCoverageTests(unittest.TestCase):
+    def test_every_action_has_a_success_line(self):
+        import actions
+        import siri
+        for name in actions.ACTIONS:
+            siri.step_line({"action": name, "target": {}, "facts": {}})  # a KeyError here would crash the turn

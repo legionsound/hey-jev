@@ -339,7 +339,7 @@ class VoiceStopTests(unittest.TestCase):
         calls = {"cancel": [], "submit": []}
         eng = types.SimpleNamespace(active=lambda: list(active),
                                     cancel=lambda rid: calls["cancel"].append(rid) or {"id": rid},
-                                    submit=lambda t, src: calls["submit"].append(t) or {"state": "busy", "id": "n"})
+                                    submit=lambda t, src, **k: calls["submit"].append(t) or {"state": "busy", "id": "n"})
         return eng, calls
 
     def test_stop_cancels_what_is_running_and_queued_without_submitting(self):
@@ -463,6 +463,37 @@ class VoiceStopLoopTests(LoopHarness):
             gap.set()
             time.sleep(0.5)
         self.assertEqual(self.submitted_texts(), [])
+
+
+class SpokenNumberLoopTests(VoiceStopLoopTests):
+    """The real voice loop binds a spoken number to what was displayed when speech began."""
+
+    def heard_shown(self, t0, t1):
+        import numpy as np
+        self.controls.put(("mode", "wake"))
+        self.wait(lambda: self.rec.wake)
+        with patch.object(siri, "say", lambda *a: None):
+            self.heard = "Hey Jev click 1"
+            self.rec.segments.put((np.ones(16000, dtype="float32"), t0, t1))
+            self.wait(lambda: self.engine.ledger)
+        return next(iter(self.engine.ledger.values()))["shown"]
+
+    def test_a_window_switch_during_speech_makes_the_number_unstable(self):
+        import screen
+        import time
+        screen.set_displayed(301, at=time.monotonic() - 5)
+        t0 = time.monotonic()
+        screen.set_displayed(302, at=t0 + 0.01)
+        self.assertEqual(self.heard_shown(t0, t0 + 0.4), "unstable")
+
+    def test_a_segment_waiting_past_a_refresh_keeps_what_was_shown_when_spoken(self):
+        import screen
+        import time
+        screen.set_displayed(401, at=time.monotonic() - 5)
+        t0 = time.monotonic() - 1.0
+        t1 = time.monotonic() - 0.5
+        screen.set_displayed(402)  # painted after the user finished, while the audio waited in the queue
+        self.assertEqual(self.heard_shown(t0, t1), 401)
 
 
 class RecorderIsolationTests(unittest.TestCase):

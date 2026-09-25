@@ -82,6 +82,20 @@ class TaskTests(unittest.TestCase):
             rid = self.rid = eng.submit(f"take over: {goal}", "cli")["id"]
             return eng.wait(rid, 20)
 
+    def test_take_over_with_no_goal_asks_for_one(self):
+        import siri
+        self.assertEqual(planner.plan("take over", lambda c: self.fail("no classification")), ("clarify", "task_no_goal"))
+        self.assertIn("Take over what", siri.line_for({"state": "needs_clarification", "steps": [],
+                                                       "detail": "task_no_goal"}))
+
+    def test_the_reason_the_screen_couldnt_be_read_is_kept(self):
+        Screen(self, [snap([item(1, "Next")])])
+        with patch.object(screen, "observe", lambda **k: (_ for _ in ()).throw(
+                screen.Unavailable("Hey Jev is in front and no app handed off to it"))):
+            v = self.run_task("go on", [])
+        self.assertEqual(v["steps"][0]["detail"],
+                         "couldn't read the screen: Hey Jev's own window was in front; switch to the app first")
+
     def test_the_words_that_start_a_task(self):
         self.assertEqual(task.goal_of("take over: find the cheapest flight"), "find the cheapest flight")
         self.assertEqual(task.goal_of("Work on turn on Loud mode."), "turn on Loud mode")

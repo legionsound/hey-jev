@@ -339,7 +339,7 @@ class VoiceStopTests(unittest.TestCase):
         calls = {"cancel": [], "submit": []}
         eng = types.SimpleNamespace(active=lambda: list(active),
                                     cancel=lambda rid: calls["cancel"].append(rid) or {"id": rid},
-                                    submit=lambda t, src: calls["submit"].append(t) or {"state": "busy", "id": "n"})
+                                    submit=lambda t, src, **k: calls["submit"].append(t) or {"state": "busy", "id": "n"})
         return eng, calls
 
     def test_stop_cancels_what_is_running_and_queued_without_submitting(self):

@@ -84,20 +84,28 @@ class Inspector:
             time.sleep(max(0.05, PERIOD - (time.monotonic() - t0)))
 
     def refresh(self, gen):
-        """One bounded read. -> the view, or None when stale, unreadable or out of time."""
+        """One bounded read. -> the view, or None when stale, unreadable, out of time, or a command started meanwhile.
+        Publishing (numbers, the list "click N" resolves) happens under the same lock as stop(), and only while this
+        generation is current and no command is running, so nothing stale is ever installed."""
         t0 = time.monotonic()
         try:
             snap = self.observe(time.monotonic() + READ_BUDGET)
         except Exception as exc:
-            return {"error": type(exc).__name__, "ms": round((time.monotonic() - t0) * 1000)}
-        if not self._current(gen):
-            return None  # stopped or restarted while this read was out: drop it
-        with self.lock:
-            self.numbering.apply(snap)
+            return {"gen": gen, "error": type(exc).__name__, "ms": round((time.monotonic() - t0) * 1000)}
+        observed_at = time.time()  # when the read finished: the age shown counts from here
         shared, _ = task.shareable(snap)
         shared_ids = {id(i) for i in shared}
-        screen.remember(snap)  # the numbers on screen are the numbers "click N" resolves
-        return {"app": snap.app, "at": time.time(), "ms": round((time.monotonic() - t0) * 1000),
-                "complete": snap.walk_complete, "truncated": snap.truncated,
+        with self.lock:
+            if gen != self.gen or self.busy():
+                return None  # stopped, restarted, or a command began while this read was out: drop it
+            self.numbering.apply(snap)
+            version = screen.remember(snap)
+        return {"gen": gen, "version": version, "app": snap.app, "at": observed_at,
+                "ms": round((time.monotonic() - t0) * 1000), "complete": snap.walk_complete, "truncated": snap.truncated,
                 "items": [{**i.public(), "shared": id(i) in shared_ids,
                            "field": i.role in task.FIELD_ROLES or i.secure} for i in snap.items]}
+
+    def current(self, gen):
+        """For the UI: is a view from this generation still the one to paint?"""
+        with self.lock:
+            return gen != 0 and gen == self.gen

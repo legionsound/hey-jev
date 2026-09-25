@@ -498,6 +498,14 @@ def valid_choice(got, n):
     return (idx, float(conf))
 
 
+def _shown_list(args):
+    """The numbered list a number refers to: the exact one on screen when the user spoke (args["shown"]), or, for a
+    typed command with no such version, the current one. "stale" when the spoken version is no longer known."""
+    if args.get("shown") is not None:
+        return screen.shown(args["shown"]) or "stale"
+    return screen.last()
+
+
 def resolve_screen_press(args):
     """A number from the last list the user saw, or a spoken control name, to one exact control the app declared."""
     deadline = resolve_deadline()
@@ -507,7 +515,9 @@ def resolve_screen_press(args):
         return ("none", f"can't read the screen: {exc}")
     controls = [i for i in snap.items if _live(i)]
     if args.get("number") is not None:
-        shown = screen.last()
+        shown = _shown_list(args)
+        if shown == "stale":
+            return ("none", "the numbers changed since you spoke; ask what you can click again")
         seen = next((i for i in shown.items if i.n == args["number"]), None) if shown is not None else None
         if seen is None:
             return ("none", "no such number on the last list")
@@ -620,7 +630,9 @@ def resolve_screen_type(args):
     try:
         snap = screen.observe(ocr=False, deadline=deadline)
         if args.get("number") is not None:  # a field from the list the user (or a task) saw
-            shown = screen.last()
+            shown = _shown_list(args)
+            if shown == "stale":
+                return ("none", "the numbers changed since you spoke; ask what you can click again")
             seen = next((i for i in shown.items if i.n == args["number"]), None) if shown is not None else None
             if seen is None:
                 return ("none", "no such number on the last list")

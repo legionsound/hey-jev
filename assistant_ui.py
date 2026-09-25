@@ -278,19 +278,38 @@ def inspect_window(view):
         else:
             tag.setFrame_(NSMakeRect(fx - x0, h - (fy - y0) + 1, tw, 14))
         content.addSubview_(tag)
-    age = max(0.0, time.time() - view.get("at", time.time()))
-    hud = NSTextField.labelWithString_(
-        f"Jev sees: {view.get('app', '?')} · {len(items)} items · read in {view.get('ms', 0)} ms · {age:.1f} s ago"
-        + ("" if view.get("complete", True) else " · field scan incomplete: no screen text shared"))
+    hud = NSTextField.labelWithString_(hud_text(view))
     hud.setFont_(NSFont.systemFontOfSize_weight_(11, 0.5))
     hud.setTextColor_(NSColor.whiteColor())
     hud.setWantsLayer_(True)
     hud.layer().setBackgroundColor_(NSColor.colorWithWhite_alpha_(0, 0.7).CGColor())
     hud.layer().setCornerRadius_(5)
     hud.sizeToFit()
-    hud.setFrame_(NSMakeRect(0, 2, hud.frame().size.width + 10, 18))  # along the bottom, clear of the tags
+    hud.setFrame_(NSMakeRect(0, 2, hud.frame().size.width + 60, 18))  # along the bottom, clear of the tags
+    hud.setIdentifier_("hud")
     content.addSubview_(hud)
     return win
+
+
+STALE_AFTER = 2.5
+
+
+def hud_text(view):
+    age = max(0.0, time.time() - view.get("at", time.time()))
+    text = f"Jev sees: {view.get('app', '?')} · {len(view['items'])} items · read in {view.get('ms', 0)} ms · {age:.1f} s ago"
+    if age > STALE_AFTER:
+        text += " · STALE (paused while a command runs)"
+    if not view.get("complete", True):
+        text += " · field scan incomplete: screen text withheld"
+    return text
+
+
+def update_inspect_hud(win, view):
+    stale = time.time() - view.get("at", time.time()) > STALE_AFTER
+    win.setAlphaValue_(0.35 if stale else 1.0)
+    for sub in win.contentView().subviews():
+        if sub.identifier() == "hud":
+            sub.setStringValue_(hud_text(view))
 
 
 class AppDelegate(NSObject):
@@ -1031,12 +1050,32 @@ class AppDelegate(NSObject):
             self.inspect_item.setState_(1)
 
     def showInspect_(self, view):
+        """Paint on the main thread, only if this view's generation is still current: a callback queued before the
+        toggle went off (or before a restart) never paints over the cleared state."""
+        ins = getattr(self, "inspector", None)
+        if view and (ins is None or not ins.current(view.get("gen", -1))):
+            return
         old = getattr(self, "inspect_window", None)
         self.inspect_window = inspect_window(view) if view and view.get("items") else None
+        self.inspect_view = view if self.inspect_window is not None else None
         if self.inspect_window is not None:
             self.inspect_window.orderFrontRegardless()
+            if getattr(self, "inspect_timer", None) is None:
+                self.inspect_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                    0.5, self, "inspectTick:", None, True)
         if old is not None:
             old.orderOut_(None)
+        if self.inspect_window is None and getattr(self, "inspect_timer", None) is not None:
+            self.inspect_timer.invalidate()
+            self.inspect_timer = None
+
+    def inspectTick_(self, _timer):
+        """Keep the age honest between refreshes: it counts from the actual read, and an old view is marked stale
+        and dimmed (reads pause while a command runs)."""
+        w, view = getattr(self, "inspect_window", None), getattr(self, "inspect_view", None)
+        if w is None or view is None:
+            return
+        update_inspect_hud(w, view)
 
     @objc.python_method
     def show_numbers(self, facts):

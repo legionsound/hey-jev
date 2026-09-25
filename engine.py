@@ -60,8 +60,9 @@ class Engine:
         threading.Thread(target=self._worker, daemon=True).start()
 
     # ------------------------------------------------------------------ public API
-    def submit(self, text, source, rid=None):
-        """Reserve the id and enqueue. Returns a status dict immediately."""
+    def submit(self, text, source, rid=None, shown=None):
+        """Reserve the id and enqueue. Returns a status dict immediately. shown: the numbered list's version on screen
+        when the user spoke, so "click 3" means the 3 they saw."""
         rid = rid or uuid.uuid4().hex
         with self.lock:
             rec = self.ledger.get(rid)
@@ -75,7 +76,7 @@ class Engine:
             if len(self.queue) >= QUEUE_MAX:
                 return self._error(rid, "busy", "queue_full")
             diagnostics.record(rid, "submit", "queued", source=source, text=text, queue_depth=len(self.queue))
-            rec = {"id": rid, "sha": _sha(text), "text": text, "source": source, "state": "queued",
+            rec = {"id": rid, "sha": _sha(text), "text": text, "source": source, "state": "queued", "shown": shown,
                    "queued_at": time.monotonic(), "done_at": None, "steps": [], "cancel": False}
             self.ledger[rid] = rec
             self.queue.append(rec)
@@ -226,7 +227,10 @@ class Engine:
             with self.lock:
                 if rec["cancel"]:
                     return self._stop(rec, i, "cancelled")
-            state = self._step(rec, step, planned["args"])
+            args = planned["args"]
+            if "number" in args and rec.get("shown") is not None:
+                args = {**args, "shown": rec["shown"]}  # bound to the list on screen when it was said
+            state = self._step(rec, step, args)
             if state != "completed":
                 return self._stop(rec, i, state)
         with self.lock:
@@ -289,6 +293,11 @@ class Engine:
                     return finish("unverified", "another app came forward")
                 snap = screen.observe(pid=pinned[0] if pinned else None, ocr=True,
                                       deadline=min(end, time.monotonic() + 4))
+            except screen.Unavailable as exc:  # our own reason strings, never screen text
+                why = str(exc)
+                if "Hey Jev is in front" in why:
+                    why = "Hey Jev's own window was in front; switch to the app first"
+                return finish("failed", f"couldn't read the screen: {why}")
             except Exception as exc:
                 return finish("failed", f"couldn't read the screen ({type(exc).__name__})")
             stop = interrupted()

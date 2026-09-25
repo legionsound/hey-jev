@@ -88,6 +88,56 @@ class InspectorTests(unittest.TestCase):
         self.assertTrue([i for i in view["items"] if i["label"] == "Message"][0]["field"])
 
 
+class OwnershipTests(unittest.TestCase):
+    def test_stop_between_read_and_publish_installs_nothing(self):
+        installed = []
+        ins = inspector.Inspector(lambda v: None, observe=lambda d: snap([item("Save")]))
+        ins.gen = 9
+        real = inspector.task.shareable
+
+        def stop_midway(sn):
+            ins.stop()  # the toggle goes off while this refresh is being prepared
+            return real(sn)
+        with patch.object(inspector.task, "shareable", stop_midway), patch.object(screen, "remember",
+                                                                                  lambda sn: installed.append(sn)):
+            self.assertIsNone(ins.refresh(9))
+        self.assertEqual(installed, [])
+
+    def test_a_command_starting_during_the_read_discards_it(self):
+        busy = [False]
+
+        def read(deadline):
+            busy[0] = True  # a command began while the window was being read
+            return snap([item("Save")])
+        installed = []
+        ins = inspector.Inspector(lambda v: None, busy=lambda: busy[0], observe=read)
+        ins.gen = 4
+        with patch.object(screen, "remember", lambda sn: installed.append(sn)):
+            self.assertIsNone(ins.refresh(4))
+        self.assertEqual(installed, [])
+
+    def test_a_queued_paint_from_before_the_toggle_went_off_never_paints(self):
+        import AppKit
+        import assistant_ui
+        AppKit.NSApplication.sharedApplication()
+        d = assistant_ui.AppDelegate.alloc().init()
+        d.inspector = inspector.Inspector(lambda v: None, observe=lambda dl: snap([]))
+        d.inspector.gen = 0  # already off
+        view = {"gen": 3, "app": "Pad", "at": time.time(), "ms": 1, "complete": True,
+                "items": [{"n": 1, "source": "ax", "role": "AXButton", "label": "Save", "frame": [10, 10, 80, 30],
+                           "pressable": True, "shared": True, "field": False}]}
+        d.showInspect_(view)
+        self.assertIsNone(getattr(d, "inspect_window", None))
+
+    def test_the_readout_ages_from_the_read_and_says_stale(self):
+        import assistant_ui
+        view = {"app": "Pad", "at": time.time() - 10, "ms": 200, "complete": False, "items": [{"n": 1}]}
+        text = assistant_ui.hud_text(view)
+        self.assertIn("STALE", text)
+        self.assertIn("screen text withheld", text)
+        self.assertNotIn("no screen text shared", text)
+
+
 class SpokenNumberTests(unittest.TestCase):
     """"click N" means the number the overlay showed, re-checked against the live element."""
 
@@ -118,6 +168,34 @@ class SpokenNumberTests(unittest.TestCase):
         now = snap([item("New", new), item("Open", shown.items[1].ref)])  # Save scrolled away; the list moved
         v, presses = self.press(1, now)  # 1 was Save on screen; in the fresh read position 1 is New
         self.assertEqual((v["state"], presses), ("failed", []))
+
+    def press_as_heard(self, number, version, current):
+        presses = []
+        fns = {"observe": lambda pid=None, ocr=True, deadline=None: current,
+               "signature": lambda pid, d: {"n": len(presses)}, "element_state": lambda ref, d: {"v": str(len(presses))},
+               "press": lambda ref, d: presses.append(ref) or 0}
+        for name, fn in fns.items():
+            p = patch.object(screen, name, fn)
+            p.start()
+            self.addCleanup(p.stop)
+        with patch.object(planner, "plan", lambda *a, **k: ("steps", [{"clause": "c", "action": "screen.press",
+                                                                        "args": {"number": number}}])):
+            eng = Engine(lambda _: {}, policy=lambda: {**actions.DEFAULT_POLICY, "click": "auto"})
+            return eng.wait(eng.submit("click 1", "voice", shown=version)["id"], 10), presses
+
+    def test_a_number_means_what_was_on_screen_when_it_was_said(self):
+        old_save = object()
+        heard = screen.remember(inspector.Numbering().apply(snap([item("Save", old_save)])))  # user sees 1 = Save
+        other = inspector.Numbering().apply(snap([item("Delete all", object())], window=object()))
+        screen.remember(other)  # a refresh of another window installs its own 1 before the turn submits
+        v, presses = self.press_as_heard(1, heard, other)
+        self.assertEqual((v["state"], presses), ("failed", []))  # never the new window's 1
+
+    def test_a_number_too_old_to_know_is_refused(self):
+        with patch.object(screen, "_shown", {}):
+            v, presses = self.press_as_heard(1, 12345, snap([item("Save")]))
+        self.assertEqual((v["state"], v["steps"][0]["detail"], presses),
+                         ("failed", "the numbers changed since you spoke; ask what you can click again", []))
 
     def test_the_shown_number_presses_that_exact_element(self):
         open_ref = object()

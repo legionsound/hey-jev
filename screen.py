@@ -181,6 +181,7 @@ class Snapshot:
     field_frames: list = field(default_factory=list, repr=False)  # every editable/secure field, before any cap
     text_frames: list = field(default_factory=list, repr=False)  # regions Accessibility says are ordinary text
     walk_complete: bool = True  # False when the AX walk hit its node or time cap: unknown fields may exist
+    version: int = 0  # set by remember(): which numbered list the user saw
 
     @property
     def window_token(self):
@@ -532,15 +533,39 @@ def observe(pid=None, ocr=True, deadline=None):
                     text_frames=text_frames)
 
 
+_shown = {}  # version -> Snapshot, the last few lists put in front of the user
+_version = [0]
+KEEP_SHOWN = 8
+
+
 def remember(snap):
+    """This snapshot is now what the user sees numbered. -> its version, which a spoken number is bound to."""
     global LAST
     with _lock:
+        _version[0] += 1
+        snap.version = _version[0]
         LAST = snap
+        _shown[snap.version] = snap
+        for v in sorted(_shown)[:-KEEP_SHOWN]:
+            del _shown[v]
+        return snap.version
 
 
 def last():
     with _lock:
         return LAST
+
+
+def shown_version():
+    """The version on screen right now (captured when the user finishes speaking), or None."""
+    with _lock:
+        return LAST.version if LAST is not None else None
+
+
+def shown(version):
+    """The list the user saw at that version, or None when it's too old to be known."""
+    with _lock:
+        return _shown.get(version)
 
 
 # --------------------------------------------------------------------------- acting and reading back

@@ -458,6 +458,8 @@ def plan(text, classify, can_answer=False):
     goal = task.goal_of(text)
     if goal:  # an explicit task opening: Jev drives it step by step, nothing is split or classified here
         return ("steps", [{"clause": text, "action": "task.run", "args": {"goal": goal}}])
+    if re.fullmatch(r"\W*(?:please\s+)?(?:take\s+over|work\s+on)[\s:,.!?]*", text or "", re.I):
+        return ("clarify", "task_no_goal")
     clauses = split_clauses(text)
     if not clauses:
         return ("clarify", "empty")

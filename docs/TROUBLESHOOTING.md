@@ -75,6 +75,7 @@
 
 - Run the suite with the checkout's venv, which has PyObjC:
   `.venv/bin/python -m unittest discover -q`
-  from the repo root. System python3 lacks AppKit/Foundation and every
+  from the repo root. Stock system python3 ships without AppKit/Foundation
+  (unless PyObjC is installed globally) and every
   macOS-dependent test module fails to import there — that is
   environmental, not a code regression.

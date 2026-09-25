@@ -45,15 +45,17 @@ folder moves.
 
 Stdlib `unittest`, several hundred tests covering engine, planner,
 actions, screen control, settings, and speech. Use the checkout's own
-`.venv` (created by the setup instructions above) — system python3 has
-no AppKit/Foundation, so
-every macOS-dependent test module fails to import there. That is
+`.venv` (created by the setup instructions above) — stock system
+python3 ships without AppKit/Foundation, so
+every macOS-dependent test module fails to import there (unless your
+system Python has PyObjC installed globally). That is
 environmental, not a regression.
 
 ## Contribute
 
-- Target this fork only: branch from `release`, open PRs against
-  `legionsound/hey-jev`. Nothing is submitted upstream.
+- Target this fork only: branch from `main`, open PRs against
+  `legionsound/hey-jev`. (`release` was the temporary publication
+  branch for 0.3.0.) Nothing is submitted upstream.
 - Docs live in `docs/`: `FEATURES`, `CONFIGURATION`, `TROUBLESHOOTING`,
   `ARCHITECTURE` (current, grounded in code) and `ENGINE_CONTRACT` (the
   formal spec). `COMMAND_ARCHITECTURE`, `HEY_JEV_OVERHAUL_SPEC`,

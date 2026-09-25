@@ -439,7 +439,7 @@ class AppDelegate(NSObject):
     @objc.python_method
     def _build_status_menu(self):
         self.status_item = NSStatusBar.systemStatusBar().statusItemWithLength_(NSVariableStatusItemLength)
-        self.status_item.button().setTitle_("Jev")
+        self.status_item.button().setImage_(symbol("person.wave.2", 15))
         self.status_item.button().setAccessibilityLabel_("Hey Jev controls")
         menu = NSMenu.alloc().initWithTitle_("Hey Jev")
         menu.setAutoenablesItems_(False)

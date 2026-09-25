@@ -300,7 +300,7 @@ def hud_text(view):
     if age > STALE_AFTER:
         text += " · STALE (paused while a command runs)"
     if not view.get("complete", True):
-        text += " · field scan incomplete: screen text withheld"
+        text += " · field scan incomplete: OCR withheld"
     return text
 
 
@@ -1060,6 +1060,8 @@ class AppDelegate(NSObject):
         self.inspect_view = view if self.inspect_window is not None else None
         if self.inspect_window is not None:
             self.inspect_window.orderFrontRegardless()
+            import screen
+            screen.set_displayed(view["version"])  # painted: from now on "click N" means these numbers
             if getattr(self, "inspect_timer", None) is None:
                 self.inspect_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
                     0.5, self, "inspectTick:", None, True)
@@ -1088,6 +1090,9 @@ class AppDelegate(NSObject):
         self.number_windows = [numbers_window(facts)] if facts.get("items") else []
         for w in self.number_windows:
             w.orderFrontRegardless()
+        if self.number_windows and facts.get("version"):
+            import screen
+            screen.set_displayed(facts["version"])
         NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(12.0, self, "hideNumbers:", None, False)
 
     def hideNumbers_(self, _timer):

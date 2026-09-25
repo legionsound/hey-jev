@@ -577,6 +577,7 @@ class Recorder:
         if not self.speech:
             if loud:
                 self.speech, self.silent = list(self.preroll) + [block], 0
+                self.speech_t0 = time.monotonic()  # when this utterance began: numbers bind to what was shown then
             else:
                 self.noise = 0.95 * self.noise + 0.05 * rms  # track the room's background level
                 self.preroll.append(block)
@@ -585,7 +586,7 @@ class Recorder:
         self.silent = 0 if loud else self.silent + 1
         if self.silent >= 8 or len(self.speech) >= 150:  # 0.8s pause ends a phrase, 15s max
             if len(self.speech) - self.silent >= 4:
-                self.segments.put(np.concatenate(self.speech))
+                self.segments.put((np.concatenate(self.speech), self.speech_t0, time.monotonic()))
             self._reset_segment()
 
     def invalidate(self):
@@ -931,7 +932,11 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
             try:
                 audio = rec.segments.get(timeout=1)
                 import screen as _screen
-                shown = _screen.shown_version()  # what was numbered on screen as the user finished speaking
+                if isinstance(audio, tuple):  # (audio, speech start, speech end) from the recorder
+                    audio, t0, t1 = audio
+                else:
+                    t0 = t1 = time.monotonic()
+                shown = _screen.bind_spoken(t0, t1)  # the list displayed when speech began, if it held still
             except queue.Empty:
                 if armed_until[0] and time.time() > armed_until[0]:
                     armed_until[0] = 0
@@ -971,6 +976,8 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
         if not floor.locked():
             emit(notify, "Ready", ready_text(rec.wake))
 
+    ptt_t0 = [None]  # when the talk key went down
+
     def start_recording():
         if STT["blocked"]:
             emit(notify, "Dictation unavailable", STT["blocked"])
@@ -979,6 +986,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
             ptt_token[0] = None  # its recording was dropped by a mode or backend change
         if rec.enabled and not rec.wake and ptt_token[0] is None:
             ptt_token[0] = floor.start_recording()
+            ptt_t0[0] = time.monotonic()
             if ptt_token[0] is not None:
                 print("\n[listening]", end="", flush=True)
                 emit(notify, "Listening", "Release right Option when you’re done")
@@ -989,7 +997,8 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
         if audio is not None:
             if len(audio) > SAMPLE_RATE * 0.3:
                 import screen as _screen
-                threading.Thread(target=ptt_turn, args=(audio, rec.epoch, _screen.shown_version()), daemon=True).start()
+                shown = _screen.bind_spoken(ptt_t0[0] or time.monotonic(), time.monotonic())
+                threading.Thread(target=ptt_turn, args=(audio, rec.epoch, shown), daemon=True).start()
 
     def timer_done(t):
         with hold():

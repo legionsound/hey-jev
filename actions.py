@@ -499,11 +499,15 @@ def valid_choice(got, n):
 
 
 def _shown_list(args):
-    """The numbered list a number refers to: the exact one on screen when the user spoke (args["shown"]), or, for a
-    typed command with no such version, the current one. "stale" when the spoken version is no longer known."""
-    if args.get("shown") is not None:
-        return screen.shown(args["shown"]) or "stale"
-    return screen.last()
+    """The numbered list a number refers to. Spoken: exactly the list displayed when the user started speaking
+    (args["shown"] is its version), refused when the display changed mid-sentence, nothing was shown, or the version
+    is too old. Typed (no "shown" at all): the current list. -> Snapshot, None, or "stale"."""
+    if "shown" not in args:
+        return screen.last()
+    v = args["shown"]
+    if not isinstance(v, int) or isinstance(v, bool):
+        return "stale"
+    return screen.shown(v) or "stale"
 
 
 def resolve_screen_press(args):
@@ -964,7 +968,7 @@ def run_screen_list(t, deadline):
 
 def verify_screen_list(t, deadline):
     snap = _listed.pop(id(t), None) or screen.last()
-    return ("done", {"app": snap.app, "count": len(snap.items), "ocr": snap.ocr,
+    return ("done", {"app": snap.app, "count": len(snap.items), "ocr": snap.ocr, "version": snap.version,
                      "items": [i.public() for i in snap.items]})
 
 

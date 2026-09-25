@@ -556,10 +556,31 @@ def last():
         return LAST
 
 
-def shown_version():
-    """The version on screen right now (captured when the user finishes speaking), or None."""
+_displayed = []  # [(monotonic time, version)]: when each numbered list was actually painted in front of the user
+
+
+def set_displayed(version, at=None):
+    """The UI calls this after it paints a numbered list. Only painted lists become what numbers refer to."""
     with _lock:
-        return LAST.version if LAST is not None else None
+        _displayed.append((time.monotonic() if at is None else at, version))
+        del _displayed[:-50]
+
+
+def displayed_at(t):
+    """The version painted at time t, or None."""
+    with _lock:
+        return next((v for at, v in reversed(_displayed) if at <= t), None)
+
+
+def bind_spoken(t_start, t_end):
+    """The list a spoken number refers to: the version displayed when speech started, provided the display didn't
+    change before speech ended. -> version | "unstable" (it changed while they spoke) | "unbound" (nothing shown)."""
+    v = displayed_at(t_start)
+    if v is None:
+        return "unbound"
+    with _lock:
+        changed = any(t_start < at <= t_end and ver != v for at, ver in _displayed)
+    return "unstable" if changed else v
 
 
 def shown(version):

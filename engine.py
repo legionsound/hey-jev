@@ -228,8 +228,8 @@ class Engine:
                 if rec["cancel"]:
                     return self._stop(rec, i, "cancelled")
             args = planned["args"]
-            if "number" in args and rec.get("shown") is not None:
-                args = {**args, "shown": rec["shown"]}  # bound to the list on screen when it was said
+            if "number" in args and rec["source"] == "voice":  # a spoken number is bound to what was displayed
+                args = {**args, "shown": rec.get("shown") if rec.get("shown") is not None else "unbound"}
             state = self._step(rec, step, args)
             if state != "completed":
                 return self._stop(rec, i, state)

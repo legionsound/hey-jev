@@ -134,7 +134,7 @@ class OwnershipTests(unittest.TestCase):
         view = {"app": "Pad", "at": time.time() - 10, "ms": 200, "complete": False, "items": [{"n": 1}]}
         text = assistant_ui.hud_text(view)
         self.assertIn("STALE", text)
-        self.assertIn("screen text withheld", text)
+        self.assertIn("OCR withheld", text)
         self.assertNotIn("no screen text shared", text)
 
 
@@ -190,6 +190,31 @@ class SpokenNumberTests(unittest.TestCase):
         screen.remember(other)  # a refresh of another window installs its own 1 before the turn submits
         v, presses = self.press_as_heard(1, heard, other)
         self.assertEqual((v["state"], presses), ("failed", []))  # never the new window's 1
+
+    def test_an_observed_but_unpainted_list_never_becomes_the_numbers(self):
+        old = inspector.Numbering().apply(snap([item("Save", object())]))
+        v1 = screen.remember(old)
+        screen.set_displayed(v1)  # painted
+        t0 = time.monotonic()
+        fresh = inspector.Numbering().apply(snap([item("Delete all", object())], window=object()))
+        screen.remember(fresh)  # observed by a refresh whose paint hasn't happened yet
+        heard = screen.bind_spoken(t0, time.monotonic())
+        self.assertEqual(heard, v1)
+        v, presses = self.press_as_heard(1, heard, fresh)
+        self.assertEqual((v["state"], presses), ("failed", []))
+
+    def test_the_display_changing_mid_sentence_refuses_the_number(self):
+        screen.set_displayed(111, at=time.monotonic() - 5)
+        t0 = time.monotonic()
+        screen.set_displayed(222, at=t0 + 0.01)  # a refresh painted while the user was talking
+        self.assertEqual(screen.bind_spoken(t0, t0 + 0.5), "unstable")
+        v, presses = self.press_as_heard(1, "unstable", snap([item("Save")]))
+        self.assertEqual((v["state"], presses), ("failed", []))
+
+    def test_a_spoken_number_with_no_known_list_is_refused(self):
+        v, presses = self.press_as_heard(1, None, snap([item("Save")]))  # voice, provenance unknown
+        self.assertEqual((v["steps"][0]["detail"], presses),
+                         ("the numbers changed since you spoke; ask what you can click again", []))
 
     def test_a_number_too_old_to_know_is_refused(self):
         with patch.object(screen, "_shown", {}):

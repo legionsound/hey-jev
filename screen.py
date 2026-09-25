@@ -546,9 +546,21 @@ def remember(snap):
         snap.version = _version[0]
         LAST = snap
         _shown[snap.version] = snap
+        _mapping[snap.version] = mapping(snap)
         for v in sorted(_shown)[:-KEEP_SHOWN]:
             del _shown[v]
+            _mapping.pop(v, None)
         return snap.version
+
+
+_mapping = {}  # version -> what each number pointed at, so a refresh that changed nothing isn't a change
+
+
+def mapping(snap):
+    """Number -> the thing it points at, keyed the way numbering is: element token, or OCR label and place."""
+    return ((snap.pid, snap.started, snap.window_token),
+            tuple(sorted((i.n, i.token if i.ref is not None else ("ocr", i.label, tuple(round(v) for v in i.frame)))
+                         for i in snap.items)))
 
 
 def last():
@@ -560,7 +572,8 @@ _displayed = []  # [(monotonic time, version)]: when each numbered list was actu
 
 
 def set_displayed(version, at=None):
-    """The UI calls this after it paints a numbered list. Only painted lists become what numbers refer to."""
+    """The UI calls this after it paints a numbered list, and with None when no numbered list is visible any more
+    (hidden, cleared, expired). Only painted lists become what numbers refer to."""
     with _lock:
         _displayed.append((time.monotonic() if at is None else at, version))
         del _displayed[:-50]
@@ -579,7 +592,9 @@ def bind_spoken(t_start, t_end):
     if v is None:
         return "unbound"
     with _lock:
-        changed = any(t_start < at <= t_end and ver != v for at, ver in _displayed)
+        same = _mapping.get(v)
+        changed = any(t_start < at <= t_end and ver != v and (same is None or _mapping.get(ver) != same)
+                      for at, ver in _displayed)
     return "unstable" if changed else v
 
 

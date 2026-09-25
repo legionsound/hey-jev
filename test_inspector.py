@@ -211,6 +211,42 @@ class SpokenNumberTests(unittest.TestCase):
         v, presses = self.press_as_heard(1, "unstable", snap([item("Save")]))
         self.assertEqual((v["state"], presses), ("failed", []))
 
+    def test_a_refresh_that_changed_nothing_keeps_the_number(self):
+        num, save = inspector.Numbering(), object()
+        v1 = screen.remember(num.apply(snap([item("Save", save)])))
+        screen.set_displayed(v1, at=10)
+        v2 = screen.remember(num.apply(snap([item("Save", save)])))  # the HUD's next refresh: same numbers
+        screen.set_displayed(v2, at=11)
+        self.assertEqual(screen.bind_spoken(10.5, 11.5), v1)
+        v3 = screen.remember(num.apply(snap([item("Delete all", object())])))  # a real remap: 1 is something else
+        screen.set_displayed(v3, at=12)
+        self.assertEqual(screen.bind_spoken(11.5, 12.5), "unstable")
+
+    def test_numbers_bind_only_while_a_numbered_view_is_visible(self):
+        import AppKit
+        import assistant_ui
+        AppKit.NSApplication.sharedApplication()
+        d = assistant_ui.AppDelegate.alloc().init()
+        d.inspector = inspector.Inspector(lambda v: None)
+        d.inspector.current = lambda gen: True
+        hud_v = screen.remember(inspector.Numbering().apply(snap([item("Save")])))
+        view = {"gen": 1, "version": hud_v, "app": "Pad", "at": time.time(), "ms": 1, "complete": True,
+                "items": [{"n": 1, "source": "ax", "role": "AXButton", "label": "Save", "frame": [10, 10, 80, 30],
+                           "pressable": True, "shared": True, "field": False}]}
+        now = lambda: screen.bind_spoken(time.monotonic(), time.monotonic())
+        d.showInspect_(view)
+        self.assertEqual(now(), hud_v)
+        badge_v = screen.remember(inspector.Numbering().apply(snap([item("Open")], window=object())))
+        d.showNumbers_({"version": badge_v, "items": view["items"]})
+        self.assertEqual(now(), badge_v)  # badges on top: numbers mean the badges
+        d.hideNumbers_(None)
+        self.assertEqual(now(), hud_v)  # badges expired: the HUD underneath is back in charge
+        d.showInspect_({})  # inspection stopped (or an error/empty view cleared it)
+        self.assertEqual(now(), "unbound")
+        d.showNumbers_({"items": view["items"]})  # badges with no known list
+        self.assertEqual(now(), "unbound")
+        d.hideNumbers_(None)
+
     def test_a_spoken_number_with_no_known_list_is_refused(self):
         v, presses = self.press_as_heard(1, None, snap([item("Save")]))  # voice, provenance unknown
         self.assertEqual((v["steps"][0]["detail"], presses),

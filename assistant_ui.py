@@ -1060,13 +1060,12 @@ class AppDelegate(NSObject):
         self.inspect_view = view if self.inspect_window is not None else None
         if self.inspect_window is not None:
             self.inspect_window.orderFrontRegardless()
-            import screen
-            screen.set_displayed(view["version"])  # painted: from now on "click N" means these numbers
             if getattr(self, "inspect_timer", None) is None:
                 self.inspect_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
                     0.5, self, "inspectTick:", None, True)
         if old is not None:
             old.orderOut_(None)
+        self.publish_displayed()  # painted, hidden, cleared: "click N" follows what is actually visible
         if self.inspect_window is None and getattr(self, "inspect_timer", None) is not None:
             self.inspect_timer.invalidate()
             self.inspect_timer = None
@@ -1090,15 +1089,30 @@ class AppDelegate(NSObject):
         self.number_windows = [numbers_window(facts)] if facts.get("items") else []
         for w in self.number_windows:
             w.orderFrontRegardless()
-        if self.number_windows and facts.get("version"):
-            import screen
-            screen.set_displayed(facts["version"])
-        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(12.0, self, "hideNumbers:", None, False)
+        self.numbers_version = facts.get("version") if self.number_windows else None
+        self.publish_displayed()
+        if getattr(self, "numbers_timer", None) is not None:
+            self.numbers_timer.invalidate()  # an earlier badge set's timer must not hide these early
+        self.numbers_timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            12.0, self, "hideNumbers:", None, False)
 
     def hideNumbers_(self, _timer):
         for w in getattr(self, "number_windows", []):
             w.orderOut_(None)
-        self.number_windows = []
+        self.number_windows, self.numbers_version, self.numbers_timer = [], None, None
+        self.publish_displayed()
+
+    @objc.python_method
+    def publish_displayed(self):
+        """Tell screen which numbered list is visible now. Badges sit on top of the HUD, so while both show, numbers
+        mean the badges; when the badges expire the HUD's list is back in charge; with neither, nothing is bound."""
+        import screen
+        if getattr(self, "number_windows", None):
+            screen.set_displayed(getattr(self, "numbers_version", None))  # badges without a version bind nothing
+        elif getattr(self, "inspect_window", None) is not None:
+            screen.set_displayed(self.inspect_view.get("version"))
+        else:
+            screen.set_displayed(None)
 
     @objc.python_method
     def ask_confirm(self, pending):

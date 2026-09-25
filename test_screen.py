@@ -1182,6 +1182,13 @@ class DisplayTests(unittest.TestCase):
         self.assertEqual(actions.nearest_to(items, "bottom-right", wide).label, "v5")
         self.assertEqual(actions.nearest_to(items, "top-left", wide).label, "v2")
 
+    def test_nearly_level_items_count_left_to_right_wherever_the_window_sits(self):
+        # Astra's pair: centres y=106 (left) and y=104 (right) straddled a fixed band edge and came out right-first
+        for dy in (0, 1, 15, 29, 600, -1440):
+            items = [item(1, "right", frame=(500, 54 + dy, 300, 100)), item(2, "left", frame=(100, 56 + dy, 300, 100)),
+                     item(3, "below", frame=(100, 200 + dy, 300, 100))]
+            self.assertEqual([i.label for i in actions.reading_order(items)], ["left", "right", "below"], dy)
+
 
 if __name__ == "__main__":
     unittest.main()

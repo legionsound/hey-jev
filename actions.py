@@ -993,15 +993,18 @@ CLASSIFY_ITEMS = None  # set by the app: (noun, labels) -> [(is_one, confidence)
 ROLE_NOUNS = {"button": ("AXButton", "AXMenuButton", "AXPopUpButton"), "link": ("AXLink",),
               "tab": ("AXTab", "AXRadioButton"), "row": ("AXRow", "AXCell"), "item": None}
 PICK_GATE = 0.65
-ROW_BAND = 30  # points: items whose centres are this close vertically share a row when counting in reading order
-
-
 def reading_order(items):
-    """Rows top to bottom, then left to right: how a person counts "the third video" on a grid or a list."""
-    def key(i):
-        cx, cy = i.frame[0] + i.frame[2] / 2, i.frame[1] + i.frame[3] / 2
-        return (round(cy / ROW_BAND), cx)
-    return sorted(items, key=key)
+    """Rows top to bottom, then left to right: how a person counts "the third video" on a grid or a list.
+    Rows come from the items themselves, not fixed screen bands: an item joins the current row when its centre
+    lies within the vertical span of the row's first item, so aligned controls stay together wherever the window is."""
+    rows = []
+    for i in sorted(items, key=lambda i: (i.frame[1], i.frame[0])):
+        cy = i.frame[1] + i.frame[3] / 2
+        if rows and rows[-1][0] <= cy <= rows[-1][1]:
+            rows[-1][2].append(i)
+        else:
+            rows.append((i.frame[1], i.frame[1] + i.frame[3], [i]))
+    return [i for _, _, row in rows for i in sorted(row, key=lambda i: i.frame[0] + i.frame[2] / 2)]
 
 
 def nearest_to(items, where, frame):

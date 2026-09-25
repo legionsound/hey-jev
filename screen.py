@@ -506,6 +506,10 @@ def observe(pid=None, ocr=True, deadline=None):
         app, bundle = _app_info(pid)
     started = process_start(pid, deadline)
     win, wframe, title, controls, extra, truncated = bounded(_read_ax, deadline, pid, deadline)
+    try:
+        field_scan = bounded(scan_fields, deadline, win)
+    except TimedOut:
+        field_scan = ([], False)
     t_ax = time.monotonic()
     texts, ocr_state = [], "off"
     if ocr:
@@ -520,12 +524,10 @@ def observe(pid=None, ocr=True, deadline=None):
         if i.source != "ocr":
             ref_extra = next((v for c in controls if c.ref is i.ref for v in [extra[id(c)]]), (True, False, False))
             i.enabled, i.from_value, i.secure = ref_extra
-    fields = [(c.x, c.y, c.w, c.h) for c in controls
-              if c.role in ("AXTextField", "AXTextArea", "AXSearchField", "AXComboBox", "AXSecureTextField")
-              or extra[id(c)][2]]
+    fields, fields_complete = field_scan
     return Snapshot(pid, app, bundle, title, wframe, items[:MAX_ITEMS], truncated or len(items) > MAX_ITEMS, ocr_state,
                     {"ax": round((t_ax - t0) * 1000), "ocr": round((time.monotonic() - t_ax) * 1000)},
-                    window_ref=win, started=started, field_frames=fields, walk_complete=not truncated)
+                    window_ref=win, started=started, field_frames=fields, walk_complete=fields_complete)
 
 
 def remember(snap):
@@ -691,4 +693,32 @@ def current_window(pid, deadline):
         w = _window(app_el)
         return token(w) if w is not None else None
     return bounded(read, deadline)
+
+
+FIELD_ROLES = ("AXTextField", "AXTextArea", "AXSearchField", "AXComboBox", "AXSecureTextField")
+
+
+def scan_fields(win, node_cap=6000, time_cap=0.5):
+    """Every text or password field in the window, before any label, action, visibility or dedup filter.
+    -> (frames, complete). complete is False when the scan hit a cap or met a node whose role or a field whose frame
+    couldn't be read: then unknown fields may exist, and no text read off the pixels may be shared."""
+    frames, queue, seen, end, complete = [], [win], 0, time.monotonic() + time_cap, True
+    while queue:
+        if seen >= node_cap or time.monotonic() >= end:
+            return frames, False
+        el = queue.pop(0)
+        seen += 1
+        rs, role = _read(el, "AXRole")
+        if rs != "ok":
+            complete = False
+            continue
+        ss, sub = _read(el, "AXSubrole")
+        if str(role) in FIELD_ROLES or str(sub or "") == "AXSecureTextField":
+            f = _frame(el)
+            if f is None:
+                complete = False
+            else:
+                frames.append(f)
+        queue.extend(_children(el))
+    return frames, complete
 

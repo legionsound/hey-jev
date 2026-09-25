@@ -451,6 +451,12 @@ RISKY = re.compile(r"\b(buy|purchase|order|pay|checkout|check out|send|submit|po
 CHOOSE = None  # set by the app: (spoken, [labels]) -> (index or None, confidence). Only control names are sent.
 CHOOSE_GATE = 0.65
 RESOLVE_BUDGET = 3.0  # one deadline over every native read a resolve makes
+RESOLVE_UNTIL = None  # set by the engine while a task step resolves: never past the task's shared deadline
+
+
+def resolve_deadline():
+    d = time.monotonic() + RESOLVE_BUDGET
+    return min(d, RESOLVE_UNTIL) if RESOLVE_UNTIL is not None else d
 SETTLE = 1.5  # how long a press gets to show a relevant change
 AX_GONE = (-25202, -25205, -25206, -25201)  # invalid element, no value, action unsupported, illegal argument
 MENU_ROLES = ("AXMenuBarItem", "AXMenuButton", "AXPopUpButton")
@@ -494,7 +500,7 @@ def valid_choice(got, n):
 
 def resolve_screen_press(args):
     """A number from the last list the user saw, or a spoken control name, to one exact control the app declared."""
-    deadline = time.monotonic() + RESOLVE_BUDGET
+    deadline = resolve_deadline()
     try:
         snap = screen.observe(ocr=False, deadline=deadline)
     except (screen.Unavailable, screen.TimedOut, screen.Wedged) as exc:
@@ -610,7 +616,7 @@ def resolve_screen_type(args):
     text = args.get("text")
     if not isinstance(text, str) or not text or len(text) > 2000:
         return ("none", "no text to type")
-    deadline = time.monotonic() + RESOLVE_BUDGET
+    deadline = resolve_deadline()
     try:
         snap = screen.observe(ocr=False, deadline=deadline)
         if args.get("number") is not None:  # a field from the list the user (or a task) saw
@@ -717,7 +723,7 @@ def verify_screen_type(t, deadline):
 
 def resolve_screen_submit(args):
     """The app's focused element, when it accepts AXConfirm: Return, sent to that element."""
-    deadline = time.monotonic() + RESOLVE_BUDGET
+    deadline = resolve_deadline()
     try:
         snap = screen.observe(ocr=False, deadline=deadline)
         ref = screen.focused_field(snap.pid, deadline)

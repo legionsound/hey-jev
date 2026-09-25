@@ -260,7 +260,7 @@ class Engine:
                     return self._finish(rec, "declined" if verdict != "cancelled" else "cancelled")
         covered = policy.get("in_task", "auto") == "auto"
         self._set(head, state="running")
-        history, seen, idle, repeats, pinned, last_ok, typed, moved, first = [], [], 0, 0, None, None, set(), False, None
+        history, seen, idle, repeats, pinned, last_ok, typed, first = [], [], 0, 0, None, None, set(), None
 
         def finish(state, why):
             self._set(head, state=state, detail=why, facts={"steps": len(rec["steps"]) - 1})
@@ -298,10 +298,8 @@ class Engine:
                 pinned = (snap.pid, snap.started, snap.window_token)
             elif (snap.pid, snap.started) != pinned[:2]:
                 return finish("unverified", "the app changed under me")
-            elif snap.window_token != pinned[2]:
-                if not moved:  # only our own verified step may move the task to another window
-                    return finish("unverified", "the window changed under me")
-                pinned = (snap.pid, snap.started, snap.window_token)
+            elif snap.window_token != pinned[2]:  # never adopted: a change can't be proven to be ours
+                return finish("unverified", "the window changed")
             items, _fields = task.shareable(snap)
             first = first if first is not None else items
             sig = task.signature(snap, items)
@@ -312,14 +310,16 @@ class Engine:
             tried = [a for s_, a in seen if s_ == sig]
             screen.remember(snap)  # a press or type by number resolves against exactly this list
             field = self._task_field(snap, end)
-            try:
-                kind, conf, item = screen.bounded(
-                    task.decide, min(end, time.monotonic() + task.JEV_TIMEOUT),
-                    self.task_jev, goal, snap, items, history, tried, field, typed)
-            except screen.TimedOut:
+            got = self._ask_jev(rec, min(end, time.monotonic() + task.JEV_TIMEOUT), task.decide,
+                                self.task_jev, goal, snap, items, history, tried, field, typed)
+            stop = interrupted()  # stop or the deadline wins over any answer, late or failed
+            if stop:
+                return finish(*stop)
+            if got[0] == "timeout":
                 return finish("unverified", "Jev didn't answer in time")
-            except Exception as exc:
-                return finish("failed", f"Jev couldn't decide ({type(exc).__name__})")
+            if got[0] == "error":
+                return finish("failed", f"Jev couldn't decide ({got[1]})")
+            kind, conf, item = got[1]
             diagnostics.record(rec["id"], "task_decide", kind, step=n, confidence=round(conf, 2))
             stop = interrupted()  # a stop or the deadline during the Jev call wins over its answer
             if stop:
@@ -378,7 +378,36 @@ class Engine:
             if kind == "type_text":
                 typed.add(item.token)
             last_ok = sig
-            moved = bool(step["facts"].get("window_changed"))  # its readback saw the window change
+
+    def _ask_jev(self, rec, deadline, fn, *args):
+        """Run a Jev call on its own thread and wait for it, the deadline, or a stop, whichever comes first.
+        -> ("ok", result) | ("timeout", None) | ("cancelled", None) | ("error", name). A call that outlives the wait is
+        abandoned, tracked with the other abandoned reads, and its answer ignored; nothing claims it stopped."""
+        import screen
+        box = {}
+
+        def run():
+            try:
+                box["ok"] = fn(*args)
+            except BaseException as exc:
+                box["err"] = type(exc).__name__
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        while t.is_alive():
+            with self.lock:
+                if rec["cancel"]:
+                    break
+            if time.monotonic() >= deadline:
+                break
+            t.join(0.05)
+        if t.is_alive():
+            with screen._abandoned_lock:
+                screen._abandoned.append((t, False))
+            with self.lock:
+                return ("cancelled", None) if rec["cancel"] else ("timeout", None)
+        if "err" in box:
+            return ("error", box["err"])
+        return ("ok", box["ok"])
 
     def _task_field(self, snap, end):
         """The focused field, when text could go into it: {"confirm": accepts Return} or None."""
@@ -430,10 +459,14 @@ class Engine:
             self._set(step, state="unsupported")
             return "unsupported"
         t = time.monotonic()
+        import actions as actions_mod
+        actions_mod.RESOLVE_UNTIL = until  # resolvers cap their own budget by the task's shared deadline
         try:
             got = action["resolve"](args)
         except Exception as exc:  # nothing dispatched yet
             got = ("none", f"could not resolve: {exc}")
+        finally:
+            actions_mod.RESOLVE_UNTIL = None
         act = step["action"]
         screen_step = act.startswith("screen.")
         diagnostics.record(rec["id"], "resolve", got[0], (time.monotonic() - t) * 1000, step=step["index"],
@@ -473,10 +506,13 @@ class Engine:
             if verdict != "confirmed":
                 self._set(step, state="declined" if verdict != "cancelled" else "skipped", detail=verdict)
                 return "declined" if verdict != "cancelled" else "cancelled"
+            actions_mod.RESOLVE_UNTIL = until
             try:
                 again = action["resolve"](args)
             except Exception:
                 again = ("none", None)
+            finally:
+                actions_mod.RESOLVE_UNTIL = None
             still = again[0] == "target" and _same_target(again[1], target) or \
                 picked is not None and again[0] == "choices" and any(_same_target(c, target) for c in again[1])
             if not still:

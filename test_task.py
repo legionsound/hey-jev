@@ -98,7 +98,7 @@ class TaskTests(unittest.TestCase):
         self.assertEqual((v["state"], v["steps"][0]["detail"]), ("unverified", "Jev judged it done; not checked"))
 
     def test_done_is_verified_only_against_an_explicit_outcome_that_appeared(self):
-        saved = item(1, "Saved to Downloads", source="ocr", role="text", pressable=False)
+        saved = item(1, "Saved", source="ocr", role="text", pressable=False)
         Screen(self, [snap([item(1, "Save")]), snap([saved])])
         v = self.run_task('save it until you see "Saved"', [{"kind": ("press_item", 0.9), "item": ("i0", 0.9)},
                                                             {"kind": ("done", 0.9)}])
@@ -112,6 +112,29 @@ class TaskTests(unittest.TestCase):
         Screen(self, [snap([item(1, "Saved", source="ocr", role="text", pressable=False)])])
         v = self.run_task('save it until you see "Saved"', [{"kind": ("done", 0.9)}])  # already on screen at start
         self.assertEqual((v["state"], v["steps"][0]["detail"]), ("unverified", "Jev judged it done; not checked"))
+
+    def test_evidence_is_a_whole_label_never_a_fragment(self):
+        self.assertFalse(task.present("Saved", [item(1, "Not Saved")]))
+        self.assertFalse(task.present("Saved file", [item(1, "Saved"), item(2, "file")]))  # not joined across items
+        self.assertTrue(task.present("Saved", [item(1, "saved.")]))
+        self.assertIsNone(task.postcondition('wait until you see "Saved"', [item(1, "Saved")], [item(1, "Saved")]))
+        self.assertFalse(task.postcondition('wait until you see "Saved"', [item(1, "Not Saved")], []))
+
+    def test_stop_during_a_hung_jev_call_is_immediate_and_cancelled(self):
+        import time
+        Screen(self, [snap([item(1, "Next")])])
+
+        def hang(*a):
+            time.sleep(1.0)
+            return {"kind": ("done", 0.9)}
+        self.jev_override = hang
+        with patch.object(task, "JEV_TIMEOUT", 0.25):
+            import threading
+            threading.Timer(0.1, lambda: self.eng.cancel(self.rid)).start()
+            t = time.monotonic()
+            v = self.run_task("go on", [])
+        self.assertEqual(v["state"], "cancelled")
+        self.assertLess(time.monotonic() - t, 0.6)
 
     def test_the_deadline_and_stop_win_over_a_slow_jev(self):
         import time
@@ -158,6 +181,23 @@ class TaskTests(unittest.TestCase):
         self.jev_override = reply
         v = self.run_task("go on", [])
         self.assertEqual((v["steps"][1]["detail"], s.presses), ("another app came forward", []))
+
+    def test_an_unnamed_field_the_control_walk_skips_still_excludes_its_text(self):
+        class N:
+            def __init__(self, role, frame, kids=(), sub=None):
+                self.role, self.frame, self.kids, self.sub = role, frame, list(kids), sub
+        field = N("AXTextField", (10, 100, 300, 30))  # no label: walk_actionable never returns it
+        win = N("AXWindow", (0, 0, 400, 300), [field])
+        reads = {"AXRole": lambda n: ("ok", n.role), "AXSubrole": lambda n: ("absent", None)}
+        with patch.object(screen, "_read", lambda el, name: reads[name](el)), \
+                patch.object(screen, "_frame", lambda el: el.frame), patch.object(screen, "_children", lambda el: el.kids):
+            frames, complete = screen.scan_fields(win)
+        self.assertEqual((frames, complete), ([(10, 100, 300, 30)], True))
+        bad = N("AXWindow", (0, 0, 400, 300), [N("AXGroup", (0, 0, 1, 1))])
+        reads["AXRole"] = lambda n: ("unknown", None) if n.role == "AXGroup" else ("ok", n.role)
+        with patch.object(screen, "_read", lambda el, name: reads[name](el)), \
+                patch.object(screen, "_frame", lambda el: el.frame), patch.object(screen, "_children", lambda el: el.kids):
+            self.assertEqual(screen.scan_fields(bad), ([], False))  # an unreadable node: fields can't all be known
 
     def test_ocr_is_withheld_when_fields_cant_all_be_known(self):
         text = item(2, "account number 1234", source="ocr", role="text", pressable=False, frame=(10, 200, 200, 20))
@@ -238,16 +278,15 @@ class TaskTests(unittest.TestCase):
     def test_a_window_the_user_brings_forward_stops_the_task(self):
         s = Screen(self, [snap([item(1, "Next")]), snap([item(1, "Next")], window=object())])
         v = self.run_task("go on", [{"kind": ("press_item", 0.9), "item": ("i0", 0.9)}, {"kind": ("done", 0.9)}])
-        self.assertEqual((v["steps"][0]["detail"], len(s.presses)), ("the window changed under me", 1))
+        self.assertEqual((v["steps"][0]["detail"], len(s.presses)), ("the window changed", 1))
 
-    def test_a_window_our_own_verified_step_opened_is_followed(self):
+    def test_a_window_change_alongside_a_verified_step_never_authorizes_more(self):
+        # the checkbox really changed, and meanwhile another window of the same app came forward
         other = object()
-        s = Screen(self, [snap([item(1, "Open")]), snap([item(1, "Close")], window=other)])
-        s.sig_window = [WIN]
+        s = Screen(self, [snap([item(1, "Loud mode", role="AXCheckBox")]), snap([item(1, "Delete all")], window=other)])
         patch.object(screen, "signature", lambda pid, d: {"window": WIN if not s.presses else other}).start()
-        v = self.run_task("go on", [{"kind": ("press_item", 0.9), "item": ("i0", 0.9)}, {"kind": ("done", 0.9)}])
-        self.assertEqual(v["steps"][0]["detail"], "Jev judged it done; not checked")  # it carried on in the new window
-        self.assertTrue(v["steps"][1]["facts"]["window_changed"])
+        v = self.run_task("go on", [{"kind": ("press_item", 0.9), "item": ("i0", 0.9)}] * 3)
+        self.assertEqual((v["steps"][0]["detail"], len(s.presses)), ("the window changed", 1))
 
     def test_another_app_coming_forward_stops_the_task(self):
         s = Screen(self, [snap([item(1, "Next")]), snap([item(1, "Other")])])

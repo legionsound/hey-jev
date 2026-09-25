@@ -171,8 +171,15 @@ def typed_text(goal):
     return next((q for q in QUOTED.findall(goal) if q != end), None)
 
 
+def _norm(text):
+    return " ".join(re.findall(r"[^\W_]+", (text or "").lower()))
+
+
 def present(text, items):
-    return text.lower() in " ".join(i.label.lower() for i in items)
+    """Evidence is one item whose whole label is exactly the text (normalized): never a fragment of a longer label
+    ("Not Saved"), never words joined across items."""
+    want = _norm(text)
+    return bool(want) and any(_norm(i.label) == want for i in items)
 
 
 def postcondition(goal, items, at_start):

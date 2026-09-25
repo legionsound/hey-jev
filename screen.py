@@ -737,7 +737,6 @@ def scan_fields(win, node_cap=6000, time_cap=0.5):
 
 # --------------------------------------------------------------------------- scrolling and the pointer
 SCROLL_STEP = {"little": 0.08, "normal": 0.25, "lot": 0.6}
-_last_pick = [None, None]  # [web element the last scroll targeted, its frame before]: its movement is the evidence
 
 
 def _all(el, role, cap=3000):
@@ -766,21 +765,36 @@ def scroll_target(window):
     return ("web", webs[0]) if webs else (None, None)
 
 
+def _unit(v):
+    """A scroll bar value only when it's a real one: finite, not a bool, within 0-1."""
+    import math
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) and 0 <= v <= 1
+
+
 def scroll_position(kind, el, pick=None):
-    """Evidence of scrolling. Native: the bar's value (None if unreadable). Web: the frame of the element the scroll
-    targeted, which moves into view when the page really scrolled (None when there is no such element yet)."""
-    if kind == "bar":
-        st, v = _read(el, "AXValue")
-        return round(float(v), 4) if st == "ok" and isinstance(v, (int, float)) and not isinstance(v, bool) else None
-    if pick is None:
+    """Scroll evidence. Native: the bar's value, only when it reads as a valid 0-1 number (else None). Web areas
+    expose no scroll position, so there is no evidence to read: None."""
+    if kind != "bar":
         return None
-    f = _frame(pick)
-    return tuple(round(x) for x in f) if f else None
+    st, v = _read(el, "AXValue")
+    return round(float(v), 4) if st == "ok" and _unit(v) else None
 
 
-def scroll(kind, el, direction, amount, deadline):
+def in_window(el, window_token):
+    """Whether this element still belongs to the given window (its AXWindow is that window). Unreadable: no."""
+    st, w = _read(el, "AXWindow")
+    return st == "ok" and w is not None and token(w) == window_token
+
+
+def scroll(kind, el, direction, amount, deadline, guard=None):
     """-> AX error code (0 sent). A bar moves by a fraction of its range; a web area scrolls the next element beyond
-    the visible edge into view. No pointer movement, no wheel events."""
+    the visible edge into view. No pointer movement, no wheel events. guard(): re-checked after all preparation,
+    immediately before the write or action; a reason string stops it with nothing sent (raises Unavailable)."""
+    def check():
+        why = guard() if guard else None
+        if why:
+            raise Unavailable(why)
+
     def run():
         AS = _AS()
         if kind == "bar":
@@ -795,6 +809,7 @@ def scroll(kind, el, direction, amount, deadline):
                 raise Unavailable("the scroll bar can't be moved")
             step = SCROLL_STEP.get(amount, 0.25) * (1 if direction == "down" else -1)
             target = 1.0 if amount == "end" and direction == "down" else 0.0 if amount == "end" else min(1, max(0, v + step))
+            check()
             return int(AS.AXUIElementSetAttributeValue(el, "AXValue", target))
         view = _frame(el)
         if not view:
@@ -814,7 +829,7 @@ def scroll(kind, el, direction, amount, deadline):
         pick = beyond[-1][0] if amount == "end" else min(beyond, key=lambda p: abs(p[1][1] - aim))[0]
         if "AXScrollToVisible" not in _actions(pick):
             raise Unavailable("that page can't be scrolled this way")
-        _last_pick[:] = [pick, _frame(pick)]
+        check()
         return int(AS.AXUIElementPerformAction(pick, "AXScrollToVisible"))
     return bounded(run, deadline, effect=True)
 

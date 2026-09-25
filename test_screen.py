@@ -865,16 +865,26 @@ class ScrollAndPointerTests(unittest.TestCase):
             self.assertIn(e, actions.EFFECT_LABELS)
         self.assertEqual(actions.DEFAULT_POLICY["in_task"], "auto")
 
-    def scroll_setup(self, positions, err=0, app="Pad", front=None, window=None):
-        pos, sent = list(positions), []
+    def scroll_setup(self, positions, err=0, app="Pad", front=None, window=None, member=True, switch_on_read=False):
+        pos, sent, state = list(positions), [], {"front": front, "window": window}
         s = snap([item(1, "x")], app=app)
+
+        def position(how, el, pick=None):
+            if switch_on_read:
+                state["front"] = 999  # the user switches apps while the position is being read
+            return pos[0] if len(pos) == 1 else pos.pop(0)
+
+        def scroll(how, el, d, a, dl, guard=None):
+            why = guard() if guard else None
+            if why:
+                raise screen.Unavailable(why)
+            sent.append((d, a))
+            return err
         self.patch_all({"observe": lambda pid=None, ocr=True, deadline=None: s,
-                        "scroll_target": lambda w: ("bar", "bar-el"),
-                        "scroll_position": lambda how, el, pick=None: pos[0] if len(pos) == 1 else pos.pop(0),
-                        "scroll": lambda how, el, d, a, dl: sent.append((d, a)) or err,
-                        "process_start": lambda pid, d: s.started,
-                        "frontmost": lambda: (front or s.pid, "Pad", "com.pad"),
-                        "current_window": lambda pid, d: window or s.window_token})
+                        "scroll_target": lambda w: ("bar", "bar-el"), "scroll_position": position, "scroll": scroll,
+                        "process_start": lambda pid, d: s.started, "in_window": lambda el, w: member,
+                        "frontmost": lambda: (state["front"] or s.pid, "Pad", "com.pad"),
+                        "current_window": lambda pid, d: state["window"] or s.window_token})
         return sent
 
     def test_scroll_completes_only_when_the_bar_moved(self):
@@ -884,16 +894,33 @@ class ScrollAndPointerTests(unittest.TestCase):
         self.scroll_setup([0.5])
         self.assertEqual(self.run_action("screen.scroll", {"direction": "down"})["state"], "unverified")
 
+    def test_invalid_readback_never_verifies(self):
+        for bad in [("ok", float("nan")), ("ok", float("inf")), ("ok", 3.0), ("ok", True), ("unknown", None)]:
+            with patch.object(screen, "_read", lambda el, n, bad=bad: bad):
+                self.assertIsNone(screen.scroll_position("bar", "el"), bad)
+
     def test_scroll_at_the_edge_says_so(self):
         self.scroll_setup([1.0], err=screen.AX_NO_VALUE)
         v = self.run_action("screen.scroll", {"direction": "down"})
         self.assertEqual((v["state"], v["steps"][0]["detail"]), ("failed", "already at the bottom"))
 
-    def test_scroll_rechecks_the_front_app_and_window_before_acting(self):
-        sent = self.scroll_setup([0.0, 0.3], front=999)
-        self.assertEqual((self.run_action("screen.scroll", {"direction": "down"})["state"], sent), ("failed", []))
-        sent = self.scroll_setup([0.0, 0.3], window="another")
-        self.assertEqual((self.run_action("screen.scroll", {"direction": "down"})["state"], sent), ("failed", []))
+    def test_scroll_rechecks_everything_right_before_writing(self):
+        for kw in ({"front": 999}, {"window": "another"}, {"member": False}, {"switch_on_read": True}):
+            sent = self.scroll_setup([0.0, 0.3], **kw)
+            v = self.run_action("screen.scroll", {"direction": "down"})
+            self.assertEqual((v["state"], sent), ("failed", []), kw)
+
+    def test_web_scroll_is_sent_never_checked(self):
+        s = snap([item(1, "x")])
+        sent = []
+        self.patch_all({"observe": lambda pid=None, ocr=True, deadline=None: s,
+                        "scroll_target": lambda w: ("web", "area"), "in_window": lambda el, w: True,
+                        "process_start": lambda pid, d: s.started, "frontmost": lambda: (s.pid, "Pad", "com.pad"),
+                        "current_window": lambda pid, d: s.window_token,
+                        "scroll": lambda how, el, d, a, dl, guard=None: (guard(), sent.append(d), 0)[2]})
+        v = self.run_action("screen.scroll", {"direction": "down"})
+        self.assertEqual((v["state"], sent, v["steps"][0]["facts"]["why"]),
+                         ("unverified", ["down"], "this page doesn't report its scroll position"))
 
     def test_an_unreadable_scroll_bar_is_never_written(self):
         writes = []
@@ -911,19 +938,6 @@ class ScrollAndPointerTests(unittest.TestCase):
                 patch.object(screen, "_settable", lambda el, n: True), patch.object(screen, "_abandoned", []):
             self.assertEqual(screen.scroll("bar", "el", "down", "normal", time.monotonic() + 1), screen.AX_NO_VALUE)
         self.assertEqual(writes, [])
-
-    def test_web_scroll_counts_only_the_targeted_element_moving_into_view(self):
-        s = snap([item(1, "x")])
-        frames = {"pick": [(0, 900, 100, 20), (0, 400, 100, 20)], "area": (0, 0, 800, 800)}
-        self.patch_all({"observe": lambda pid=None, ocr=True, deadline=None: s,
-                        "scroll_target": lambda w: ("web", "area"),
-                        "process_start": lambda pid, d: s.started, "frontmost": lambda: (s.pid, "Pad", "com.pad"),
-                        "current_window": lambda pid, d: s.window_token,
-                        "scroll": lambda how, el, d, a, dl: (screen._last_pick.__setitem__(slice(None), ["pick", (0, 900, 100, 20)]), 0)[1],
-                        "_frame": lambda el: frames["area"] if el == "area" else frames["pick"][-1]})
-        self.assertEqual(self.run_action("screen.scroll", {"direction": "down"})["state"], "completed")
-        frames["pick"] = [(0, 900, 100, 20)]  # it never came into view: other layout changes don't count
-        self.assertEqual(self.run_action("screen.scroll", {"direction": "down"})["state"], "unverified")
 
     def test_a_covered_spot_is_never_a_click_target(self):
         import Quartz

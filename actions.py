@@ -832,46 +832,48 @@ def run_screen_scroll(t, deadline):
     ref = screen.element_for(t.get("element"))
     if ref is None:
         raise Failed("unknown view")
-    try:
+
+    def guard():
+        """Right before the write: same app in front, same process and window, and this view still in it."""
         why = _same_front(t, deadline)
         if why:
-            raise Failed(why)
+            return why
+        if not screen.in_window(ref, t["window"]):
+            return "that view isn't in the window any more"
+        return None
+    try:
         before = screen.bounded(lambda: screen.scroll_position(t["how"], ref), deadline) if t["how"] == "bar" else None
     except (screen.Unavailable, screen.TimedOut, screen.Wedged) as exc:
         raise Failed(f"screen read failed before scrolling: {exc}")
     if t["how"] == "bar" and before is None:
         raise Failed("can't read the scroll position")
     try:
-        err = screen.scroll(t["how"], ref, t["direction"], t["amount"], deadline)
+        err = screen.scroll(t["how"], ref, t["direction"], t["amount"], deadline, guard=guard)
     except screen.Unavailable as exc:
-        raise Failed(str(exc))  # checked before anything was written
+        raise Failed(str(exc))  # every check happens before anything is written
     except screen.Wedged as exc:
         raise Failed(str(exc))
     except screen.TimedOut as exc:
         raise Uncertain(f"the app did not answer in time ({exc})")
     if err == screen.AX_NO_VALUE:
-        raise Failed("already at the " + ("bottom" if t["direction"] == "down" else "top"))
+        raise Failed("already at the " + ("bottom" if t["direction"] == "down" else "top") if t["how"] == "bar"
+                     else "nothing further to scroll to that I can see")
     if err in AX_GONE:
         raise Failed(f"the view refused to scroll (AX error {err})")
     if err != 0:
         raise Uncertain(f"AX error {err} after scrolling")
-    pick, pick_before = screen._last_pick if t["how"] == "web" else (None, None)
-    _scrolled[id(t)] = (before if t["how"] == "bar" else pick_before, time.monotonic(), ref, pick)
+    _scrolled[id(t)] = (before, time.monotonic(), ref)
 
 
 def verify_screen_scroll(t, deadline):
-    """Native: the bar value moved. Web: the element the scroll targeted moved and is now inside the view. A failed
-    read or any other change proves nothing."""
-    before, at, ref, pick = _scrolled.get(id(t), (None, 0, None, None))
-    if t["how"] == "bar":
-        after = screen.bounded(lambda: screen.scroll_position("bar", ref), deadline)
-        moved = before is not None and after is not None and after != before
-    else:
-        after = screen.bounded(lambda: screen.scroll_position("web", ref, pick), deadline)
-        view = screen.bounded(lambda: screen._frame(ref), deadline)
-        moved = (before is not None and after is not None and after != tuple(round(x) for x in before) and view is not None
-                 and view[1] <= after[1] < view[1] + view[3])
-    if moved:
+    """Native: done only when the bar's valid 0-1 value changed. Web areas expose no scroll position, so a web
+    scroll is reported as sent and never as checked: layout moving is not proof of scrolling."""
+    before, at, ref = _scrolled.get(id(t), (None, 0, None))
+    if t["how"] != "bar":
+        _scrolled.pop(id(t), None)
+        return ("unverified", {"delivered": True, "why": "this page doesn't report its scroll position"})
+    after = screen.bounded(lambda: screen.scroll_position("bar", ref), deadline)
+    if before is not None and after is not None and after != before:
         _scrolled.pop(id(t), None)
         return ("done", {"moved": True})
     if time.monotonic() - at < SETTLE:

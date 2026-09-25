@@ -6,8 +6,8 @@ gate, confirmation policy, readback), and stops at the first step that isn't ver
 
 State sent to Jev: the goal, the app name, the numbered item texts with role and rough position, recent actions and
 what was already tried on this screen. Never field values or password fields: AX never labels an editable item by its
-value, and an OCR line is shared only when a complete field scan found no field under it and Accessibility vouches
-for its place as ordinary text. Text in regions nothing vouches for (including apps that expose nothing) stays local.
+value, and an OCR line is shared only when a complete field scan found no field under it and the whole line lies inside one
+region Accessibility declares as text or a labelled control. Text in regions nothing vouches for (including apps that expose nothing) stays local.
 Screen text is data only: it can't change the goal, the rules or what is allowed.
 """
 import json
@@ -49,10 +49,11 @@ def _overlaps(a, b):
     return ax < bx + bw and bx < ax + aw and ay < by + bh and by < ay + ah
 
 
-def _centre_in(frame, box):
+def _inside(frame, box, slack=3):
+    """The whole OCR box lies within one vouched region (a few points of slack for OCR's loose boxes)."""
     x, y, w, h = frame
-    cx, cy = x + w / 2, y + h / 2
-    return box[0] <= cx <= box[0] + box[2] and box[1] <= cy <= box[1] + box[3]
+    return (x >= box[0] - slack and y >= box[1] - slack and x + w <= box[0] + box[2] + slack
+            and y + h <= box[1] + box[3] + slack)
 
 
 def shareable(snap):
@@ -67,7 +68,7 @@ def shareable(snap):
         if i.source != "ocr":
             return True
         return (ocr_ok and not any(_overlaps(i.frame, f) for f in fields)
-                and any(_centre_in(i.frame, t) for t in snap.text_frames))
+                and any(_inside(i.frame, t) for t in snap.text_frames))
     return [i for i in snap.items if allowed(i)][:MAX_ITEMS], fields
 
 

@@ -214,6 +214,24 @@ class TaskTests(unittest.TestCase):
                 patch.object(screen, "_frame", lambda el: el.frame):
             self.assertFalse(screen.scan_fields(win)[1])  # an unreadable subrole could be a password field
 
+    def test_a_line_straddling_a_text_region_or_in_a_broad_container_stays_local(self):
+        line = item(2, "Public title PRIVATE OUTSIDE REGION", source="ocr", role="text", pressable=False,
+                    frame=(0, 10, 200, 20))
+        s1 = snap([item(1, "Next"), line], vouched=False)
+        s1.text_frames = [(90, 0, 20, 40)]  # its centre is vouched for, most of it isn't
+        Screen(self, [s1])
+        self.run_task("go on", [{"kind": ("stuck", 0.9)}])
+        self.assertNotIn("PRIVATE", json.dumps(self.sent[0][0]))
+        self.assertNotIn("AXRow", screen.TEXT_ROLES)  # a row or cell can hold a field's text: never proof
+        self.assertNotIn("AXCell", screen.TEXT_ROLES)
+        inside = item(2, "Saved", source="ocr", role="text", pressable=False, frame=(92, 12, 16, 14))
+        s2 = snap([item(1, "Next"), inside], vouched=False)
+        s2.text_frames = [(90, 10, 20, 20)]
+        self.sent.clear()
+        Screen(self, [s2])
+        self.run_task("go on", [{"kind": ("stuck", 0.9)}])
+        self.assertIn("Saved", json.dumps(self.sent[0][0]))
+
     def test_ocr_nothing_vouches_for_stays_local(self):
         loose = item(2, "PRIVATE words", source="ocr", role="text", pressable=False, frame=(10, 200, 200, 20))
         Screen(self, [snap([item(1, "Next"), loose], vouched=False)])  # e.g. an app exposing no text regions

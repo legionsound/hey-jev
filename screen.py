@@ -698,8 +698,9 @@ def current_window(pid, deadline):
 
 
 FIELD_ROLES = ("AXTextField", "AXTextArea", "AXSearchField", "AXComboBox", "AXSecureTextField")
-TEXT_ROLES = ("AXStaticText", "AXHeading", "AXLink", "AXButton", "AXMenuItem", "AXMenuBarItem", "AXCell", "AXRow",
-              "AXCheckBox", "AXRadioButton", "AXPopUpButton", "AXTab", "AXImage")
+# Explicit text and label roles only: a row, cell, image or group can hold anything, so it vouches for nothing.
+TEXT_ROLES = ("AXStaticText", "AXHeading", "AXLink", "AXButton", "AXMenuItem", "AXMenuBarItem", "AXCheckBox",
+              "AXRadioButton", "AXPopUpButton", "AXTab")
 
 
 def scan_fields(win, node_cap=6000, time_cap=0.5):

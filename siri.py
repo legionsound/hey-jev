@@ -442,7 +442,7 @@ def line_for(result):
         if detail == "unsure_level":
             return "[clear throat] How loud? Say a percent, like 40 percent."
         if detail == "unfinished_field":
-            return "[clear throat] Into which field? Say its name, like: into the message field."
+            return "[clear throat] Which field? Say the whole thing again with the field, like: type hello into the message field."
         if detail == "task_no_goal":
             return "[clear throat] Take over what? Say the goal right after, like: take over, turn on dark mode."
         if detail == "unsupported_browser":

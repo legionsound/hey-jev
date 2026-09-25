@@ -193,7 +193,7 @@ class UnfinishedFieldPlanTests(unittest.TestCase):
     def test_it_is_spoken_as_a_question(self):
         import siri
         line = siri.line_for({"state": "needs_clarification", "detail": "unfinished_field", "steps": []})
-        self.assertIn("Into which field", line)
+        self.assertIn("Say the whole thing again with the field", line)
 
 
 class ComposeTests(unittest.TestCase):

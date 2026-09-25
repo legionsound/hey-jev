@@ -521,7 +521,7 @@ def describe_cards(controls, context, frame):
     share with Jev (AX labels, and OCR text the field scan and text regions vouch for), minus any label that came
     from an element's value: names, never contents."""
     import task as task_mod
-    shareable, _ = task_mod.shareable(context)
+    shareable, _ = task_mod.shareable_all(context)  # neighbours come from the whole page, not the task's first 60
     out = []
     for c in controls:
         x, y, w, h = c.frame

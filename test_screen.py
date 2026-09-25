@@ -281,7 +281,7 @@ class ScreenActionTests(unittest.TestCase):
 
         def choose(spoken, cards, intent=False):
             asked.append(len(cards))
-            hit = next((n for n, c in enumerate(cards) if "Control 125" in c), None)
+            hit = next((n for n, c in enumerate(cards) if c.startswith("“Control 125”")), None)  # its own name, not a neighbour
             return (hit, 0.9)
         with patch.object(actions, "CHOOSE", choose):
             v = self.run_text("click the gear", "screen.press", {"label": "the gear"})
@@ -1176,6 +1176,16 @@ class CardTests(unittest.TestCase):
         self.assertTrue(cards[0].startswith("“Opus 5.5 is here”, near: "))
         self.assertEqual(set(cards[0].split("near: ")[1].rsplit(", ", 1)[0].split(" · ")), {"Nate Herk", "3 days ago"})
         self.assertTrue(cards[0].endswith(", top-right"))  # the sidebar link far below isn't part of this card
+
+    def test_a_card_finds_its_neighbours_past_the_task_list_cap(self):
+        import task
+        toolbar = [item(i, f"Toolbar {i}", frame=(10 + i, 5, 8, 8)) for i in range(1, task.MAX_ITEMS + 5)]
+        title = item(100, "How Director Josh Cohen Made Impossible Shots", role="AXLink", frame=(600, 700, 250, 20))
+        channel = item(101, "Frame Set", role="AXLink", frame=(600, 724, 90, 14))
+        s = snap(toolbar + [title, channel])
+        s.window_frame = (0, 0, 900, 800)
+        cards = actions.describe_cards([title], s, s.window_frame)
+        self.assertIn("near: Frame Set", cards[0])
 
     def test_the_chooser_gets_cards_and_presses_that_exact_one(self):
         with patch.object(diagnostics, "record", lambda *a, **k: None):

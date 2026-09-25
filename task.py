@@ -77,10 +77,20 @@ def _inside(frame, box, slack=3):
 
 
 def shareable(snap):
-    """The items Jev may read. Every AX item (labels never come from field values). An OCR line only when the field
-    scan was complete, it overlaps no editable or secure field, and Accessibility vouches for its place: its centre
-    lies in a region the app declares as ordinary text or a control. Text anywhere else, including in apps that
-    expose nothing, stays on the Mac. -> (items, field_frames)"""
+    """The items Jev may read, capped at MAX_ITEMS for the task's screen list (the rest is counted, never silently
+    cut). -> (items, field_frames)"""
+    ok, fields = shareable_all(snap)
+    if len(_not_shown) > 64:
+        _not_shown.clear()
+    _not_shown[id(snap)] = max(0, len(ok) - MAX_ITEMS)
+    return ok[:MAX_ITEMS], fields
+
+
+def shareable_all(snap):
+    """Every item Jev may read, uncapped. Every AX item (labels never come from field values). An OCR line only when
+    the field scan was complete, it overlaps no editable or secure field, and Accessibility vouches for its place:
+    its centre lies in a region the app declares as ordinary text or a control. Text anywhere else, including in
+    apps that expose nothing, stays on the Mac. -> (items, field_frames)"""
     fields = list(snap.field_frames) + [i.frame for i in snap.items if i.role in FIELD_ROLES or i.secure]
     ocr_ok = snap.walk_complete
 
@@ -89,11 +99,7 @@ def shareable(snap):
             return True
         return (ocr_ok and not any(_overlaps(i.frame, f) for f in fields)
                 and any(_inside(i.frame, t) for t in snap.text_frames))
-    ok = [i for i in snap.items if allowed(i)]
-    if len(_not_shown) > 64:
-        _not_shown.clear()
-    _not_shown[id(snap)] = max(0, len(ok) - MAX_ITEMS)
-    return ok[:MAX_ITEMS], fields
+    return [i for i in snap.items if allowed(i)], fields
 
 
 _not_shown = {}  # snapshot id -> how many shareable items didn't fit Jev's list (said out loud, never silently cut)

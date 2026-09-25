@@ -3,7 +3,7 @@
 Status: spec, developer preview. Nothing here is implemented yet.
 
 Today "Ask Jev" answers have one backend, OpenRouter, called from two places in
-`siri.py`: the spoken answer (`ask_llm`) and reminder wording (`reminder=True`).
+`siri.py`: the spoken answer (`ask_llm`) and reminder wording (`prepare_reminder`, `reminder=True`).
 This spec adds Apple on-device and agent-session backends behind one boundary.
 
 ## Scope
@@ -22,13 +22,15 @@ def ask(provider, prompt, context, rid, deadline, cancel) -> Result
 Result = {status: finished|cancelled|unavailable|failed, text, provider, model, latency_ms}
 ```
 
-- `context` is bounded (last N exchanges, capped characters).
+- `context` is bounded (last N exchanges, capped characters). Screen or window text
+  is included only when the user turns on an explicit context option.
 - One deadline and cancel token per request, same as engine steps. Voice Stop cancels.
 - Late output after Stop or a provider change is discarded (generation counter).
-- Changing provider, or "New conversation", starts a fresh conversation.
+- Changing provider or workspace, or "New conversation", starts a fresh conversation.
 - No cross-provider fallback. Unavailable means a spoken and logged reason, not a
   silent switch to a cloud provider.
-- Speak a short answer; show the full text in the app.
+- v1 speaks the final answer only (no early partial speech); full text shows in the app.
+  Stop drops late chunks and any queued speech.
 - Diagnostics: `answer` stage in `requests.jsonl` with provider, status, latency.
 
 Reminder wording goes through the same boundary for OpenRouter and Apple. For agent
@@ -41,7 +43,8 @@ current fallback text). A timer label never starts an agent session.
   and `LanguageModelSession`. JSON over stdio; one warm process per app run.
 - Requires macOS 26+. Availability is checked at runtime (device, Apple Intelligence
   on, model downloaded, language) and the reason is shown when unavailable. Older
-  Macs keep working with this choice disabled.
+  Macs keep working with this choice disabled. "On-device" covers answer generation
+  only; Jev decisions and Fish audio may still be remote.
 - Built by `setup.py`, shipped inside the bundle.
 - Gives access to Apple's model only, not Siri's tools or personal context.
 - Adopt only if the probe (10 fixed questions, latency p50/p95, quality vs the
@@ -54,17 +57,25 @@ current fallback text). A timer label never starts an agent session.
   If ACP blocks a required capability, fall back to Codex app-server or Claude's
   programmatic interface for that provider.
 - Auth is the user's own supported login. Hey Jev never reads or copies tokens.
+  Probe each installed adapter's advertised auth methods and real login behaviour;
+  show actionable login and quota errors. Never switch to API-key billing implicitly.
 - A local process does not mean local inference or free use; the UI says so.
-- Lazily started, one session per app run, killed on quit, restarted once on crash.
+- Lazily started, one session per app run, killed on quit. A crashed process is
+  restarted once for the next question; the failed question is never replayed.
   Never attaches to any existing Buzz, Codex or Claude session.
 - Deadline default 45 s; "thinking" cue while waiting.
 
 ### Milestone 1: answer-only
 
-Tools are disabled by runtime configuration, not by prompt: adapter/session options
-that disallow tools, MCP servers and hooks, plus Hey Jev denying every
-`session/request_permission`. Acceptance proves it: a prompt asking the agent to
-write a file or run a command yields no file and no command.
+Tools are disabled by runtime configuration, not by prompt or by the permission
+callback alone (pre-authorized tools, MCP servers, hooks or user config can bypass
+it). Per adapter, the session is started with runtime settings that disable tools,
+MCP servers and hooks. If an adapter cannot enforce that, the provider is shown as
+unavailable. No file reads either: the session runs in an empty temporary working
+directory with no project context. Any `session/request_permission` that still
+arrives gets a valid negotiated answer (the offered reject option, else cancelled).
+Acceptance proves it per adapter: prompts to read a file, write a file or run a
+command produce no read, no file and no command.
 
 ### Later: tools-enabled sessions
 

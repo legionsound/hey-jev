@@ -187,7 +187,9 @@ class Engine:
                 with self.lock:
                     self.running = None
                 v = self._view(rec)
+                bad = next((st for st in v["steps"] if st["state"] not in ("completed", "skipped", "not_started")), None)
                 diagnostics.record(rec["id"], "done", v["state"], (time.monotonic() - started) * 1000,
+                                   step_detail=bad.get("detail") if bad else None,
                                    **{k: v[k] for k in ("stopped_state", "uncertain_step", "not_started", "error", "detail")
                                       if k in v})
                 _local.rid = None

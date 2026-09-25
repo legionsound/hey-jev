@@ -309,7 +309,32 @@ def frontmost():
     app = NSWorkspace.sharedWorkspace().frontmostApplication()
     if app is None:
         raise Unavailable("no frontmost app")
-    return int(app.processIdentifier()), str(app.localizedName() or ""), str(app.bundleIdentifier() or "")
+    pid = int(app.processIdentifier())
+    if pid == os.getpid():  # our own confirmation pop-down took the foreground: use the app it took it from
+        pid = handoff()
+        if pid is None:
+            raise Unavailable("Hey Jev is in front and no app handed off to it")
+    return (pid, *_app_info(pid))
+
+
+HANDOFF_GRACE = 10.0  # the handoff outlives the pop-down this long, so the post-confirm re-check still finds it
+_handoff = [None, None]  # [pid of the app in front when the pop-down opened, expiry time or None while open]
+
+
+def set_handoff(pid):
+    """The UI calls this with the app's pid when its pop-down takes the foreground."""
+    _handoff[:] = [pid, None]
+
+
+def end_handoff():
+    """The pop-down closed: the handoff stays good for HANDOFF_GRACE, then names nothing."""
+    if _handoff[0] is not None:
+        _handoff[1] = time.monotonic() + HANDOFF_GRACE
+
+
+def handoff():
+    pid, expires = _handoff
+    return pid if pid is not None and (expires is None or time.monotonic() < expires) else None
 
 
 def _app_info(pid):

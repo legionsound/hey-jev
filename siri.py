@@ -638,7 +638,8 @@ def agent_turn(agent, text, eng, notify):
 
 def cancel_agents(eng):
     """Stop: the running agent turn is cancelled and an open permission pop-down declined."""
-    eng.cancel_outside()
+    if AGENT_SESSIONS:
+        eng.cancel_outside()
     for session in AGENT_SESSIONS.values():
         session.cancel()
 

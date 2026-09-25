@@ -563,9 +563,12 @@ class Engine:
                            reason=got[1] if got[0] == "none" else None)
         picked = None
         if got[0] == "choices" and action["effect"] not in TIEBREAK_EFFECTS:  # only duplicate apps are Jev's to break
-            self._set(step, state="needs_clarification", facts={"choices": got[1]})
-            if got[1] and all(isinstance(c.get("target"), dict) for c in got[1]):  # "the first one" can answer it
-                with self.lock:
+            with self.lock:  # a stop that landed while this resolved wins: no question is left open
+                if rec["cancel"]:
+                    step.update(state="skipped")
+                    return "cancelled"
+                step.update(state="needs_clarification", facts={"choices": got[1]})
+                if got[1] and all(isinstance(c.get("target"), dict) for c in got[1]):  # "the first one" can answer it
                     now = time.monotonic()
                     self.offered = {"action": act, "choices": got[1], "at": now, "until": now + ANSWER_WINDOW}
             return "needs_clarification"

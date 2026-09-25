@@ -1148,6 +1148,25 @@ class PickTests(unittest.TestCase):
         eng.wait(eng.submit("the first one", "cli")["id"], 10)  # the question is gone
         self.assertEqual(self.presses, [])
 
+    def test_a_stop_during_a_slow_resolve_leaves_no_question_open(self):
+        import threading
+        eng, plans, g = self.answer_harness()
+        entered, release = threading.Event(), threading.Event()
+        real = actions.resolve_screen_pick
+
+        def slow(args):
+            entered.set()
+            release.wait(5)
+            return real(args)
+        with patch.dict(eng.actions, {"screen.pick": {**eng.actions["screen.pick"], "resolve": slow}}):
+            rid = eng.submit("play the video", "cli")["id"]
+            entered.wait(5)
+            eng.cancel(rid)
+            release.set()
+            self.assertEqual(eng.wait(rid, 10)["state"], "cancelled")
+        eng.wait(eng.submit("the first one", "cli")["id"], 10)
+        self.assertEqual(self.presses, [])
+
     def test_answer_words(self):
         names = ["Enter the Dome (bottom-left)", "Soup in ten minutes (top-left)", "Knit a scarf (middle-right)"]
         for said, want in [("the first one", 0), ("second", 1), ("the last one", 2), ("number 3", 2), ("2", 1),

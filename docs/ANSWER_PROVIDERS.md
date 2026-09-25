@@ -1,10 +1,12 @@
 # Answer providers
 
-Status: spec, developer preview. Nothing here is implemented yet.
+Status: implemented (2026-09-25). Apple lives in `apple_fm.py` plus the `helpers/heyjev-fm`
+Swift helper; Claude Code and Codex sessions in `acp_client.py`; dispatch in `siri.py`. This
+document is the design spec it was built from; the `answers.py` module name below was not
+used.
 
-Today "Ask Jev" answers have one backend, OpenRouter, called from two places in
-`siri.py`: the spoken answer (`ask_llm`) and reminder wording (`prepare_reminder`, `reminder=True`).
-This spec adds Apple on-device and agent-session backends behind one boundary.
+Before this work, answers had one backend, OpenRouter, called from `siri.py` for the spoken
+answer (`ask_llm`) and reminder wording (`prepare_reminder`). This spec adds Apple on-device and agent-session backends behind one boundary.
 
 ## Scope
 

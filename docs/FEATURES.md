@@ -42,9 +42,14 @@ For exact behavior rules see `ENGINE_CONTRACT.md`.
 
 ## Screen control (`screen.py`)
 
-- `screen.list`: reads the front window through Accessibility (Apple
-  Vision OCR adds only text lines no control covers). Items carry their
-  source (`ax`, `ocr`, `ax+ocr`), capped at 60, numbered in reading order.
+- `screen.list`: reads every visible window through Accessibility, front
+  window first, then each window behind it, minus anything a window above
+  covers (`screen.desktop_view`). Apple Vision OCR adds only text lines no
+  control covers. Items carry their source (`ax`, `ocr`, `ax+ocr`), are
+  capped at 500, and are numbered in reading order, with numbers running
+  on across windows. A number resolves in its own window; a Chromium back
+  window is raised first and the reply says so. Typing into a back window
+  is refused.
 - `screen.press`: presses a named button/link/tab, or "click 4" for the
   numbered overlay (menu bar > Show what Jev sees). Numbers bind to the
   list visible when speech started; a changed list refuses (`screen_changed`).
@@ -142,6 +147,20 @@ For exact behavior rules see `ENGINE_CONTRACT.md`.
 - Request ids are remembered for the whole app run (full bodies 10 min);
   re-sending returns the stored result, never re-runs. Nothing retries
   side effects.
+
+## Answers (`siri.py`, `apple_fm.py`, `acp_client.py`)
+
+- Settings > Answers: Off, OpenRouter, Apple, Claude Code or Codex.
+- Apple uses the `heyjev-fm` Swift helper (build with
+  `helpers/heyjev-fm/build.sh`), on this Mac or through Apple Private
+  Cloud Compute. Needs macOS 26+ with Apple Intelligence; otherwise the
+  choice shows why it is unavailable.
+- Claude Code and Codex run as full agent sessions over ACP with the
+  user's own login, tools and settings. Their permission requests appear
+  in the confirmation drop-down; Hey Jev never approves them. Each agent
+  has its own working folder setting.
+- No silent fallback between providers. Answer text never becomes a Hey
+  Jev action. Details: `ANSWER_PROVIDERS.md`.
 
 ## Diagnostics (`diagnostics.py`, `trials.py`)
 

@@ -4,8 +4,14 @@ All notable changes to this fork of [henryklunaris/hey-jev](https://github.com/h
 
 ## Unreleased
 
-Fixes from the first live trial of 0.3.0.
+New since 0.3.0, plus fixes from its first live trial.
 
+- **Every visible window.** The numbered overlay and "what can I click?" now cover every window on screen, not just the front one. Numbers run on across windows, "click 4" presses number 4 in whichever window it belongs to, and a Chromium window behind the front one is raised before its control is pressed (and the reply says so). Controls covered by a window on top are refused. Typing into a field in a back window is refused.
+- **Whole pages.** A screen read now keeps up to 500 items instead of 60, so long web pages are no longer cut off after the toolbar. Jev's picks are sent in batches.
+- **Pick by description.** "Play the video by Frame Set" or "the Full Tilt video": each card on screen carries its nearby text, and Jev decides which card matches. For 45 seconds after Hey Jev asks "which one?", you can answer with a place or a description.
+- **More answer providers.** Settings > Answers now offers Off, OpenRouter, Apple (on this Mac or Private Cloud Compute, macOS 26+, via the `helpers/heyjev-fm` Swift helper) and full Claude Code or Codex sessions over ACP. Agent permission requests appear in the confirmation drop-down; Hey Jev never approves them itself. No provider silently falls back to another.
+- **Settings > Permissions.** One pane lists Microphone, Dictation, Accessibility, Screen Recording and each Automation target, with live status and Request / Open Settings buttons.
+- **Permissions survive rebuilds.** The app is now signed with a stable developer certificate, so rebuilding it no longer silently drops the Accessibility and dictation grants.
 - **Clicks on web pages land in Chrome and other Chromium apps.** Chromium ignores `AXPress` on page content, so every page click did nothing. Page controls are now focused and sent Return (Space for checkboxes, radios and switches) as that app's own key, only once the app reports that exact control focused and only while the step is still in time. The pointer never moves.
 - **Picks count the page.** "The first video" no longer counts browser tabs named after videos, and a cold page that reads short is read once more with a longer walk. "The first tab" still means the browser's tabs.
 - **Heard names match whatever the spacing.** "The Network Chuck video" finds NetworkChuck. Only whole words match, and Jev still decides whether a matching card is a video. An unsure card still makes it ask.
@@ -81,5 +87,4 @@ A ground-up rework of how commands run, plus screen control. Everything a comman
 ### Development
 
 - Test suite (stdlib `unittest`) grew from none to several hundred tests covering the engine, planner, actions, screen control, settings and speech.
-- Status of this release: the integrated features passed their automated checks, but the final live trial in the running app is still pending.
 - Design notes kept in `docs/`; the ones written before the build are marked historical.

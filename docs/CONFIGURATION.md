@@ -25,8 +25,10 @@ menu bar, and Settings > Voice — Cancel does not undo them.
 ### Answers
 
 - Optional spoken answers to questions ("who wrote Hamlet?", "what time
-  is it?") via Claude Haiku through OpenRouter. Answers know the Mac's
-  local date and time.
+  is it?"). Provider: Off, OpenRouter (Claude Haiku by default), Apple
+  (on this Mac or Private Cloud Compute; macOS 26+), Claude Code or Codex
+  (full agent sessions with a working folder per agent). Answers know the
+  Mac's local date and time.
 - Answer model, budgets: the old 80/120 budgets are preserved until
   changed; user overrides apply to both paths
   (`model_settings.py: save_answer_settings`).

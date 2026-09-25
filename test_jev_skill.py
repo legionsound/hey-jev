@@ -173,9 +173,6 @@ class AuditRound2Tests(unittest.TestCase):
         self.assertEqual(got, ("press_item", 0.8, only))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
     def test_an_unsure_volume_level_asks_instead_of_setting(self):
         ans = {"target": ("volume", .99), "volume_action": ("set", .99), "volume_scope": ("system", .99),
                "volume_level": ("loud", .10)}
@@ -224,3 +221,7 @@ class PickAuditTests(unittest.TestCase):
     def test_sure_answers_still_pick(self):
         got = self.pick({"noun": "video", "ordinal": 2}, [(True, .99), (False, .99), (True, .9)])
         self.assertEqual((got[0], got[1]["label"]), ("target", "Video 2"))
+
+
+if __name__ == "__main__":
+    unittest.main()

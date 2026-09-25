@@ -1140,7 +1140,7 @@ class PickTests(unittest.TestCase):
     def test_unsure_or_malformed_classification_presses_nothing(self):
         g = self.grid()
         v = self.run_pick({"noun": "video", "ordinal": 1}, g, answer=lambda labels: [(True, 0.5)] * len(labels))
-        self.assertEqual((v["state"], self.presses), ("failed", []))  # below the gate: no videos counted
+        self.assertEqual((v["state"], self.presses), ("needs_clarification", []))  # unsure isn't "no": it asks
         for bad in (lambda l: [(True, float("nan"))] * len(l), lambda l: [("yes", 0.9)] * len(l),
                     lambda l: [(True, 0.9)], lambda l: None):
             v = self.run_pick({"noun": "video", "ordinal": 1}, g, answer=bad)

@@ -354,6 +354,11 @@ def step_for(ans, target, clause, inherited_browser=None):
             if relative:  # "up by 10 percent": move by exactly that much
                 return (conf, f"{kind}.{act}", {"delta": n if act == "up" else -n})
             return (conf, f"{kind}.set", {"level": f"{n}%", "percent": n})  # "up to 60%" is a set
+        if act == "set":  # the level is the argument this step consumes, so its own certainty must pass
+            level, level_conf = ans["volume_level"]
+            if level_conf < GATE:
+                return (conf, "clarify", "unsure_level")
+            return (conf, f"{kind}.set", {"level": level})
         return (conf, f"{kind}.{act}", {"level": ans["volume_level"][0]})
     return (conf, f"{target}.{act}", {})
 

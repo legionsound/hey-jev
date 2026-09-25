@@ -1059,7 +1059,10 @@ def resolve_screen_pick(args):
                                                                      "page", "here", "this"}:
         return ("none", "that app isn't in front")
     noun = args.get("noun", "item")
+    if snap.truncated:  # first/last/nearest/only all need every candidate; a cut list can't say which is which
+        return ("none", "there's more on screen than I can read at once; scroll or name it")
     pool = [i for i in snap.items if _live(i) and not i.from_value]
+    unsure = []
     roles = ROLE_NOUNS.get(noun, "jev") if not args.get("kind") else "jev"  # a qualified noun is Jev's to judge
     noun = f"{args['kind']} {noun}" if args.get("kind") else noun
     if roles is None:
@@ -1083,22 +1086,40 @@ def resolve_screen_pick(args):
                 return ("choices", [])  # a failed or malformed answer asks again; nothing is pressed
             got += ans
         group = [i for i, (yes, conf) in zip(pool, got) if yes is True and conf >= PICK_GATE]
+        unsure = [i for i, (yes, conf) in zip(pool, got) if conf < PICK_GATE]  # neither a match nor a non-match
     if not group:
+        if unsure:
+            return ("choices", [{"name": f"{i.label} ({_where(i, snap.window_frame)})"} for i in unsure[:4]])
         return ("none", f"no {noun}s on screen")
+
+    def ask(items):  # an unsure item could change the answer: ask rather than count past it
+        return ("choices", [{"name": f"{i.label} ({_where(i, snap.window_frame)})"} for i in items[:4]])
     if "where" in args:
+        if unsure:
+            return ask(reading_order(group + unsure))
         chosen = nearest_to(group, args["where"], snap.window_frame)
     else:
         ordered = reading_order(group)
         k = args.get("ordinal", 1)
         if k == 0:  # "the Full Tilt video": exactly one, else ask which
-            if len(ordered) > 1:
-                return ("choices", [{"name": f"{i.label} ({_where(i, snap.window_frame)})"} for i in ordered[:4]])
+            if len(ordered) > 1 or unsure:
+                return ask(reading_order(ordered + unsure))
             chosen = ordered[0]
         elif k == -1:
             chosen = ordered[-1]
+            both = reading_order(unsure + [chosen])
+            after = both[[id(i) for i in both].index(id(chosen)) + 1:]
+            if after:
+                return ask([chosen] + after)
         elif isinstance(k, int) and 1 <= k <= len(ordered):
             chosen = ordered[k - 1]
+            both = reading_order(ordered[:k] + unsure)
+            upto = both[:[id(i) for i in both].index(id(chosen)) + 1]
+            if {id(i) for i in upto} & {id(i) for i in unsure}:
+                return ask(upto)
         else:
+            if unsure:
+                return ask(reading_order(ordered + unsure))
             return ("none", f"only {len(ordered)} {noun}{'s' if len(ordered) != 1 else ''} on screen")
     return ("target", _screen_target(snap, chosen))
 

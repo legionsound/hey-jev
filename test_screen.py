@@ -828,5 +828,85 @@ class FrontmostTests(unittest.TestCase):
         v, presses, _ = self.ask_first(switch_to=333)
         self.assertEqual((v["state"], v["steps"][0]["detail"], presses), ("failed", "target_changed", []))
 
+class ScrollAndPointerTests(unittest.TestCase):
+    def setUp(self):
+        p = patch.object(diagnostics, "record", lambda *a, **k: None)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def run_action(self, action, args, policy=None):
+        with patch.object(planner, "plan", lambda *a, **k: ("steps", [{"clause": "c", "action": action, "args": args}])):
+            eng = Engine(lambda _: {}, policy=lambda: {**actions.DEFAULT_POLICY, "click": "auto", **(policy or {})})
+            return eng.wait(eng.submit("c", "cli")["id"], 10)
+
+    def test_direct_words_need_no_classification(self):
+        called = []
+        for said, want in [("scroll down", ("screen.scroll", {"direction": "down", "amount": "normal"})),
+                           ("scroll up a little", ("screen.scroll", {"direction": "up", "amount": "little"})),
+                           ("scroll to the top", ("screen.scroll", {"direction": "up", "amount": "end"})),
+                           ("click", ("pointer.click", {"button": "left", "double": False})),
+                           ("right click here", ("pointer.click", {"button": "right", "double": False}))]:
+            kind, steps = planner.plan(said, lambda c: called.append(c) or {})
+            self.assertEqual((kind, steps[0]["action"], steps[0]["args"]), ("steps", *want), said)
+        self.assertEqual(called, [])  # Jev isn't asked what "scroll down" means
+        self.assertIsNone(planner.direct("click Save"))
+
+    def scroll_setup(self, positions, err=0, app="Pad"):
+        pos = list(positions)
+        sent = []
+        s = snap([item(1, "x")], app=app)
+        for name, fn in {"observe": lambda pid=None, ocr=True, deadline=None: s,
+                         "scroll_target": lambda w: ("bar", "bar-el"),
+                         "scroll_position": lambda how, el: pos[0] if len(pos) == 1 else pos.pop(0),
+                         "scroll": lambda how, el, d, a, dl: sent.append((d, a)) or err,
+                         "process_start": lambda pid, d: s.started}.items():
+            p = patch.object(screen, name, fn)
+            p.start()
+            self.addCleanup(p.stop)
+        return sent
+
+    def test_scroll_completes_only_when_the_view_moved(self):
+        sent = self.scroll_setup([0.0, 0.25])
+        v = self.run_action("screen.scroll", {"direction": "down", "amount": "normal"})
+        self.assertEqual((v["state"], sent), ("completed", [("down", "normal")]))
+        self.scroll_setup([0.5])
+        self.assertEqual(self.run_action("screen.scroll", {"direction": "down"})["state"], "unverified")
+
+    def test_scroll_at_the_edge_says_so_and_sends_nothing_else(self):
+        self.scroll_setup([1.0], err=screen.AX_NO_VALUE)
+        v = self.run_action("screen.scroll", {"direction": "down"})
+        self.assertEqual((v["state"], v["steps"][0]["detail"]), ("failed", "already at the bottom"))
+
+    def test_scroll_in_a_named_app_that_isnt_in_front_does_nothing(self):
+        sent = self.scroll_setup([0.0, 0.3], app="Safari")
+        v = self.run_action("screen.scroll", {"direction": "down", "app": "Chrome"})
+        self.assertEqual((v["state"], v["steps"][0]["detail"], sent), ("failed", "that app isn't in front", []))
+
+    def pointer_setup(self, points, change=True):
+        pts, clicks, sig = list(points), [], {"n": 0}
+        for name, fn in {"pointer": lambda: pts[0] if len(pts) == 1 else pts.pop(0),
+                         "app_at": lambda p: (7, 99), "_app_info": lambda pid: ("Pad", "com.pad"),
+                         "signature": lambda pid, d: dict(sig),
+                         "click_at": lambda p, b, dbl, d: (clicks.append((p, b, dbl)), change and sig.update(n=1), 0)[2]}.items():
+            p = patch.object(screen, name, fn)
+            p.start()
+            self.addCleanup(p.stop)
+        return clicks
+
+    def test_click_at_the_pointer_right_where_it_is(self):
+        clicks = self.pointer_setup([(100.4, 200.6)])
+        v = self.run_action("pointer.click", {"button": "left", "double": False})
+        self.assertEqual((v["state"], clicks), ("completed", [((100, 201), "left", False)]))
+
+    def test_a_pointer_that_moved_after_the_ok_never_clicks(self):
+        clicks = self.pointer_setup([(100, 200), (400, 300)])
+        v = self.run_action("pointer.click", {"button": "left"})
+        self.assertEqual((v["state"], v["steps"][0]["detail"], clicks), ("failed", "the pointer moved", []))
+
+    def test_a_click_that_changes_nothing_is_unverified(self):
+        self.pointer_setup([(100, 200)], change=False)
+        self.assertEqual(self.run_action("pointer.click", {"button": "left"})["state"], "unverified")
+
+
 if __name__ == "__main__":
     unittest.main()

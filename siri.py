@@ -169,6 +169,8 @@ REPLIES = {
     "screen.press": ["Clicked it.", "[cheerful] Done, clicked."],
     "screen.type": ["Typed it.", "[cheerful] Typed."],
     "screen.submit": ["Pressed return.", "Return pressed."],
+    "screen.scroll": ["Scrolled.", "There."],
+    "pointer.click": ["Clicked.", "Click."],
     "timer.cancel": ["Timer cancelled.", "[sighing] Fine, no timer then."],
     "timers_cancel": ["All timers cancelled.", "Cleared them all."],
     "timer_none": ["[chuckling] There's no timer running."],

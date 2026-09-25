@@ -366,6 +366,37 @@ SUBMIT_WORDS = re.compile(r"^\W*(?:please\s+)?(?:(?:press|hit|tap)\s+(?:the\s+)?
                           r"(?:\s+(?:it|that|this))?)(?:\s+(?:please|now))?[\s.!?]*$", re.I)
 
 
+SCROLL = re.compile(r"^\W*(?:please\s+)?scroll\s+(?P<dir>up|down)(?:\s+(?P<amt>a\s+little|a\s+bit|a\s+lot|more|"
+                    r"to\s+the\s+(?:top|bottom|end)))?(?:\s+(?:on|in)\s+(?P<app>.+?))?[\s.!?]*$", re.I)
+SCROLL_EDGE = re.compile(r"^\W*(?:please\s+)?(?:scroll|go|jump)\s+to\s+the\s+(?P<edge>top|bottom)(?:\s+(?:on|in|of)\s+"
+                         r"(?P<app>.+?))?[\s.!?]*$", re.I)
+POINTER = re.compile(r"^\W*(?:please\s+)?(?P<how>double[\s-]?|right[\s-]?|left[\s-]?)?click(?:\s+(?:the\s+mouse|here|"
+                     r"there|it|that))?[\s.!?]*$", re.I)
+
+
+def direct(clause):
+    """Commands whose words say exactly what to do, with nothing for Jev to choose: -> (action, args) or None."""
+    m = SCROLL.match(clause)
+    if m:
+        amt = (m["amt"] or "").lower()
+        amount = "little" if amt in ("a little", "a bit") else "lot" if amt in ("a lot", "more") else \
+            "end" if amt.startswith("to the") else "normal"
+        direction = m["dir"].lower()
+        if amt.endswith("top"):
+            direction = "up"
+        return ("screen.scroll", {"direction": direction, "amount": amount, **({"app": m["app"]} if m["app"] else {})})
+    m = SCROLL_EDGE.match(clause)
+    if m:
+        return ("screen.scroll", {"direction": "up" if m["edge"].lower() == "top" else "down", "amount": "end",
+                                  **({"app": m["app"]} if m["app"] else {})})
+    m = POINTER.match(clause)
+    if m:
+        how = (m["how"] or "").lower()
+        return ("pointer.click", {"button": "right" if how.startswith("right") else "left",
+                                  "double": how.startswith("double")})
+    return None
+
+
 def pick(ans, clause, inherited_browser=None):
     """Trust Jev's target if it is fairly sure, else the single most confident action anywhere.
     "Click" and "tap", or a named UI part ("the Loud mode checkbox"), always mean a control on screen:
@@ -433,11 +464,18 @@ def plan(text, classify, can_answer=False):
     if len(clauses) > MAX_CLAUSES:
         return ("clarify", "too_many_steps")
     if len(clauses) == 1:
+        d = direct(clauses[0])  # the words say exactly what to do: no classification needed
+        if d:
+            return ("steps", [{"clause": clauses[0], "action": d[0], "args": d[1]}])
         kind, got = judge(classify(clauses[0]), clauses[0], can_answer)
         return ("steps", [got]) if kind == "step" else (kind, got)
     steps = []
     browser = None  # same-request only: an earlier "open Safari/Chrome" applies to later website steps
     for clause in clauses:
+        d = direct(clause)
+        if d:
+            steps.append({"clause": clause, "action": d[0], "args": d[1]})
+            continue
         kind, got = judge(classify(clause), clause, inherited_browser=browser)
         if kind != "step":
             return ("clarify", got if kind == "clarify" else "no_action")

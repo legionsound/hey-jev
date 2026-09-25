@@ -24,7 +24,6 @@ OR_KEY = get_secret("OPENROUTER_API_KEY")
 JEV_PROVIDER = get_setting("JEV_PROVIDER")
 ANSWER_PROVIDER = get_setting("ANSWER_PROVIDER")
 SAMPLE_RATE = 16000
-WHISPER_MODEL = "small.en"
 COMMAND_PROMPT = "Open Spotify. Set a timer for five minutes. Play. Pause. Next track. Turn Spotify down. Turn the Mac volume down. Mute. Dark mode on. Lock the screen."
 # Whisper often hears "Jev" as Jeff or Jeb, so accept the close ones
 WAKE = wake.Wake()  # replaced from preferences at start and live from Settings; see set_wake()
@@ -46,16 +45,17 @@ def reload_keys():
 
 # --------------------------------------------------------------------------- Jev
 def jev_route(provider):
-    """-> (url, model) for a Jev source."""
+    """-> (url, model) for a Jev source; the model is the one chosen in Settings (default: the original)."""
     if provider == "openrouter":
-        return "https://openrouter.ai/api/alpha/decisions", "typesafe/jev-1.13"
-    return "https://api.typesafe.ai/v1/systemone", "jev-latest"
+        return "https://openrouter.ai/api/alpha/decisions", model_settings.jev_model("openrouter")
+    return "https://api.typesafe.ai/v1/systemone", model_settings.jev_model("typesafe")
 
 
-def jev(text, questions=None, *, provider=None, key=None, timeout=30):
+def jev(text, questions=None, *, provider=None, key=None, model=None, timeout=30):
     t = time.time()
     provider = provider or JEV_PROVIDER
-    url, model = jev_route(provider)
+    url, saved_model = jev_route(provider)
+    model = model or saved_model
     key = key or (JEV_OR_KEY if provider == "openrouter" else TS_KEY)
     r = requests.post(url, json={"model": model, "state": text, "questions": questions or planner.QUESTIONS},
                       headers={"Authorization": f"Bearer {key}"}, timeout=timeout, allow_redirects=False)
@@ -76,14 +76,14 @@ def jev(text, questions=None, *, provider=None, key=None, timeout=30):
 CHECK_QUESTION = {"greeting": {"type": "noul", "instructions": "Is this a greeting?"}}
 
 
-def check_jev(provider, key):
+def check_jev(provider, key, model=None):
     """Settings' deliberate connection check: one tiny classify call. -> ms. Raises ValueError in plain words;
     the message never contains the key or the response body."""
     if not key:
         raise ValueError("No key entered for this source.")
     host = jev_route(provider)[0].split("/")[2]
     try:
-        ans, ms, _cost = jev("hello", CHECK_QUESTION, provider=provider, key=key, timeout=10)
+        ans, ms, _cost = jev("hello", CHECK_QUESTION, provider=provider, key=key, model=model, timeout=10)
     except requests.HTTPError as exc:
         code = exc.response.status_code if exc.response is not None else 0
         raise ValueError({401: "The key was rejected.", 403: "The key isn't allowed to use Jev.",
@@ -365,16 +365,18 @@ def ask_llm(text):
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache", "tts")
 
 
-def fetch_tts(text, key=None, voice_id=None):
+def fetch_tts(text, key=None, voice_id=None, model=None):
     """Return a wav path for this line, generating it once and caching on disk. Returns (path, ms, cached).
     The voice is the saved one from Settings unless a sample asks for another."""
     voice_id = voice_id or model_settings.voice()["id"]
+    model = model or model_settings.fish_model()
     os.makedirs(CACHE_DIR, exist_ok=True)
-    path = os.path.join(CACHE_DIR, hashlib.sha1(f"{voice_id}|{text}".encode()).hexdigest() + ".wav")
+    tag = voice_id if model == model_settings.FISH_MODELS[0] else f"{voice_id}|{model}"  # old cache stays valid
+    path = os.path.join(CACHE_DIR, hashlib.sha1(f"{tag}|{text}".encode()).hexdigest() + ".wav")
     if os.path.exists(path):
         return path, 0, True
     t = time.time()
-    r = requests.post("https://api.fish.audio/v1/tts", headers={"Authorization": f"Bearer {key or FISH_KEY}", "model": "s2.1-pro-free"},
+    r = requests.post("https://api.fish.audio/v1/tts", headers={"Authorization": f"Bearer {key or FISH_KEY}", "model": model},
                       json={"text": text, "reference_id": voice_id, "format": "wav"}, timeout=60, allow_redirects=False)
     r.raise_for_status()
     open(path, "wb").write(r.content)
@@ -422,8 +424,8 @@ OP_IDS = __import__("itertools").count(1)  # Settings operation ids: never reuse
 class SampleOp:
     """One Settings voice sample. report(op_id, state, text): state is "playing" or "done"."""
 
-    def __init__(self, key, voice_id, report):
-        self.id, self.key, self.voice_id, self.report = next(OP_IDS), key, voice_id, report
+    def __init__(self, key, voice_id, report, model=None):
+        self.id, self.key, self.voice_id, self.report, self.model = next(OP_IDS), key, voice_id, report, model
         self.cancelled = threading.Event()
 
     def cancel(self):
@@ -436,7 +438,7 @@ def play_sample(op, hold):
     """Fetch and play a sample inside the speech owner's hold(), so the mic is paused and the wake listener
     never hears it. Cancellation is checked after the fetch, after taking the floor and at playback start."""
     try:
-        path, _ms, _cached = fetch_tts(SAMPLE_LINE, key=op.key, voice_id=op.voice_id)
+        path, _ms, _cached = fetch_tts(SAMPLE_LINE, key=op.key, voice_id=op.voice_id, model=op.model)
     except Exception as exc:
         code = getattr(getattr(exc, "response", None), "status_code", None)
         return op.report(op.id, "done", "Fish Audio rejected the key." if code in (401, 403)
@@ -797,7 +799,7 @@ def load_transcriber(backend, notify):
     from faster_whisper import WhisperModel
     print("loading whisper...")
     emit(notify, "Starting", "Loading Whisper…")
-    model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+    model = WhisperModel(model_settings.whisper_model(), device="cpu", compute_type="int8")
 
     def transcribe(audio, prompt):
         t = time.time()

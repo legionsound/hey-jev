@@ -26,7 +26,13 @@ class Base(unittest.TestCase):
                         patch.object(assistant_ui, "save_advanced_open", MagicMock()),
                         patch.object(assistant_ui, "advanced_open", lambda: False),
                         patch.object(assistant_ui, "whisper_cached", lambda size: True),
-                        patch.object(assistant_ui, "voice", lambda: {"id": "defaultvoice01", "title": "Hey Jev voice"})]
+                        patch.object(assistant_ui, "voice", lambda: {"id": "defaultvoice01", "title": "Hey Jev voice"}),
+                        patch.object(assistant_ui, "jev_model", lambda p: assistant_ui.JEV_MODELS[p]),
+                        patch.object(assistant_ui, "fish_model", lambda: "s2.1-pro-free"),
+                        patch.object(assistant_ui, "whisper_model", lambda: "small.en"),
+                        patch.object(assistant_ui, "ocr_level", lambda: "accurate"),
+                        patch.object(assistant_ui, "app_folders", lambda: []),
+                        patch.object(assistant_ui, "wake_settings", lambda: ("Hey Jev", []))]
         for p in self.patches:
             p.start()
         self.d = assistant_ui.AppDelegate.alloc().init()
@@ -50,7 +56,7 @@ class JevCheckTests(Base):
             self.d.key_fields["TYPESAFE_API_KEY"].setStringValue_("ts-typed")
             self.d.checkJev_(None)
             self.assertTrue(pump(lambda: self.d.jev_check_result.stringValue() != "Checking…"))
-        check.assert_called_once_with("typesafe", "ts-typed")
+        check.assert_called_once_with("typesafe", "ts-typed", "jev-latest")
         self.assertEqual(self.d.jev_check_result.stringValue(), "Connected · 142 ms")
         self.assertTrue(self.d.jev_check_button.isEnabled())
 
@@ -155,7 +161,8 @@ class VoiceSampleTests(Base):
         self.d.playSample_(None)
         self.assertEqual(self.d.sample_button.title(), "Stop")
         self.assertTrue(pump(lambda: self.d.sample_button.title() == "Play Sample"))
-        siri.fetch_tts.assert_called_once_with(siri.SAMPLE_LINE, key="fish-typed", voice_id="defaultvoice01")
+        siri.fetch_tts.assert_called_once_with(siri.SAMPLE_LINE, key="fish-typed", voice_id="defaultvoice01",
+                                               model="s2.1-pro-free")
         self.assertEqual([p for p, _ in self.played], ["/tmp/s.wav"])
 
     def test_with_the_worker_it_goes_through_the_speech_owner(self):
@@ -506,17 +513,23 @@ class WakeResetTests(Base):
 
 
 class RecognizerInfoTests(Base):
-    def test_whisper_model_download_and_loading(self):
+    def test_whisper_size_picker_download_note_and_loading(self):
         self.d.backend_popup.selectItemAtIndex_(0)
+        self.d._show_backend()
+        self.assertFalse(self.d.whisper_popup.isHidden())
+        self.assertTrue(self.d.backend_model.isHidden())
+        self.assertEqual(self.d.whisper_popup.titleOfSelectedItem(), "small.en · 480 MB")
         with patch.object(assistant_ui, "whisper_cached", lambda size: False), \
                 patch.dict(siri.STT, {"backend": None, "blocked": None, "switching": True}):
-            self.d._show_backend()
-            self.assertEqual(self.d.backend_model.stringValue(),
-                             f"Whisper {siri.WHISPER_MODEL} · downloads about 480 MB at first start")
+            self.d.whisper_popup.selectItemAtIndex_(1)  # base.en, not saved yet
+            self.d.whisperChanged_(None)
+            self.assertEqual(self.d.backend_next.stringValue(), "Whisper base.en downloads about 145 MB the next "
+                             "time it loads. Save to switch; it reloads without a restart.")
             self.assertEqual(self.d.backend_status.stringValue(), "Loading…")
         with patch.dict(siri.STT, {"backend": "whisper", "blocked": None, "switching": False}):
+            self.d.whisper_popup.selectItemAtIndex_(2)
             self.d._show_backend()
-            self.assertEqual(self.d.backend_model.stringValue(), f"Whisper {siri.WHISPER_MODEL} · downloaded")
+            self.assertEqual(self.d.backend_next.stringValue(), "Whisper small.en is downloaded.")
             self.assertEqual(self.d.backend_status.stringValue(), "Loaded, runs on this Mac")
         self.assertEqual(self.d.backend_locale.stringValue(), "English (US)")
 
@@ -524,7 +537,131 @@ class RecognizerInfoTests(Base):
         self.d.backend_popup.selectItemAtIndex_(1)
         with patch.dict(siri.STT, {"backend": None, "blocked": None, "switching": False}):
             self.d._show_backend()
+        self.assertTrue(self.d.whisper_popup.isHidden())
         self.assertEqual(self.d.backend_model.stringValue(), "Managed by macOS, on-device only")
+
+
+SAVES = ("save_secret", "save_wake_settings", "save_answer_settings", "save_confirm_policy", "save_transcription_backend",
+         "save_tiebreak_threshold", "save_voice", "save_app_folders", "save_jev_model", "save_fish_model",
+         "save_whisper_model", "save_ocr_level")
+
+
+class ModelSettingsSaveTests(Base):
+    def save(self, worker=False):
+        import queue
+        mocks = {}
+        patches = [patch.object(assistant_ui, n) for n in SAVES]
+        for n, p in zip(SAVES, patches):
+            mocks[n] = p.start()
+        self.addCleanup(lambda: [p.stop() for p in patches])
+        self.d.worker_started, self.d.controls = worker, queue.Queue()
+        with patch.object(assistant_ui, "get_secret", return_value="stored"), patch.object(siri, "reload_keys"), \
+                patch.object(assistant_ui, "wake_settings", return_value=("Hey Jev", [])), \
+                patch.dict(siri.STT, {"backend": "whisper", "blocked": None, "switching": False}), \
+                patch.object(assistant_ui.AppDelegate, "_start_worker"):
+            self.d.saveSettings_(None)
+        return mocks
+
+    def test_defaults_shown_and_nothing_saved_until_changed(self):
+        self.assertEqual(self.d.jev_model_fields["openrouter"].stringValue(), "typesafe/jev-1.13")
+        self.assertEqual(self.d.jev_model_fields["typesafe"].stringValue(), "jev-latest")
+        self.assertEqual(self.d.fish_model_popup.titleOfSelectedItem(), "s2.1-pro-free")
+        self.assertEqual(self.d.ocr_popup.titleOfSelectedItem(), "Accurate")
+        mocks = self.save()
+        for n in ("save_jev_model", "save_fish_model", "save_whisper_model", "save_ocr_level"):
+            mocks[n].assert_not_called()
+
+    def test_changed_models_are_saved_and_whisper_reloads_live(self):
+        self.d.jev_model_fields["typesafe"].setStringValue_("jev-2")
+        self.d.fish_model_popup.selectItemWithTitle_("s1")
+        self.d.ocr_popup.selectItemAtIndex_(1)
+        self.d.backend_popup.selectItemAtIndex_(0)
+        self.d.whisper_popup.selectItemAtIndex_(0)  # tiny.en
+        mocks = self.save(worker=True)
+        mocks["save_jev_model"].assert_called_once_with("typesafe", "jev-2")
+        mocks["save_fish_model"].assert_called_once_with("s1")
+        mocks["save_ocr_level"].assert_called_once_with("fast")
+        mocks["save_whisper_model"].assert_called_once_with("tiny.en")
+        self.assertEqual(self.d.controls.get_nowait(), ("transcription", "whisper"))  # reload, no restart
+
+    def test_bad_jev_model_saves_nothing(self):
+        self.d.jev_model_fields["openrouter"].setStringValue_("bad model!")
+        mocks = self.save()
+        self.assertIn("Jev model", self.d.settings_message.stringValue())
+        for m in mocks.values():
+            m.assert_not_called()
+
+    def test_check_uses_the_typed_model_and_model_edit_clears_result(self):
+        self.d.jev_provider.selectItemAtIndex_(0)
+        self.d._sync_key_rows()
+        self.d.jev_model_fields["openrouter"].setStringValue_("typesafe/jev-2")
+        with patch.object(siri, "check_jev", return_value=7) as check:
+            self.d.checkJev_(None)
+            self.assertTrue(pump(lambda: self.d.jev_check_result.stringValue() != "Checking…"))
+        self.assertEqual(check.call_args.args[2], "typesafe/jev-2")
+        with patch.object(assistant_ui.threading, "Thread"):
+            self.d.checkJev_(None)
+            op = self.d.ops["check"]
+            self.d.jev_model_fields["openrouter"].setStringValue_("typesafe/jev-3")  # edited while checking
+            self.d.jevChecked_({"generation": op, "ms": 1})
+        self.assertEqual(self.d.jev_check_result.stringValue(), "Not checked")
+
+
+class LayoutFitTests(Base):
+    """Every pane's content stays inside the pane, above the Cancel/Save footer, with the most rows it can have."""
+
+    def bottoms(self, view, offset=0):
+        for sub in view.subviews():
+            if sub.isHidden():
+                continue
+            f = sub.frame()
+            if sub in (self.d.advanced_view, self.d.folder_view):  # full-height containers: measure their content
+                yield from self.bottoms(sub, offset + f.origin.y)
+            else:
+                yield offset + f.origin.y + f.size.height, sub
+
+    def test_all_panes_fit_with_advanced_open_and_full_folders(self):
+        import tempfile, os
+        folders = [tempfile.mkdtemp() for _ in range(assistant_ui.MAX_APP_FOLDERS)]
+        self.addCleanup(lambda: [os.rmdir(f) for f in folders])
+        self.d.folder_drafts = list(folders)
+        self.d._show_folders()
+        self.d.advanced_view.setHidden_(False)
+        for item in self.d.settings_tabs.tabViewItems():
+            pane = item.view()
+            for bottom, sub in self.bottoms(pane):
+                self.assertLessEqual(bottom, assistant_ui.PANE_H,
+                                     f"{item.identifier()}: {type(sub).__name__} ends at {bottom:.0f}")
+
+
+class ModelPrefsTests(unittest.TestCase):
+    def test_defaults_are_todays_values_and_bad_storage_falls_back(self):
+        import model_settings as ms
+        store = MagicMock()
+        store.stringForKey_.return_value = None
+        with patch.object(ms, "PREFS", store):
+            self.assertEqual((ms.jev_model("openrouter"), ms.jev_model("typesafe"), ms.fish_model(), ms.whisper_model(),
+                              ms.ocr_level()), ("typesafe/jev-1.13", "jev-latest", "s2.1-pro-free", "small.en", "accurate"))
+            store.stringForKey_.return_value = "not a real choice!"
+            self.assertEqual((ms.jev_model("typesafe"), ms.fish_model(), ms.whisper_model(), ms.ocr_level()),
+                             ("jev-latest", "s2.1-pro-free", "small.en", "accurate"))
+            for bad in (lambda: ms.save_fish_model("x"), lambda: ms.save_whisper_model("large"),
+                        lambda: ms.save_ocr_level("slow"), lambda: ms.save_jev_model("typesafe", "a b")):
+                with self.assertRaises(ValueError):
+                    bad()
+            store.setObject_forKey_.assert_not_called()
+
+    def test_siri_reads_the_chosen_models(self):
+        with patch.object(siri.model_settings, "jev_model", lambda p: f"custom-{p}"):
+            self.assertEqual(siri.jev_route("openrouter")[1], "custom-openrouter")
+            self.assertEqual(siri.jev_route("typesafe")[1], "custom-typesafe")
+        with patch.object(siri.model_settings, "fish_model", return_value="s1"), \
+                patch.object(siri.model_settings, "voice", return_value={"id": "voiceaaaa01", "title": "A"}), \
+                patch.object(siri.requests, "post") as post, patch("os.path.exists", return_value=False), \
+                patch("os.makedirs"), patch("builtins.open", create=True):
+            post.return_value.content = b"RIFF"
+            siri.fetch_tts("hi", key="k")
+        self.assertEqual(post.call_args.kwargs["headers"]["model"], "s1")
 
 
 if __name__ == "__main__":

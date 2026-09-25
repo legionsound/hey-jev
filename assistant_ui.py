@@ -50,7 +50,9 @@ from AppKit import NSPopover, NSViewController
 from Foundation import NSObject, NSTimer, NSUserDefaults
 from actions import EFFECT_LABELS, EFFECTS
 from model_settings import (PREFS, PARAMETERS, advanced_open, save_advanced_open, voice, save_voice,
-                            app_folders, clean_app_folders, save_app_folders, TIEBREAK_MAX, TIEBREAK_MIN, answer_settings, cached_models, confirm_policy,
+                            app_folders, clean_app_folders, save_app_folders, JEV_MODELS, MODEL_ID_RE, jev_model,
+                            save_jev_model, FISH_MODELS, fish_model, save_fish_model, WHISPER_SIZES, whisper_model,
+                            save_whisper_model, OCR_LEVELS, ocr_level, save_ocr_level, MAX_APP_FOLDERS, TIEBREAK_MAX, TIEBREAK_MIN, answer_settings, cached_models, confirm_policy,
                             fetch_models, save_answer_settings, save_confirm_policy, save_tiebreak_threshold,
                             save_transcription_backend, tiebreak_threshold, transcription_backend, validate_parameters,
                             BACKENDS, save_wake_settings, wake_settings)
@@ -574,7 +576,17 @@ class AppDelegate(NSObject):
         jev_keys = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, CONTROL_W, 22))
         for key in ("JEV_OPENROUTER_API_KEY", "TYPESAFE_API_KEY"):
             jev_keys.addSubview_(key_field(key))
-            self.key_fields[key].setDelegate_(self)  # editing the key clears a stale connection result  # stacked; only the selected source's key shows
+            self.key_fields[key].setDelegate_(self)  # stacked, only the selected source's shows; edits clear a check
+        jev_models = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, CONTROL_W, 22))
+        self.jev_model_fields = {}
+        for provider in ("openrouter", "typesafe"):
+            field = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, CONTROL_W, 22))
+            field.setStringValue_(jev_model(provider))
+            field.setPlaceholderString_(JEV_MODELS[provider])
+            field.setToolTip_(f"Default: {JEV_MODELS[provider]}. Empty uses the default.")
+            field.setDelegate_(self)
+            self.jev_model_fields[provider] = field
+            jev_models.addSubview_(field)
         check_cell = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, CONTROL_W, 24))
         self.jev_check_result = text("Not checked", NSMakeRect(0, 4, CONTROL_W - 86, 17), 13,
                                      NSColor.secondaryLabelColor())
@@ -587,7 +599,7 @@ class AppDelegate(NSObject):
         self.ops = {}  # kind -> id of the one current check / voice lookup / app scan; late results for others drop
         self.jev_checked = None  # (source, typed key) the shown result belongs to
         y = form_group(p, 20, "Jev decisions", [("Source", self.jev_provider), ("API key", jev_keys),
-                                                ("Connection", check_cell)])
+                                                ("Model", jev_models), ("Connection", check_cell)])
         self.answer_provider = self._popup(None, ["Off", "OpenRouter"], NSMakeRect(0, 0, CONTROL_W, 24), "answerSourceChanged:")
         self.answer_provider.selectItemAtIndex_(0 if get_setting("ANSWER_PROVIDER") == "disabled" else 1)
         y = form_group(p, y, "Deeper answers", [("Provider", self.answer_provider),
@@ -670,7 +682,11 @@ class AppDelegate(NSObject):
         for view in (self.voice_search, self.voice_find):
             find_cell.addSubview_(view)
         self._fill_voices(self.voice_choices[0]["id"])
-        y = form_group(v, 20, "Fish Audio", [("API key", key_field("FISH_AUDIO_API_KEY")), ("Voice", self.voice_popup),
+        self.fish_model_popup = self._popup(None, list(FISH_MODELS), NSMakeRect(0, 0, CONTROL_W, 24))
+        self.fish_model_popup.selectItemWithTitle_(fish_model())
+        self.fish_model_popup.setToolTip_(f"Fish Audio speech model. Default: {FISH_MODELS[0]}.")
+        y = form_group(v, 20, "Fish Audio", [("API key", key_field("FISH_AUDIO_API_KEY")),
+                                             ("Speech model", self.fish_model_popup), ("Voice", self.voice_popup),
                                              ("Find voices", find_cell)])
         self.voice_message = text("", NSMakeRect(GROUP_X + 14, y - 16, PANE_W - 2 * GROUP_X, 16), 11,
                                   NSColor.secondaryLabelColor())
@@ -725,6 +741,12 @@ class AppDelegate(NSObject):
         y = form_group(ap, 20, "Installed apps", [("Found", found_cell)])
         footnote(ap, y, "Hey Jev looks in Applications, running apps, Spotlight and the folders below. Refresh after "
                         "installing something new.")
+        self.ocr_popup = self._popup(None, ["Accurate", "Fast"], NSMakeRect(0, 0, 140, 24))
+        self.ocr_popup.selectItemAtIndex_(OCR_LEVELS.index(ocr_level()))
+        self.ocr_popup.setAccessibilityLabel_("Screen text reading mode")
+        y = form_group(ap, y + 44, "Screen reading", [("Read on-screen text", self.ocr_popup)])
+        footnote(ap, y, "Accurate reads small and unusual text better; Fast answers \u201cwhat can I click\u201d sooner. "
+                        "Reading stays on this Mac.")
         self.folder_drafts = list(app_folders())
         self.folder_top = y + 44
         self.folder_view = FlippedView.alloc().initWithFrame_(NSMakeRect(0, self.folder_top, PANE_W, PANE_H - self.folder_top))
@@ -743,11 +765,18 @@ class AppDelegate(NSObject):
         self.allow_button.setFrame_(NSMakeRect(CONTROL_W - 90, 0, 90, 24))
         for view in (self.backend_status, self.allow_button):  # status text, or the Allow button when it's needed
             status_cell.addSubview_(view)
-        self.backend_model = text("", NSMakeRect(0, 0, CONTROL_W + 60, 17), 13, NSColor.secondaryLabelColor())
+        model_cell = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, CONTROL_W, 24))
+        self.whisper_popup = self._popup(None, [f"{s} · {mb}" for s, mb in WHISPER_SIZES.items()],
+                                         NSMakeRect(0, 0, CONTROL_W, 24), "whisperChanged:")
+        self.whisper_popup.selectItemAtIndex_(list(WHISPER_SIZES).index(whisper_model()))
+        self.whisper_popup.setAccessibilityLabel_("Whisper model size")
+        self.backend_model = text("", NSMakeRect(0, 4, CONTROL_W, 17), 13, NSColor.secondaryLabelColor())
         self.backend_locale = text("English (US)", NSMakeRect(0, 0, CONTROL_W, 17), 13, NSColor.secondaryLabelColor())
         for view in (self.backend_model, self.backend_locale):
             view.setAlignment_(2)
-        y = form_group(h, 20, "Speech recognition", [("Recognizer", self.backend_popup), ("Model", self.backend_model),
+        for view in (self.whisper_popup, self.backend_model):  # Whisper's size picker, or Apple's note
+            model_cell.addSubview_(view)
+        y = form_group(h, 20, "Speech recognition", [("Recognizer", self.backend_popup), ("Model", model_cell),
                                                      ("Language", self.backend_locale), ("Status", status_cell)])
         self.backend_next = text("", NSMakeRect(GROUP_X + 14, y - 14, PANE_W - 2 * GROUP_X, 16), 11,
                                  NSColor.secondaryLabelColor())
@@ -829,6 +858,8 @@ class AppDelegate(NSObject):
     @objc.python_method
     def _sync_key_rows(self):
         typesafe = self.jev_provider.indexOfSelectedItem() == 1
+        self.jev_model_fields["openrouter"].setHidden_(typesafe)
+        self.jev_model_fields["typesafe"].setHidden_(not typesafe)
         self.key_fields["JEV_OPENROUTER_API_KEY"].setHidden_(typesafe)
         self.key_fields["TYPESAFE_API_KEY"].setHidden_(not typesafe)
         self.key_fields["OPENROUTER_API_KEY"].setEnabled_(self.answer_provider.indexOfSelectedItem() == 1)
@@ -838,17 +869,22 @@ class AppDelegate(NSObject):
         """Status of the selected backend, what to do next, and whether a restart is needed to use it."""
         chosen = BACKENDS[self.backend_popup.indexOfSelectedItem()]
         self.allow_button.setHidden_(True)
-        from siri import STT, WHISPER_MODEL
+        from siri import STT
+        self.whisper_popup.setHidden_(chosen != "whisper")
+        self.backend_model.setHidden_(chosen == "whisper")
         if chosen == "whisper":
-            self.backend_model.setStringValue_(f"Whisper {WHISPER_MODEL} · " + (
-                "downloaded" if whisper_cached(WHISPER_MODEL) else "downloads about 480 MB at first start"))
+            size = list(WHISPER_SIZES)[self.whisper_popup.indexOfSelectedItem()]
+            self.whisper_note = (f"Whisper {size} is downloaded." if whisper_cached(size) else
+                                 f"Whisper {size} downloads about {WHISPER_SIZES[size]} the next time it loads.")
+            if size != whisper_model():
+                self.whisper_note += " Save to switch; it reloads without a restart."
             if STT["switching"]:
                 status = "Loading…"
             elif STT["backend"] == "whisper" and not STT["blocked"]:
                 status = "Loaded, runs on this Mac"
             else:
                 status = "Loads when listening starts"
-            nxt = ""
+            nxt = self.whisper_note
         else:
             self.backend_model.setStringValue_("Managed by macOS, on-device only")
             try:
@@ -883,6 +919,9 @@ class AppDelegate(NSObject):
         self.backend_restart.setStringValue_(now)
 
     def backendChanged_(self, _sender):
+        self._show_backend()
+
+    def whisperChanged_(self, _sender):
         self._show_backend()
 
     def allowAppleSpeech_(self, _sender):
@@ -928,6 +967,11 @@ class AppDelegate(NSObject):
         provider = ("openrouter", "typesafe")[self.jev_provider.indexOfSelectedItem()]
         key_name = "TYPESAFE_API_KEY" if provider == "typesafe" else "JEV_OPENROUTER_API_KEY"
         key = self.key_fields[key_name].stringValue().strip() or get_secret(key_name)
+        model = self.jev_model_fields[provider].stringValue().strip() or JEV_MODELS[provider]
+        if not MODEL_ID_RE.fullmatch(model):
+            self.jev_check_result.setTextColor_(NSColor.systemRedColor())
+            self.jev_check_result.setStringValue_("That model name isn't valid.")
+            return
         generation = self.ops["check"] = next(OPS)
         self.jev_checked = self._jev_draft()
         self.jev_check_button.setEnabled_(False)
@@ -937,7 +981,7 @@ class AppDelegate(NSObject):
         def run():
             try:
                 import siri
-                payload = {"generation": generation, "ms": siri.check_jev(provider, key)}
+                payload = {"generation": generation, "ms": siri.check_jev(provider, key, model)}
             except Exception as exc:  # check_jev words its errors; anything else stays short and key-free
                 payload = {"generation": generation, "error": str(exc) if isinstance(exc, ValueError)
                            else f"Check failed: {type(exc).__name__}"}
@@ -959,7 +1003,8 @@ class AppDelegate(NSObject):
     def _jev_draft(self):
         provider = ("openrouter", "typesafe")[self.jev_provider.indexOfSelectedItem()]
         key_name = "TYPESAFE_API_KEY" if provider == "typesafe" else "JEV_OPENROUTER_API_KEY"
-        return provider, self.key_fields[key_name].stringValue().strip()
+        return (provider, self.key_fields[key_name].stringValue().strip(),
+                self.jev_model_fields[provider].stringValue().strip())
 
     @objc.python_method
     def _clear_jev_check(self):
@@ -998,7 +1043,8 @@ class AppDelegate(NSObject):
         import siri
         report = lambda op_id, state, text: self.performSelectorOnMainThread_withObject_waitUntilDone_(
             "sampleState:", {"op": op_id, "state": state, "text": text}, False)
-        op = self.sample_op = siri.SampleOp(key, self._chosen_voice()["id"], report)
+        op = self.sample_op = siri.SampleOp(key, self._chosen_voice()["id"], report,
+                                                     model=self.fish_model_popup.titleOfSelectedItem())
         self.sample_button.setTitle_("Stop")
         self.sample_result.setStringValue_("Getting the sample…")
         if self.worker_started:  # through the speech owner: the mic pauses, so the wake listener can't hear it
@@ -1072,7 +1118,7 @@ class AppDelegate(NSObject):
             shown = "~" + path[len(home):] if path.startswith(home + "/") else path
             rows.append((shown, remove))
         add = NSButton.buttonWithTitle_target_action_("Add Folder…", self, "addAppFolder:")
-        add.setEnabled_(len(self.folder_drafts) < 10)
+        add.setEnabled_(len(self.folder_drafts) < MAX_APP_FOLDERS)
         rows.append(("" if self.folder_drafts else "None added", add))
         y = form_group(self.folder_view, 0, "Extra app folders", rows, row_h=34)
         footnote(self.folder_view, y, "Saved with Save; Refresh Apps then includes them. Symlinks are followed; "
@@ -1180,6 +1226,9 @@ class AppDelegate(NSObject):
             values = self._parameter_values()
             validate_parameters(values, self.selected_metadata)
             folders = clean_app_folders(self.folder_drafts)  # checked before anything is written
+            jev_models = {p: f.stringValue().strip() or JEV_MODELS[p] for p, f in self.jev_model_fields.items()}
+            if not all(MODEL_ID_RE.fullmatch(m) for m in jev_models.values()):
+                raise ValueError("Jev model: letters, numbers and . _ : / + - only.")
             jev_provider = ("openrouter", "typesafe")[self.jev_provider.indexOfSelectedItem()]
             answer_provider = ("disabled", "openrouter")[self.answer_provider.indexOfSelectedItem()]
             required = ["FISH_AUDIO_API_KEY", "TYPESAFE_API_KEY" if jev_provider == "typesafe" else "JEV_OPENROUTER_API_KEY"]
@@ -1201,9 +1250,21 @@ class AppDelegate(NSObject):
                 save_wake_settings(phrase, aliases)
                 if self.worker_started:
                     self.controls.put(("wake_phrase", phrase, aliases))  # applied live, old audio dropped
+            for provider, model in jev_models.items():
+                if model != jev_model(provider):
+                    save_jev_model(provider, model)
+            if self.fish_model_popup.titleOfSelectedItem() != fish_model():
+                save_fish_model(self.fish_model_popup.titleOfSelectedItem())
+            if OCR_LEVELS[self.ocr_popup.indexOfSelectedItem()] != ocr_level():
+                save_ocr_level(OCR_LEVELS[self.ocr_popup.indexOfSelectedItem()])
+            size = list(WHISPER_SIZES)[self.whisper_popup.indexOfSelectedItem()]
+            whisper_changed = size != whisper_model()
+            if whisper_changed:
+                save_whisper_model(size)
             from siri import STT
-            if self.worker_started and (STT["backend"] != backend or STT["blocked"]):
-                self.controls.put(("transcription", backend))  # live switch through the control queue
+            if self.worker_started and (STT["backend"] != backend or STT["blocked"]
+                                        or (whisper_changed and backend == "whisper")):
+                self.controls.put(("transcription", backend))  # live switch or reload through the control queue
             save_tiebreak_threshold(self.tiebreak_slider.doubleValue())
             if folders != app_folders():
                 save_app_folders(folders)
@@ -1260,7 +1321,8 @@ class AppDelegate(NSObject):
         elif notification.object() in getattr(self, "parameter_fields", {}).values():
             self._sync_advanced_summary()
         elif notification.object() in (self.key_fields.get("JEV_OPENROUTER_API_KEY"),
-                                       self.key_fields.get("TYPESAFE_API_KEY")):
+                                       self.key_fields.get("TYPESAFE_API_KEY"),
+                                       *getattr(self, "jev_model_fields", {}).values()):
             self._clear_jev_check()
 
     @objc.python_method

@@ -340,6 +340,71 @@ def update_inspect_hud(win, view):
             sub.setStringValue_(hud_text(view))
 
 
+# What "Show what Jev sees" says when a read comes up short. Accessibility and Screen Recording are separate
+# permissions, each with its own pane; only what this read observed is reported.
+INSPECT_STATUS = {
+    "ax_missing": ("ax", "Accessibility isn't allowed for Hey Jev, so it can't see buttons or fields.\n\nTurn on "
+                   "Hey Jev in Privacy & Security → Accessibility, then press Recheck."),
+    "screen_missing": ("screen", "Screen Recording isn't allowed for Hey Jev, so it can't read text on screen. "
+                       "Buttons and fields still work.\n\nTurn on Hey Jev in Privacy & Security → Screen & System "
+                       "Audio Recording, then press Recheck."),
+    "ocr_failed": (None, "Hey Jev sees buttons and fields but couldn't read the text on screen this time "
+                   "({reason}). It keeps trying."),
+    "failed": (None, "Hey Jev couldn't read this window ({reason}). It keeps trying."),
+}
+RELAUNCH_HINT = ("Still off after you turned it on? macOS may apply Screen Recording only after Hey Jev restarts: "
+                 "quit and reopen Hey Jev, then check again.")
+
+
+def present(win):
+    """Put a window on screen without taking focus. Tests replace this so no window appears."""
+    win.orderFrontRegardless()
+
+
+def begin_sheet(parent, sheet):
+    """Attach a sheet. Tests replace this so no sheet appears."""
+    parent.beginSheet_completionHandler_(sheet, None)
+
+
+def status_panel(target):
+    """Small floating panel: the message, Open Settings and Recheck. Clickable, never captured."""
+    panel = AppKit.NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+        NSMakeRect(0, 0, 380, 170), 1 | (1 << 4) | (1 << 7), NSBackingStoreBuffered, False)  # titled, utility, nonactivating
+    panel.setTitle_("Show what Jev sees")
+    panel.setLevel_(AppKit.NSStatusWindowLevel)
+    panel.setReleasedWhenClosed_(False)
+    panel.setHidesOnDeactivate_(False)
+    panel.setSharingType_(0)
+    content = panel.contentView()
+    text = NSTextField.wrappingLabelWithString_("")
+    text.setFrame_(NSMakeRect(16, 48, 348, 110))
+    text.setPreferredMaxLayoutWidth_(348)
+    text.setIdentifier_("status")
+    content.addSubview_(text)
+    for x, w, title, action, ident in ((16, 120, "I turned it on", "permissionEnabled:", "enabled"),
+                                       (190, 96, "Open Settings", "openPermissionSettings:", "open"),
+                                       (290, 74, "Recheck", "recheckInspect:", "recheck")):
+        b = NSButton.buttonWithTitle_target_action_(title, target, action)
+        b.setFrame_(NSMakeRect(x, 12, w, 28))
+        b.setIdentifier_(ident)
+        content.addSubview_(b)
+    return panel
+
+
+def update_status_panel(panel, status, reason="", said_enabled=False):
+    """said_enabled: the user pressed "I turned it on" while Screen Recording still reads off. Only then is
+    restarting suggested; it's a possibility, not something Hey Jev can detect."""
+    pane, message = INSPECT_STATUS[status]
+    relaunch = status == "screen_missing" and said_enabled
+    for sub in panel.contentView().subviews():
+        if sub.identifier() == "status":
+            sub.setStringValue_(RELAUNCH_HINT if relaunch else message.format(reason=reason or "unknown"))
+        elif sub.identifier() == "open":
+            sub.setHidden_(pane is None)
+        elif sub.identifier() == "enabled":
+            sub.setHidden_(status != "screen_missing" or relaunch)
+
+
 class AppDelegate(NSObject):
     def applicationDidFinishLaunching_(self, _notification):
         self.controls = queue.Queue()
@@ -1457,7 +1522,7 @@ class AppDelegate(NSObject):
         for view in (self.teach_add, self.teach_close):
             content.addSubview_(view)
         self.teach_sheet = panel
-        self.settings_sheet.beginSheet_completionHandler_(panel, None)
+        begin_sheet(self.settings_sheet, panel)
 
     @objc.python_method
     def _teach_next(self):
@@ -1774,6 +1839,58 @@ class AppDelegate(NSObject):
         else:
             self.inspector.start()
             self.inspect_item.setState_(1)
+            self.log_permissions("toggle_on")
+
+    @objc.python_method
+    def log_permissions(self, trigger):
+        """Off the main thread (codesign runs): what this process actually has, for requests.jsonl."""
+        import diagnostics
+        import inspector
+
+        def work():
+            try:
+                diagnostics.record("inspect", "permissions", trigger, **inspector.evidence())
+            except Exception as exc:
+                diagnostics.record("inspect", "permissions", "error", error=type(exc).__name__)
+        threading.Thread(target=work, daemon=True).start()
+
+    def openPermissionSettings_(self, _sender):
+        pane = INSPECT_STATUS.get(getattr(self, "inspect_status", None), (None,))[0]
+        if pane:
+            import screen
+            AppKit.NSWorkspace.sharedWorkspace().openURL_(AppKit.NSURL.URLWithString_(screen.SETTINGS_PANES[pane]))
+
+    def permissionEnabled_(self, _sender):
+        self.said_enabled = True
+        if getattr(self, "status_panel", None) is not None:
+            update_status_panel(self.status_panel, self.inspect_status, "", True)
+        self.recheckInspect_(None)
+
+    def recheckInspect_(self, _sender):
+        ins = getattr(self, "inspector", None)
+        if ins is not None and ins.running:
+            self.log_permissions("recheck")
+            ins.recheck()
+
+    @objc.python_method
+    def show_status(self, view):
+        """The panel stays up while inspection is on and something is missing; it goes when all is well or off."""
+        status = (view or {}).get("status", "ok")
+        if status != getattr(self, "inspect_status", None):
+            self.said_enabled = False  # a new state starts from what's observed
+        self.inspect_status = status
+        if status not in INSPECT_STATUS:
+            if getattr(self, "status_panel", None) is not None:
+                self.status_panel.orderOut_(None)
+            return
+        if getattr(self, "status_panel", None) is None:
+            self.status_panel = status_panel(self)
+            screen_frame = AppKit.NSScreen.mainScreen().visibleFrame()
+            self.status_panel.setFrameTopLeftPoint_(NSMakePoint(
+                screen_frame.origin.x + (screen_frame.size.width - 380) / 2,
+                screen_frame.origin.y + screen_frame.size.height - 20))
+        update_status_panel(self.status_panel, status, view.get("reason", ""), getattr(self, "said_enabled", False))
+        present(self.status_panel)
 
     def showInspect_(self, view):
         """Paint on the main thread, only if this view's generation is still current: a callback queued before the
@@ -1781,6 +1898,7 @@ class AppDelegate(NSObject):
         ins = getattr(self, "inspector", None)
         if view and (ins is None or not ins.current(view.get("gen", -1))):
             return
+        self.show_status(view)
         old = getattr(self, "inspect_window", None)
         self.inspect_window = inspect_window(view) if view and view.get("items") else None
         self.inspect_view = view if self.inspect_window is not None else None

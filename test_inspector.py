@@ -294,3 +294,98 @@ class WindowTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PermissionStatusTests(unittest.TestCase):
+    """The toggle says which permission is missing and keeps what it can still read."""
+
+    def test_each_missing_permission_has_its_own_status(self):
+        s = snap([item("Save")])
+        self.assertEqual(inspector.status_of(screen.Unavailable("accessibility_permission")), "ax_missing")
+        self.assertEqual(inspector.status_of(screen.Unavailable("no frontmost app")), "failed")
+        for ocr, status in (("ok", "ok"), ("off", "ok"), ("no_permission", "screen_missing"),
+                            ("failed", "ocr_failed"), ("timed_out", "ocr_failed")):
+            s.ocr = ocr
+            self.assertEqual(inspector.status_of(snap=s), status, ocr)
+
+    def test_a_failed_read_keeps_its_reason_and_status(self):
+        def no_ax(deadline):
+            raise screen.Unavailable("accessibility_permission")
+        view = inspector.Inspector(lambda v: None, observe=no_ax).refresh(1)
+        self.assertEqual((view["status"], view["reason"], view["items"]), ("ax_missing", "accessibility_permission", []))
+
+    def test_without_screen_recording_the_controls_still_show(self):
+        s = snap([item("Save")])
+        s.ocr = "no_permission"
+        ins = inspector.Inspector(lambda v: None, observe=lambda d: s)
+        ins.gen = 1
+        for ocr, status in (("no_permission", "screen_missing"), ("timed_out", "ocr_failed")):
+            s.ocr = ocr
+            with patch.object(screen, "remember", lambda sn: 1):
+                view = ins.refresh(1)
+            self.assertEqual((view["status"], view["reason"], [i["label"] for i in view["items"]]),
+                             (status, ocr, ["Save"]))  # the controls stay
+
+    def test_recheck_reads_now_not_at_the_next_tick(self):
+        reads = []
+        ins = inspector.Inspector(lambda v: None, observe=lambda d: reads.append(time.monotonic()) or snap([]))
+        with patch.object(inspector, "PERIOD", 30), patch.object(screen, "remember", lambda s: None):
+            ins.start()
+            time.sleep(0.1)
+            ins.recheck()
+            time.sleep(0.2)
+            ins.stop()
+        self.assertEqual(len(reads), 2)
+
+    def test_the_panel_names_the_missing_permission_and_goes_when_fixed(self):
+        import AppKit
+        import assistant_ui
+        AppKit.NSApplication.sharedApplication()
+        d = assistant_ui.AppDelegate.alloc().init()
+        d.inspector = inspector.Inspector(lambda v: None)
+        d.inspector.current = lambda gen: True
+        d.inspector.gen = 0  # not running: Recheck is a no-op here
+        presented = []
+
+        def shown():
+            subs = {v.identifier(): v for v in d.status_panel.contentView().subviews()}
+            return subs["status"].stringValue(), subs["open"].isHidden(), subs["enabled"].isHidden()
+        with patch.object(assistant_ui, "present", presented.append):  # nothing appears on screen
+            d.showInspect_({"gen": 1, "status": "ax_missing", "reason": "accessibility_permission", "items": []})
+            text, open_hidden, enabled_hidden = shown()
+            self.assertTrue("Accessibility" in text and not open_hidden and enabled_hidden)
+            d.showInspect_({"gen": 1, "status": "screen_missing", "reason": "no_permission", "items": []})
+            text, open_hidden, enabled_hidden = shown()
+            self.assertTrue("Screen Recording" in text and not open_hidden and not enabled_hidden)
+            self.assertNotIn("reopen", text)  # restarting is only suggested once the user says it's on
+            d.permissionEnabled_(None)
+            d.showInspect_({"gen": 1, "status": "screen_missing", "reason": "no_permission", "items": []})
+            text, _, enabled_hidden = shown()
+            self.assertTrue("quit and reopen" in text and enabled_hidden)
+            d.showInspect_({"gen": 1, "status": "ocr_failed", "reason": "timed_out", "items": []})
+            text, open_hidden, _ = shown()
+            self.assertTrue("timed_out" in text and open_hidden)  # no switch to open for this
+            d.showInspect_({"gen": 1, "status": "screen_missing", "reason": "no_permission", "items": []})
+            self.assertNotIn("reopen", shown()[0])  # a new state starts from what's observed
+            d.showInspect_({"gen": 1, "status": "failed", "reason": "no frontmost app", "items": []})
+            self.assertIn("no frontmost app", shown()[0])
+        self.assertEqual(len(presented), 6)
+        d.showInspect_({"gen": 1, "status": "ok", "items": []})
+        self.assertEqual(d.inspect_status, "ok")
+        self.assertFalse(d.status_panel.isVisible())
+
+    def test_every_message_fits_the_panel(self):
+        import AppKit
+        import assistant_ui
+        AppKit.NSApplication.sharedApplication()
+        panel = assistant_ui.status_panel(None)
+        text = next(v for v in panel.contentView().subviews() if v.identifier() == "status")
+        for status in assistant_ui.INSPECT_STATUS:
+            for said in (False, True):
+                assistant_ui.update_status_panel(panel, status, "no frontmost app", said)
+                self.assertLessEqual(text.fittingSize().height, text.frame().size.height, status)
+
+    def test_evidence_reports_both_permissions_and_the_signature(self):
+        ev = inspector.evidence()
+        self.assertTrue({"accessibility", "screen_recording", "bundle", "pid"} <= set(ev))
+        self.assertIsInstance(ev["screen_recording"], bool)

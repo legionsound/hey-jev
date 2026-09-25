@@ -27,6 +27,16 @@ Alias mode: the bundle runs the code straight from this folder, so
 pulling new code + restarting the app is enough. Rebuild only if the
 folder moves.
 
+Optional: sign with your own certificate. The default build is signed
+ad hoc, so its code identity can change on every rebuild. If macOS
+permissions seem to stop matching a rebuilt app, signing with a stable
+identity is one thing to try (untested as a fix; list yours with
+`security find-identity -v -p codesigning`):
+
+```bash
+codesign --force --deep --sign "Apple Development: you@example.com (TEAMID)" "dist/Hey Jev.app"
+```
+
 `jevctl` talks to the running app over the bridge socket:
 
 ```bash

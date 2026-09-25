@@ -10,6 +10,8 @@ Nothing here acts, sends or logs screen text. Results from a refresh that finish
 (or restarted) are dropped by generation.
 """
 import itertools
+import os
+import subprocess
 import threading
 import time
 
@@ -45,6 +47,35 @@ class Numbering:
         return snap
 
 
+def status_of(exc=None, snap=None):
+    """What the status panel says, from what this read observed: ok | ax_missing | screen_missing | ocr_failed |
+    failed. Controls still show with screen_missing and ocr_failed; only the on-screen text is missing."""
+    if exc is not None:
+        return "ax_missing" if str(exc) == "accessibility_permission" else "failed"
+    return {"no_permission": "screen_missing", "failed": "ocr_failed", "timed_out": "ocr_failed"}.get(snap.ocr, "ok")
+
+
+def evidence():
+    """What this running process has, straight from macOS: both permissions, the bundle, and the code signature
+    the permission records are tied to. For the log, so a permission report can be checked, not guessed."""
+    import ApplicationServices
+    import Quartz
+    from Foundation import NSBundle
+    out = {"accessibility": bool(ApplicationServices.AXIsProcessTrusted()),
+           "screen_recording": bool(Quartz.CGPreflightScreenCaptureAccess()),
+           "bundle": NSBundle.mainBundle().bundlePath(), "pid": os.getpid()}
+    try:
+        r = subprocess.run(["codesign", "-dv", "--verbose=4", str(os.getpid())], capture_output=True, text=True,
+                           timeout=5)
+        for line in r.stderr.splitlines():
+            key, _, value = line.partition("=")
+            if key in ("Identifier", "CDHash", "Signature", "TeamIdentifier"):
+                out[key.lower()] = value
+    except Exception as exc:
+        out["codesign"] = type(exc).__name__
+    return out
+
+
 class Inspector:
     def __init__(self, show, busy=lambda: False, observe=None):
         """show(view or None): called with each fresh view, and None when stopped. busy(): a command is running."""
@@ -52,6 +83,7 @@ class Inspector:
         self.observe = observe or (lambda deadline: screen.observe(ocr=True, deadline=deadline))
         self.gen, self.thread, self.numbering = 0, None, Numbering()
         self.lock = threading.Lock()
+        self.wake = threading.Event()
 
     @property
     def running(self):
@@ -68,6 +100,7 @@ class Inspector:
     def stop(self):
         with self.lock:
             self.gen = 0  # any refresh still in flight is now stale
+        self.wake.set()
         self.show(None)
 
     def _current(self, gen):
@@ -81,7 +114,12 @@ class Inspector:
                 view = self.refresh(gen)
                 if view is not None and self._current(gen):
                     self.show(view)
-            time.sleep(max(0.05, PERIOD - (time.monotonic() - t0)))
+            self.wake.wait(max(0.05, PERIOD - (time.monotonic() - t0)))
+            self.wake.clear()
+
+    def recheck(self):
+        """Read again now instead of at the next tick (same loop, so never two reads at once)."""
+        self.wake.set()
 
     def refresh(self, gen):
         """One bounded read. -> the view, or None when stale, unreadable, out of time, or a command started meanwhile.
@@ -90,8 +128,9 @@ class Inspector:
         t0 = time.monotonic()
         try:
             snap = self.observe(time.monotonic() + READ_BUDGET)
-        except Exception as exc:
-            return {"gen": gen, "error": type(exc).__name__, "ms": round((time.monotonic() - t0) * 1000)}
+        except Exception as exc:  # no items, but the panel still says why
+            return {"gen": gen, "error": type(exc).__name__, "reason": str(exc), "status": status_of(exc),
+                    "items": [], "ms": round((time.monotonic() - t0) * 1000)}
         observed_at = time.time()  # when the read finished: the age shown counts from here
         shared, _ = task.shareable(snap)
         shared_ids = {id(i) for i in shared}
@@ -101,6 +140,7 @@ class Inspector:
             self.numbering.apply(snap)
             version = screen.remember(snap)
         return {"gen": gen, "version": version, "app": snap.app, "at": observed_at,
+                "status": status_of(snap=snap), "reason": snap.ocr,
                 "ms": round((time.monotonic() - t0) * 1000), "complete": snap.walk_complete, "truncated": snap.truncated,
                 "items": [{**i.public(), "shared": id(i) in shared_ids,
                            "field": i.role in task.FIELD_ROLES or i.secure} for i in snap.items]}

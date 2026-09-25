@@ -292,6 +292,11 @@ def _actions(element):
 
 _asked = set()  # permissions whose macOS prompt was already shown this run
 
+# Where each permission lives in System Settings. Kept separate: they're granted separately.
+SETTINGS_PANES = {"ax": "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+                  "screen": "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"}
+
+
 
 def trusted():
     """Accessibility permission. The first time it's missing in a run, macOS shows its own prompt, once."""

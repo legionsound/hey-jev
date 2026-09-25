@@ -30,6 +30,16 @@
 - Optional Screen Recording lets Vision OCR read on-screen text that
   Accessibility does not expose. It never makes OCR-only text pressable:
   OCR-only items stay `not_a_control`.
+- "Show what Jev sees" names what's missing (Accessibility, Screen
+  Recording, or a failed read) with Open Settings and Recheck. Each
+  toggle-on and Recheck logs what macOS reports for both permissions,
+  plus the app's code signature, to `requests.jsonl` (stage
+  `permissions`).
+- Screen Recording turned on but still reported off: quit and reopen
+  Hey Jev, then check again. If a switch shows on and Recheck still
+  says off, the grant may belong to a different build of the app
+  (ad-hoc builds can change identity when rebuilt); compare the logged
+  signature. See DEVELOPMENT.md for optional signing.
 - "Click 4" refused with `screen_changed`: the window changed while you
   spoke. Re-open "Show what Jev sees" and say the number again.
 - Clicks over Hey Jev's own windows, the overlay, or menus are refused

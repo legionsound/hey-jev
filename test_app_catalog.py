@@ -42,6 +42,12 @@ class CatalogTest(unittest.TestCase):
         names = sorted(a["name"] for a in apps)
         self.assertEqual(names, ["Deep", "Terminal"])
 
+    def test_spoken_spaces_inside_a_name_still_match(self):
+        ac._set_inventory([{"name": "MacWhisper", "path": "/Applications/MacWhisper.app", "bundle_id": "com.goodsnooze.MacWhisper"},
+                           {"name": "Mac Mail Tool", "path": "/Applications/MMT.app", "bundle_id": "com.ex.mmt"}])
+        self.assertEqual(ac.resolve_app("Mac whisper")[1]["name"], "MacWhisper")  # live miss, 2026-09-25
+        self.assertEqual(ac.resolve_app("mac whis")[0], "none")  # still whole names only
+
     def test_bundle_without_id_skipped(self):
         bad = os.path.join(self.tmp, "NoId.app", "Contents")
         os.makedirs(bad, exist_ok=True)

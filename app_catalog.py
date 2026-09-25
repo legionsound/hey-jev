@@ -233,6 +233,12 @@ def resolve_app(spoken):
         if len(hits) == 1:
             return ("target", dict(hits[0]))
         return ("choices", [dict(h) for h in hits])
+    # Spoken "Mac whisper" for "MacWhisper": the same letters with the spaces dropped, whole name only.
+    squashed = q.replace(" ", "")
+    joined = {a["path"]: a for n, hits in by_name.items() if n.replace(" ", "") == squashed for a in hits}
+    if joined:
+        hits = sorted(joined.values(), key=lambda a: (str(a.get("name", "")).casefold(), a["path"]))
+        return ("target", dict(hits[0])) if len(hits) == 1 else ("choices", [dict(h) for h in hits])
     # Whole-token prefix only: "saf" must not match "safari";
     # multi-token query must match whole leading tokens.
     # Single-token query also matches any whole token anywhere:

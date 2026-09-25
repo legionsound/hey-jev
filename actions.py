@@ -451,6 +451,12 @@ RISKY = re.compile(r"\b(buy|purchase|order|pay|checkout|check out|send|submit|po
 CHOOSE = None  # set by the app: (spoken, [labels]) -> (index or None, confidence). Only control names are sent.
 CHOOSE_GATE = 0.65
 RESOLVE_BUDGET = 3.0  # one deadline over every native read a resolve makes
+RESOLVE_UNTIL = None  # set by the engine while a task step resolves: never past the task's shared deadline
+
+
+def resolve_deadline():
+    d = time.monotonic() + RESOLVE_BUDGET
+    return min(d, RESOLVE_UNTIL) if RESOLVE_UNTIL is not None else d
 SETTLE = 1.5  # how long a press gets to show a relevant change
 AX_GONE = (-25202, -25205, -25206, -25201)  # invalid element, no value, action unsupported, illegal argument
 MENU_ROLES = ("AXMenuBarItem", "AXMenuButton", "AXPopUpButton")
@@ -494,7 +500,7 @@ def valid_choice(got, n):
 
 def resolve_screen_press(args):
     """A number from the last list the user saw, or a spoken control name, to one exact control the app declared."""
-    deadline = time.monotonic() + RESOLVE_BUDGET
+    deadline = resolve_deadline()
     try:
         snap = screen.observe(ocr=False, deadline=deadline)
     except (screen.Unavailable, screen.TimedOut, screen.Wedged) as exc:
@@ -584,7 +590,7 @@ def verify_screen_press(t, deadline):
         own.append("menu_open")
     if own:
         _pressed.pop(id(t), None)
-        return ("done", {"changed": own})
+        return ("done", {"changed": own, "window_changed": before[0].get("window") != after[0].get("window")})
     if time.monotonic() - at < SETTLE:
         return ("wait", {})
     _pressed.pop(id(t), None)
@@ -610,10 +616,21 @@ def resolve_screen_type(args):
     text = args.get("text")
     if not isinstance(text, str) or not text or len(text) > 2000:
         return ("none", "no text to type")
-    deadline = time.monotonic() + RESOLVE_BUDGET
+    deadline = resolve_deadline()
     try:
         snap = screen.observe(ocr=False, deadline=deadline)
-        if args.get("field"):
+        if args.get("number") is not None:  # a field from the list the user (or a task) saw
+            shown = screen.last()
+            if shown is None or not 1 <= args["number"] <= len(shown.items):
+                return ("none", "no such number on the last list")
+            seen = shown.items[args["number"] - 1]
+            if (shown.pid, shown.started, shown.window_token) != (snap.pid, snap.started, snap.window_token):
+                return ("none", "screen_changed")
+            now = next((i for i in snap.items if i.token == seen.token and i.key() == seen.key()), None)
+            if now is None or now.role not in EDITABLE_ROLES:
+                return ("none", "not_a_text_field")
+            ref, label = now.ref, now.label
+        elif args.get("field"):
             said = screen._norm(args["field"])
             fields = [i for i in snap.items if i.role in EDITABLE_ROLES and i.source != "ocr" and not i.from_value]
             hits = [i for i in fields if screen._norm(i.label) == said] or \
@@ -706,12 +723,14 @@ def verify_screen_type(t, deadline):
 
 def resolve_screen_submit(args):
     """The app's focused element, when it accepts AXConfirm: Return, sent to that element."""
-    deadline = time.monotonic() + RESOLVE_BUDGET
+    deadline = resolve_deadline()
     try:
         snap = screen.observe(ocr=False, deadline=deadline)
         ref = screen.focused_field(snap.pid, deadline)
         if ref is None:
             return ("none", "no field is selected")
+        if args.get("element") and screen.token(ref) != args["element"]:
+            return ("none", "a different field is selected now")  # a task decided on one field: only that one
         facts = screen.field_facts(ref, deadline)
         if not screen.can_confirm(ref, deadline):
             return ("none", "nothing here to submit")
@@ -861,13 +880,16 @@ ACTIONS = {
     "timer.cancel": entry("timer", resolve_timer_cancel, run_timer_cancel, verify_timer_cancel, "the timer left the running list", 2),
 }
 
-EFFECTS = ("open", "navigate", "media", "volume", "display", "timer", "click", "type", "submit", "quit", "lock", "sleep")
-DEFAULT_POLICY = {e: ("ask" if e in ("quit", "lock", "sleep", "click", "type", "submit") else "auto") for e in EFFECTS}
+EFFECTS = ("open", "navigate", "media", "volume", "display", "timer", "click", "type", "submit", "task", "in_task",
+           "risky", "quit", "lock", "sleep")
+DEFAULT_POLICY = {e: ("ask" if e in ("quit", "lock", "sleep", "click", "type", "submit", "task", "risky") else "auto")
+                  for e in EFFECTS}  # in_task "auto": the task's one OK covers its clicks, typing and Return
 DEFAULT_POLICY["look"] = "auto"  # reading the screen has no effect, so it is not a setting
 EFFECT_LABELS = {"open": "Open apps", "navigate": "Open websites", "media": "Music playback", "volume": "Volume",
                  "display": "Dark mode", "timer": "Timers and reminders",
                  "click": "Click buttons on screen", "type": "Type into fields",
-                 "submit": "Press Return in fields", "quit": "Quit apps",
+                 "submit": "Press Return in fields", "task": "Start multi-step tasks",
+                 "in_task": "Each step inside a task", "risky": "Risky buttons (Buy, Send, Delete…)", "quit": "Quit apps",
                  "lock": "Lock screen", "sleep": "Sleep the Mac"}
 
 
@@ -905,7 +927,8 @@ def describe(action, target):
             "timer.check": "Read out the time left",
             "screen.list": "Read what's on screen", "screen.press": "Click “{label}” in {app}",
             "screen.type": "Type “{text}” into {field} in {app}",
-            "screen.submit": "Press Return in the selected field in {app}"}.get(action, action.replace(".", ": ").replace("_", " "))
+            "screen.submit": "Press Return in the selected field in {app}",
+            "task.run": "Work on: {goal} (up to {steps} steps)"}.get(action, action.replace(".", ": ").replace("_", " "))
     return what.format(name=name, url=t.get("url") or "the website", level=level, label=t.get("label") or "that",
                        text=t.get("text") or "", field=f"“{t['label']}”" if t.get("label") else "the selected field",
-                       app=t.get("app") or "the app")
+                       app=t.get("app") or "the app", goal=t.get("goal") or "this", steps=t.get("steps") or 15)

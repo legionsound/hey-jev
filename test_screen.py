@@ -140,7 +140,7 @@ class ScreenActionTests(unittest.TestCase):
     def test_press_by_name_changes_and_completes(self):
         fake = FakeScreen(self, [item(1, "Add one"), item(2, "Count: 0", "ocr", "text", pressable=False)])
         v = self.run_text("click Add one", "screen.press", {"label": "add ONE"})
-        self.assertEqual((v["state"], v["steps"][0]["facts"]), ("completed", {"changed": ["AXValue"]}))
+        self.assertEqual((v["state"], v["steps"][0]["facts"]["changed"]), ("completed", ["AXValue"]))
         self.assertEqual(len(fake.presses), 1)
 
     def test_press_with_no_change_is_unverified_not_done(self):
@@ -164,7 +164,7 @@ class ScreenActionTests(unittest.TestCase):
         fake.press = lambda ref, deadline: (orig(ref, deadline), fake.sig.update(menu_open=True))[0]
         patch.object(screen, "press", fake.press).start()
         v = self.run_text("click View", "screen.press", {"label": "View"})
-        self.assertEqual((v["state"], v["steps"][0]["facts"]), ("completed", {"changed": ["menu_open"]}))
+        self.assertEqual((v["state"], v["steps"][0]["facts"]["changed"]), ("completed", ["menu_open"]))
 
     def test_number_uses_the_list_the_user_saw_and_checks_it_is_still_there(self):
         title, save = item(1, "Title", "ocr", "text", pressable=False), item(2, "Save")

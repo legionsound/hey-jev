@@ -792,7 +792,7 @@ def is_stop(text):
 
 
 def turn(eng, text, notify, hold=contextlib.nullcontext, stt_ms=None, admit=None, stop_queued=lambda drop=False: 0,
-         shown=None):
+         shown=None, heard_at=None):
     """One voice turn: submit, wait, speak from the result. A result that outlives the wait is spoken when it lands,
     inside hold() so it does not talk over the microphone.
     admit(): context manager yielding whether this turn may still be submitted, held across the submit.
@@ -814,7 +814,7 @@ def turn(eng, text, notify, hold=contextlib.nullcontext, stt_ms=None, admit=None
     with admit() as ok:  # a stop or a mode change between hearing and here drops this turn, atomically
         if not ok:
             return
-        first = eng.submit(text, "voice", shown=shown)
+        first = eng.submit(text, "voice", shown=shown, heard_at=heard_at)
     diagnostics.record(first.get("id"), "recognize", first["state"], text=text, stt_ms=stt_ms)
     if first["state"] in ("busy", "id_conflict"):  # never queued: nothing to wait for
         line = say_line("busy")
@@ -1215,12 +1215,12 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
 
     def turn_worker():
         while True:
-            text, stt_ms, epoch, gen, shown = turns.get()
+            text, stt_ms, epoch, gen, shown, heard_at = turns.get()
             current[0] = text
             try:
                 print(f"  (stt {stt_ms}ms)")
                 turn(ENGINE, text, notify, hold=hold, stt_ms=stt_ms, admit=admit_for(gen, epoch),
-                     stop_queued=lambda drop=False: stop_queued(drop, own=True), shown=shown)
+                     stop_queued=lambda drop=False: stop_queued(drop, own=True), shown=shown, heard_at=heard_at)
             except Exception as exc:
                 print(f"\n  turn failed: {exc}")
                 emit(notify, "Something went wrong", str(exc))
@@ -1230,7 +1230,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
                 current[0] = None
     threading.Thread(target=turn_worker, daemon=True).start()
 
-    def run_turn(text, stt_ms, epoch, shown=None):
+    def run_turn(text, stt_ms, epoch, shown=None, heard_at=None):
         """Ordinary turns wait on the turn worker, which takes the floor only to speak, so the listener stays free.
         "Stop" skips the line: handled here at once, it drops every heard-but-unsubmitted turn and cancels what the
         engine is running or has queued. Each queued turn keeps its epoch and is re-checked just before submitting."""
@@ -1239,16 +1239,16 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
         if is_stop(text) and (ENGINE.active() or stop_queued()):
             turn(ENGINE, text, notify, hold=hold, stt_ms=stt_ms, stop_queued=stop_queued)
             return
-        turns.put((text, stt_ms, epoch, stop_gen[0], shown))
+        turns.put((text, stt_ms, epoch, stop_gen[0], shown, heard_at))
 
-    def ptt_turn(audio, epoch, shown=None):
+    def ptt_turn(audio, epoch, shown=None, heard_at=None):
         emit(notify, "Transcribing", "Working out what you said…")
         try:
             text, ms = transcribe(audio, COMMAND_PROMPT)
         except Exception as exc:
             emit(notify, "Couldn't hear that", stt_error(exc))
             return
-        run_turn(text, ms, epoch, shown)
+        run_turn(text, ms, epoch, shown, heard_at)
 
     def wake_loop():
         while True:
@@ -1279,7 +1279,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
             if rest is not None:
                 if rest:
                     armed_until[0] = 0
-                    run_turn(rest, ms, epoch, shown)
+                    run_turn(rest, ms, epoch, shown, t0)
                 else:
                     with hold():
                         say(say_line("wake"), notify)
@@ -1287,7 +1287,7 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
                     emit(notify, "Listening", "Go ahead…")
             elif armed_until[0] and time.time() < armed_until[0]:
                 armed_until[0] = 0
-                run_turn(text, ms, epoch, shown)
+                run_turn(text, ms, epoch, shown, t0)
             elif text:
                 print(f"\n  (not for me: {text!r})")
 
@@ -1320,8 +1320,9 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
         if audio is not None:
             if len(audio) > SAMPLE_RATE * 0.3:
                 import screen as _screen
-                shown = _screen.bind_spoken(ptt_t0[0] or time.monotonic(), time.monotonic())
-                threading.Thread(target=ptt_turn, args=(audio, rec.epoch, shown), daemon=True).start()
+                heard_at = ptt_t0[0] or time.monotonic()
+                shown = _screen.bind_spoken(heard_at, time.monotonic())
+                threading.Thread(target=ptt_turn, args=(audio, rec.epoch, shown, heard_at), daemon=True).start()
 
     def timer_done(t):
         with hold():

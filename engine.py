@@ -63,9 +63,10 @@ class Engine:
         threading.Thread(target=self._worker, daemon=True).start()
 
     # ------------------------------------------------------------------ public API
-    def submit(self, text, source, rid=None, shown=None):
+    def submit(self, text, source, rid=None, shown=None, heard_at=None):
         """Reserve the id and enqueue. Returns a status dict immediately. shown: the numbered list's version on screen
-        when the user spoke, so "click 3" means the 3 they saw."""
+        when the user spoke, so "click 3" means the 3 they saw. heard_at: when speech began (monotonic); an answer to
+        "which one?" counts only if it was heard after the question was asked."""
         rid = rid or uuid.uuid4().hex
         with self.lock:
             rec = self.ledger.get(rid)
@@ -80,7 +81,7 @@ class Engine:
                 return self._error(rid, "busy", "queue_full")
             diagnostics.record(rid, "submit", "queued", source=source, text=text, queue_depth=len(self.queue))
             rec = {"id": rid, "sha": _sha(text), "text": text, "source": source, "state": "queued", "shown": shown,
-                   "queued_at": time.monotonic(), "done_at": None, "steps": [], "cancel": False}
+                   "queued_at": time.monotonic(), "heard_at": heard_at, "done_at": None, "steps": [], "cancel": False}
             self.ledger[rid] = rec
             self.queue.append(rec)
             self.lock.notify_all()
@@ -111,6 +112,7 @@ class Engine:
 
     def cancel(self, rid):
         with self.lock:
+            self.offered = None  # "stop" also withdraws any open "which one?"
             rec = self.ledger.get(rid)
             if not rec:
                 return self._error(rid, "unknown_outcome", "id not seen since this app started")
@@ -240,7 +242,9 @@ class Engine:
         with self.lock:
             offered, self.offered = self.offered, None  # an answer is good once; any other command drops the question
         pick = None
-        if offered and time.monotonic() < offered["until"]:
+        heard = rec["heard_at"] if rec.get("heard_at") is not None else rec["queued_at"]
+        if offered and heard > offered["at"] and time.monotonic() < offered["until"] \
+                and not planner.is_cancel(rec["text"]):  # said before the question, or "stop": never an answer
             pick = planner.answer_pick(rec["text"], [c["name"] for c in offered["choices"]])
         if pick is not None:
             kind, payload = "steps", [{"clause": rec["text"], "action": offered["action"],
@@ -562,7 +566,8 @@ class Engine:
             self._set(step, state="needs_clarification", facts={"choices": got[1]})
             if got[1] and all(isinstance(c.get("target"), dict) for c in got[1]):  # "the first one" can answer it
                 with self.lock:
-                    self.offered = {"action": act, "choices": got[1], "until": time.monotonic() + ANSWER_WINDOW}
+                    now = time.monotonic()
+                    self.offered = {"action": act, "choices": got[1], "at": now, "until": now + ANSWER_WINDOW}
             return "needs_clarification"
         if got[0] == "choices":
             t = time.monotonic()

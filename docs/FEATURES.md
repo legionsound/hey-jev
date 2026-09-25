@@ -60,11 +60,22 @@ For exact behavior rules see `ENGINE_CONTRACT.md`.
 - `pointer.click`: a real click where the pointer already is (left, right,
   double). Always `unverified`; refused over Hey Jev's own windows,
   overlays, or menus.
-- `screen.pick`: "click the third video", "the video in the bottom-right"
-  — Jev answers which controls match the noun (one batched yes/no per
-  control name, threshold 0.65); the code then counts in reading order
-  or takes the nearest to the named place, and the pick runs
-  as an ordinary press with identity re-check and readback.
+- `screen.pick`: "click the third video", "the video in the bottom-right",
+  "the Blender video" — Jev answers which controls match the noun (one
+  batched yes/no per control card, threshold 0.65). A card is the
+  control's name, the words right around it (a video's channel, a
+  product's price) and where it sits; a card ends at the next like item,
+  so rows never borrow each other's words. The code then counts in one
+  reading order or takes the nearest to the named place. If an item Jev
+  wasn't sure about could change the answer, or the screen couldn't be
+  read whole, it asks instead. The pick runs as an ordinary press with
+  identity re-check and readback.
+- Answering "which one?": for 45 seconds after Hey Jev asks, reply "the
+  first one", "the second", "the last one", "number 2", or words from one
+  option's name. That exact control is pressed if it's still there,
+  unchanged. "Stop", "cancel" or "none of them" withdraw the question;
+  anything else is a new command. A reply you started saying before the
+  question was asked never counts as its answer.
 - Direct commands ("scroll down", "click here") skip classification and
   run directly, because their words leave nothing for Jev to choose.
 

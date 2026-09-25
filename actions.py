@@ -547,13 +547,13 @@ def describe_cards(controls, context, frame):
         top, bottom = y - CARD_ABOVE, y + h + CARD_BELOW
         for o in shareable:  # a card ends where the next like control starts: the row above or below is its own card
             ox, oy, ow, oh = o.frame
-            if (o is c or o.role != c.role or min(w, ow) < 0.6 * max(w, ow)  # a short channel link isn't a peer
-                    or min(h, oh) < 0.8 * max(h, oh) or min(x + w, ox + ow) - max(x, ox) < 0.5 * min(w, ow)):
+            if (o is c or o.role != c.role or min(w, ow) < 0.6 * max(w, ow)
+                    or min(x + w, ox + ow) - max(x, ox) < 0.5 * min(w, ow)):
                 continue
-            if oy >= y + h / 2:
+            if oy >= y + h / 2:  # the next item, however its title wraps: nothing from it is this card's context
                 bottom = min(bottom, oy)
-            elif oy + oh <= y + h / 2:
-                top = max(top, oy + oh)
+            elif oy + oh <= y + h / 2 and y - (oy + oh) <= CARD_BELOW:
+                top = y  # an item just above: whatever sits between belongs to it, not to this card
         near = []
         for o in shareable:
             if o.label == c.label or o.from_value or o.secure:  # never a field's or document's value

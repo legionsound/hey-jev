@@ -542,6 +542,15 @@ ANSWER_FILLER = re.compile(r"^\W*(?:(?:yes|yeah|ok(?:ay)?|um|uh|please|click|pre
                            r"i\s+(?:mean|meant|want)|the|that|this)\s+)*|(?:\s+(?:one|video|please|thanks?))*[\s.!?]*$", re.I)
 
 
+CANCEL = re.compile(r"^\W*(?:(?:no|nope|stop|cancel|abort|halt|never\s*mind|forget\s+it|none(?:\s+of\s+(?:them|those))?|"
+                    r"neither)(?:\s+(?:it|that|this|them|please))?\W*)+$", re.I)
+
+
+def is_cancel(text):
+    """"stop", "cancel", "never mind", "none of them": a refusal, never an answer to "which one?"."""
+    return bool(CANCEL.match(text or ""))
+
+
 def answer_pick(text, names):
     """The user's reply to "which one?": "the first one", "second", "the last one", "number 2", or words from exactly
     one option's name. -> index into names, or None when the reply isn't clearly an answer (it's then a new command)."""

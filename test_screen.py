@@ -1094,6 +1094,60 @@ class PickTests(unittest.TestCase):
             v = eng.wait(eng.submit("the first one", "cli")["id"], 10)  # answered once: now it's a new command
             self.assertEqual(plans, ["play the video", "the first one"])
 
+    def answer_harness(self, block=None):
+        g = self.grid()
+        fns = {"observe": lambda pid=None, ocr=True, deadline=None: g,
+               "signature": lambda pid, d: {"n": len(self.presses)},
+               "element_state": lambda ref, d: {"v": str(len(self.presses))},
+               "press": lambda ref, d: self.presses.append(ref) or 0}
+        for name, fn in fns.items():
+            p = patch.object(screen, name, fn)
+            p.start()
+            self.addCleanup(p.stop)
+        plans = []
+
+        def plan(text, *a, **k):
+            plans.append(text)
+            if block is not None and text == "play the video":
+                block.wait(5)
+            if text == "play the video":
+                return ("steps", [{"clause": text, "action": "screen.pick", "args": {"noun": "video", "ordinal": 0}}])
+            return ("clarify", "unknown")
+        classify = lambda noun, cards: [(card_name(c).startswith("Video"), 0.95) for c in cards]
+        for p in (patch.object(actions, "CLASSIFY_ITEMS", classify), patch.object(planner, "plan", plan)):
+            p.start()
+            self.addCleanup(p.stop)
+        return Engine(lambda _: {}, policy=lambda: {**actions.DEFAULT_POLICY, "click": "auto"}), plans, g
+
+    def test_a_reply_queued_before_the_question_is_never_its_answer(self):
+        import threading
+        gate = threading.Event()
+        eng, plans, g = self.answer_harness(block=gate)
+        first = eng.submit("play the video", "cli")["id"]
+        second = eng.submit("the second one", "cli")["id"]  # queued while the first is still planning
+        gate.set()
+        self.assertEqual(eng.wait(first, 10)["state"], "needs_clarification")
+        eng.wait(second, 10)
+        self.assertEqual(self.presses, [])
+        self.assertEqual(plans, ["play the video", "the second one"])  # it went to the planner as a new command
+
+    def test_a_reply_heard_before_the_question_is_never_its_answer(self):
+        eng, plans, g = self.answer_harness()
+        import time as _t
+        early = _t.monotonic()
+        eng.wait(eng.submit("play the video", "cli")["id"], 10)
+        eng.wait(eng.submit("the second one", "voice", heard_at=early)["id"], 10)
+        self.assertEqual(self.presses, [])
+
+    def test_stop_is_never_an_answer_and_withdraws_the_question(self):
+        eng, plans, g = self.answer_harness()
+        g.items[0].label = "Video Stop"  # "stop" is a word in an offered name
+        eng.wait(eng.submit("play the video", "cli")["id"], 10)
+        eng.wait(eng.submit("stop", "cli")["id"], 10)
+        self.assertEqual(self.presses, [])
+        eng.wait(eng.submit("the first one", "cli")["id"], 10)  # the question is gone
+        self.assertEqual(self.presses, [])
+
     def test_answer_words(self):
         names = ["Enter the Dome (bottom-left)", "Soup in ten minutes (top-left)", "Knit a scarf (middle-right)"]
         for said, want in [("the first one", 0), ("second", 1), ("the last one", 2), ("number 3", 2), ("2", 1),
@@ -1264,6 +1318,17 @@ class CardTests(unittest.TestCase):
             card = self.card_for(s, n)
             self.assertNotIn("near:", card, card)  # each row is its own card; the next row isn't context
 
+    def test_wrapped_titles_never_become_each_others_metadata(self):
+        s = self.layout([("Alpha title", "AXLink", (0, 100, 300, 20)), ("Author A", "AXLink", (0, 124, 80, 14)),
+                         ("Blender tutorial", "AXLink", (0, 150, 300, 40)), ("Author B", "AXLink", (0, 194, 80, 14)),
+                         ("Gamma", "AXLink", (0, 220, 300, 20))])
+        a, b = self.card_for(s, "Alpha title"), self.card_for(s, "Blender tutorial")
+        self.assertIn("Author A", a)
+        self.assertNotIn("Blender", a)  # the next title, taller because it wraps, is its own item
+        self.assertIn("Author B", b)
+        self.assertNotIn("Author A", b)  # the line above belongs to the item above
+        self.assertNotIn("Gamma", b)  # the next title, shorter, is its own item too
+
     def test_a_pick_matches_by_channel_alone_and_not_its_neighbour(self):
         s = self.layout([("Enter the Dome", "AXLink", (0, 100, 250, 40)), ("Blender", "AXLink", (0, 144, 80, 14)),
                          ("Soup in ten minutes", "AXLink", (300, 100, 250, 40)), ("Cooking", "AXLink", (300, 144, 80, 14))])
@@ -1280,8 +1345,8 @@ class CardTests(unittest.TestCase):
 
     def test_the_chooser_gets_cards_and_presses_that_exact_one(self):
         with patch.object(diagnostics, "record", lambda *a, **k: None):
-            a = item(1, "Watch", role="AXLink", frame=(10, 100, 100, 20))
-            b = item(2, "Watch", role="AXLink", frame=(600, 100, 100, 20))
+            a = item(1, "Watch", role="AXLink", frame=(10, 100, 180, 20))  # a like-sized link under it would be
+            b = item(2, "Watch", role="AXLink", frame=(600, 100, 180, 20))  # the next item, never its context
             ch = item(3, "Nate Herk", role="AXLink", frame=(600, 124, 90, 14))
             s = snap([a, b, ch])
             s.window_frame = (0, 0, 800, 600)

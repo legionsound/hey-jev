@@ -508,9 +508,9 @@ def resolve_screen_press(args):
     controls = [i for i in snap.items if _live(i)]
     if args.get("number") is not None:
         shown = screen.last()
-        if shown is None or not 1 <= args["number"] <= len(shown.items):
+        seen = next((i for i in shown.items if i.n == args["number"]), None) if shown is not None else None
+        if seen is None:
             return ("none", "no such number on the last list")
-        seen = shown.items[args["number"] - 1]
         if seen.source == "ocr":
             return ("none", "not_a_control")
         if (shown.pid, shown.started, shown.window_token) != (snap.pid, snap.started, snap.window_token):
@@ -621,9 +621,9 @@ def resolve_screen_type(args):
         snap = screen.observe(ocr=False, deadline=deadline)
         if args.get("number") is not None:  # a field from the list the user (or a task) saw
             shown = screen.last()
-            if shown is None or not 1 <= args["number"] <= len(shown.items):
+            seen = next((i for i in shown.items if i.n == args["number"]), None) if shown is not None else None
+            if seen is None:
                 return ("none", "no such number on the last list")
-            seen = shown.items[args["number"] - 1]
             if (shown.pid, shown.started, shown.window_token) != (snap.pid, snap.started, snap.window_token):
                 return ("none", "screen_changed")
             now = next((i for i in snap.items if i.token == seen.token and i.key() == seen.key()), None)

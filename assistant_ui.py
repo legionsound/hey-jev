@@ -3,6 +3,7 @@ import os
 import queue
 import sys
 import threading
+import time
 
 import AppKit
 import objc
@@ -228,6 +229,70 @@ def numbers_window(facts):
     return win
 
 
+INSPECT_COLORS = {"press": NSColor.systemBlueColor, "field": NSColor.systemOrangeColor,
+                  "ax": NSColor.systemTealColor, "shared": NSColor.systemGrayColor, "local": NSColor.tertiaryLabelColor}
+
+
+def inspect_window(view):
+    """Click-through boxes, numbers and names over every item, coloured by what Hey Jev knows about it: blue can be
+    pressed, orange is a text field, teal is other Accessibility, grey is text read off the screen and shared with
+    Jev, faint is text that stays on the Mac. A readout gives the app, count, read time and age."""
+    items = view["items"]
+    top = AppKit.NSScreen.screens()[0].frame().size.height
+    x0 = min(i["frame"][0] for i in items) - 30
+    y0 = min(i["frame"][1] for i in items) - 18
+    x1 = max(i["frame"][0] + i["frame"][2] for i in items) + 6
+    y1 = max(i["frame"][1] + i["frame"][3] for i in items) + 26
+    win = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+        NSMakeRect(x0, top - y1, x1 - x0, y1 - y0), 0, 2, False)
+    win.setOpaque_(False)
+    win.setBackgroundColor_(NSColor.clearColor())
+    win.setIgnoresMouseEvents_(True)
+    win.setLevel_(AppKit.NSStatusWindowLevel)
+    win.setCollectionBehavior_(1 << 0 | 1 << 4)
+    win.setReleasedWhenClosed_(False)
+    win.setSharingType_(0)  # NSWindowSharingNone: never captured, so it can't be read back as screen text
+    content, h = win.contentView(), y1 - y0
+    for i in items:
+        kind = ("press" if i["pressable"] else "field" if i.get("field") else "ax") if i["source"] != "ocr" \
+            else ("shared" if i["shared"] else "local")
+        color = INSPECT_COLORS[kind]()
+        fx, fy, fw, fh = i["frame"]
+        box = NSView.alloc().initWithFrame_(NSMakeRect(fx - x0, h - (fy - y0) - fh, fw, fh))
+        box.setWantsLayer_(True)
+        box.layer().setBorderColor_(color.CGColor())
+        box.layer().setBorderWidth_(1.5)
+        box.layer().setCornerRadius_(3)
+        content.addSubview_(box)
+        text = f"{i['n']} {i['label'][:28]}" if i["source"] != "ocr" else str(i["n"])  # text shows its own words
+        tag = NSTextField.labelWithString_(text)
+        tag.setFont_(NSFont.monospacedDigitSystemFontOfSize_weight_(10, 0.5))
+        tag.setTextColor_(NSColor.whiteColor())
+        tag.setWantsLayer_(True)
+        tag.layer().setBackgroundColor_(color.CGColor())
+        tag.layer().setCornerRadius_(4)
+        tag.sizeToFit()
+        tw = tag.frame().size.width + 6
+        if i["source"] == "ocr":  # a small number just left of the line, so dense text stays readable
+            tag.setFrame_(NSMakeRect(max(0, fx - x0 - tw - 2), h - (fy - y0) - min(fh, 14), tw, 14))
+        else:
+            tag.setFrame_(NSMakeRect(fx - x0, h - (fy - y0) + 1, tw, 14))
+        content.addSubview_(tag)
+    age = max(0.0, time.time() - view.get("at", time.time()))
+    hud = NSTextField.labelWithString_(
+        f"Jev sees: {view.get('app', '?')} · {len(items)} items · read in {view.get('ms', 0)} ms · {age:.1f} s ago"
+        + ("" if view.get("complete", True) else " · field scan incomplete: no screen text shared"))
+    hud.setFont_(NSFont.systemFontOfSize_weight_(11, 0.5))
+    hud.setTextColor_(NSColor.whiteColor())
+    hud.setWantsLayer_(True)
+    hud.layer().setBackgroundColor_(NSColor.colorWithWhite_alpha_(0, 0.7).CGColor())
+    hud.layer().setCornerRadius_(5)
+    hud.sizeToFit()
+    hud.setFrame_(NSMakeRect(0, 2, hud.frame().size.width + 10, 18))  # along the bottom, clear of the tags
+    content.addSubview_(hud)
+    return win
+
+
 class AppDelegate(NSObject):
     def applicationDidFinishLaunching_(self, _notification):
         self.controls = queue.Queue()
@@ -435,6 +500,8 @@ class AppDelegate(NSObject):
         hint = menu.addItemWithTitle_action_keyEquivalent_("Timer chimes remain audible", None, "")
         hint.setEnabled_(False)
         menu.addItem_(NSMenuItem.separatorItem())
+        self.inspect_item = menu.addItemWithTitle_action_keyEquivalent_("Show what Jev sees", "toggleInspect:", "")
+        self.inspect_item.setTarget_(self)
         for title, action in (("Show status", "showMain:"), ("Settings…", "showSettings:")):
             menu.addItemWithTitle_action_keyEquivalent_(title, action, "").setTarget_(self)
         self.menu_only_item = menu.addItemWithTitle_action_keyEquivalent_("Menu bar only", "toggleMenuOnly:", "")
@@ -945,6 +1012,31 @@ class AppDelegate(NSObject):
             field.setPlaceholderString_("Default" if key in supported else "N/A")
         context = self.selected_metadata.get("context_length")
         self.model_info.setStringValue_(f"Selected: {self.selected_model}" + (f" · {context:,} context tokens" if context else ""))
+
+    def toggleInspect_(self, _sender):
+        """Live inspection on/off: numbered, labelled boxes over what Hey Jev reads, refreshed about once a second."""
+        import inspector
+        if getattr(self, "inspector", None) is None:
+            def busy():
+                siri = sys.modules.get("siri")
+                return bool(siri and siri.ENGINE and siri.ENGINE.active())
+            self.inspector = inspector.Inspector(
+                lambda view: self.performSelectorOnMainThread_withObject_waitUntilDone_("showInspect:", view or {}, False),
+                busy=busy)
+        if self.inspector.running:
+            self.inspector.stop()
+            self.inspect_item.setState_(0)
+        else:
+            self.inspector.start()
+            self.inspect_item.setState_(1)
+
+    def showInspect_(self, view):
+        old = getattr(self, "inspect_window", None)
+        self.inspect_window = inspect_window(view) if view and view.get("items") else None
+        if self.inspect_window is not None:
+            self.inspect_window.orderFrontRegardless()
+        if old is not None:
+            old.orderOut_(None)
 
     @objc.python_method
     def show_numbers(self, facts):

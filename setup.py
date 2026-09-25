@@ -1,11 +1,29 @@
 """Build the app bundle in alias mode, it runs the code straight from this folder: python setup.py py2app -A"""
+import os
+import shutil
+import subprocess
+
 from setuptools import setup
 
 APP_NAME = "Hey Jev"
 
+# Optional Apple Foundation Models helper (helpers/heyjev-fm -> bin/heyjev-fm).
+# Must never fail the app build: missing swiftc, older SDKs, or unsigned
+# environments just skip the helper and the app reports it unavailable.
+HELPER_BUILD = os.path.join("helpers", "heyjev-fm", "build.sh")
+HELPER_BIN = os.path.join("bin", "heyjev-fm")
+try:
+    subprocess.run(["sh", HELPER_BUILD], capture_output=True, timeout=600)
+except Exception:
+    pass
+RESOURCES = []
+if os.path.exists(HELPER_BIN):
+    RESOURCES.append(HELPER_BIN)
+
 setup(
     name=APP_NAME,
     app=["app.py"],
+    data_files=[("Resources", RESOURCES)],
     options={"py2app": {
         "argv_emulation": False,
         "iconfile": "assets/icon.icns",

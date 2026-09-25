@@ -227,3 +227,33 @@ def save_voice(voice_id, title):
     if not isinstance(voice_id, str) or not VOICE_ID_RE.fullmatch(voice_id):
         raise ValueError("That voice ID isn't valid.")
     PREFS.setObject_forKey_(json.dumps({"id": voice_id, "title": str(title)[:80]}), "fish_voice")
+
+
+MAX_APP_FOLDERS = 10
+
+
+def app_folders():
+    """User-added folders app discovery also scans (app_catalog reads the same key)."""
+    raw = PREFS.arrayForKey_("app_folders")
+    return [str(p) for p in raw] if raw is not None else []
+
+
+def clean_app_folders(paths):
+    """-> real, existing, de-duplicated absolute folders, at most MAX_APP_FOLDERS. Raises ValueError otherwise."""
+    import os
+    out = []
+    for p in paths:
+        real = os.path.realpath(os.path.expanduser(str(p)))
+        if not os.path.isabs(real) or not os.path.isdir(real):
+            raise ValueError(f"Not a folder: {p}")
+        if real not in out:
+            out.append(real)
+    if len(out) > MAX_APP_FOLDERS:
+        raise ValueError(f"Up to {MAX_APP_FOLDERS} extra app folders.")
+    return out
+
+
+def save_app_folders(paths):
+    paths = clean_app_folders(paths)
+    PREFS.setObject_forKey_(paths, "app_folders")
+    return paths

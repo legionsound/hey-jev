@@ -415,6 +415,45 @@ def fish_voices(key, query=""):
         raise ValueError("Fish Audio answered, but not with a voice list.") from None
 
 
+SAMPLE_LINE = "Hey, it's Jev. This is how I sound."
+OP_IDS = __import__("itertools").count(1)  # Settings operation ids: never reused, even across window sessions
+
+
+class SampleOp:
+    """One Settings voice sample. report(op_id, state, text): state is "playing" or "done"."""
+
+    def __init__(self, key, voice_id, report):
+        self.id, self.key, self.voice_id, self.report = next(OP_IDS), key, voice_id, report
+        self.cancelled = threading.Event()
+
+    def cancel(self):
+        """Stops this sample only: before it starts, while it waits for the floor, or while it plays."""
+        self.cancelled.set()
+        voice_output.stop(owner=self)
+
+
+def play_sample(op, hold):
+    """Fetch and play a sample inside the speech owner's hold(), so the mic is paused and the wake listener
+    never hears it. Cancellation is checked after the fetch, after taking the floor and at playback start."""
+    try:
+        path, _ms, _cached = fetch_tts(SAMPLE_LINE, key=op.key, voice_id=op.voice_id)
+    except Exception as exc:
+        code = getattr(getattr(exc, "response", None), "status_code", None)
+        return op.report(op.id, "done", "Fish Audio rejected the key." if code in (401, 403)
+                         else f"Couldn't play the sample ({type(exc).__name__}).")
+    if op.cancelled.is_set():
+        return op.report(op.id, "done", "Stopped.")
+    with hold():
+        if op.cancelled.is_set():
+            return op.report(op.id, "done", "Stopped.")
+        op.report(op.id, "playing", "Playing…")
+        try:
+            played = voice_output.play(path, owner=op, cancelled=op.cancelled)
+        except Exception as exc:
+            return op.report(op.id, "done", f"Couldn't play the sample ({type(exc).__name__}).")
+    op.report(op.id, "done", "Stopped." if op.cancelled.is_set() or not played else "")
+
+
 def speak(text):
     if voice_output.muted() or voice_output.volume() == 0:
         return 0
@@ -1051,6 +1090,8 @@ def run_voice_assistant(notify=None, controls=None, mode="ptt", listening=True, 
                 threading.Thread(target=switch, args=(command[1],), daemon=True).start()
             elif isinstance(command, tuple) and command[0] == "wake_phrase":
                 set_wake(command[1], command[2])
+            elif isinstance(command, tuple) and command[0] == "voice_sample":
+                threading.Thread(target=play_sample, args=(command[1], hold), daemon=True).start()
             elif isinstance(command, tuple) and command[0] == "mic_test":
                 threading.Thread(target=mic_test, args=(command[1],), daemon=True).start()
             elif isinstance(command, tuple) and command[0] == "listening":

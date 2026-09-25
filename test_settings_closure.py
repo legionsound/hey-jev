@@ -68,12 +68,33 @@ class JevCheckTests(Base):
             self.assertTrue(pump(lambda: self.d.jev_check_result.stringValue() != "Checking…"))
         self.assertEqual(self.d.jev_check_result.stringValue(), "Check failed: RuntimeError")
 
-    def test_result_after_close_is_ignored(self):
-        with patch.object(siri, "check_jev", return_value=5):
+    def test_old_result_never_lands_in_a_reopened_window(self):
+        with patch.object(assistant_ui.threading, "Thread"):  # hold every result back
             self.d.checkJev_(None)
-            gen = self.d.jev_check_generation
+            old = self.d.ops["check"]
             self.d.closeSettings_(None)
-            self.d.jevChecked_({"generation": gen, "ms": 5})  # lands late: no crash, nothing shown
+            self.d.jevChecked_({"generation": old, "ms": 999})  # closed: no crash
+            self.d._show_settings()
+            self.d.checkJev_(None)
+            self.assertNotEqual(self.d.ops["check"], old)  # ids are never reused across sessions
+            self.d.jevChecked_({"generation": old, "ms": 999})
+        self.assertEqual(self.d.jev_check_result.stringValue(), "Checking…")
+
+    def test_changing_source_or_key_clears_the_result(self):
+        with patch.object(assistant_ui.threading, "Thread"):
+            self.d.key_fields["JEV_OPENROUTER_API_KEY"].setStringValue_("key-a")
+            self.d.checkJev_(None)
+            op = self.d.ops["check"]
+            self.d.key_fields["JEV_OPENROUTER_API_KEY"].setStringValue_("key-b")  # edited while checking
+            self.d.jevChecked_({"generation": op, "ms": 10})
+        self.assertEqual(self.d.jev_check_result.stringValue(), "Not checked")
+        with patch.object(assistant_ui.threading, "Thread"):
+            self.d.checkJev_(None)
+            self.d.jevChecked_({"generation": self.d.ops["check"], "ms": 10})
+        self.assertEqual(self.d.jev_check_result.stringValue(), "Connected · 10 ms")
+        self.d.jev_provider.selectItemAtIndex_(1)
+        self.d.jevSourceChanged_(self.d.jev_provider)
+        self.assertEqual(self.d.jev_check_result.stringValue(), "Not checked")
 
 
 class CheckJevCallTests(unittest.TestCase):
@@ -112,49 +133,76 @@ class CheckJevCallTests(unittest.TestCase):
         post.assert_not_called()
 
 
+class FakeRec:
+    def __init__(self):
+        self.on = self.paused = self.isolated = False
+
+
 class VoiceSampleTests(Base):
     def setUp(self):
         super().setUp()
         self.played = []
+        fake_play = lambda path, owner=None, cancelled=None: (
+            False if cancelled is not None and cancelled.is_set() else self.played.append((path, owner)) or True)
         for p in (patch.object(voice_output, "muted", lambda: False), patch.object(voice_output, "volume", lambda: 0.8),
-                  patch.object(voice_output, "play", self.played.append), patch.object(voice_output, "stop", MagicMock())):
+                  patch.object(voice_output, "play", side_effect=fake_play), patch.object(voice_output, "stop", MagicMock()),
+                  patch.object(siri, "fetch_tts", return_value=("/tmp/s.wav", 10, False))):
             p.start()
             self.addCleanup(p.stop)
-
-    def test_play_uses_typed_key_then_returns_to_play(self):
         self.d.key_fields["FISH_AUDIO_API_KEY"].setStringValue_("fish-typed")
-        with patch.object(siri, "fetch_tts", return_value=("/tmp/s.wav", 10, False)) as fetch:
+
+    def test_without_the_worker_plays_directly_and_returns_to_play(self):
+        self.d.playSample_(None)
+        self.assertEqual(self.d.sample_button.title(), "Stop")
+        self.assertTrue(pump(lambda: self.d.sample_button.title() == "Play Sample"))
+        siri.fetch_tts.assert_called_once_with(siri.SAMPLE_LINE, key="fish-typed", voice_id="defaultvoice01")
+        self.assertEqual([p for p, _ in self.played], ["/tmp/s.wav"])
+
+    def test_with_the_worker_it_goes_through_the_speech_owner(self):
+        import queue
+        self.d.worker_started, self.d.controls = True, queue.Queue()
+        self.d.playSample_(None)
+        kind, op = self.d.controls.get_nowait()
+        self.assertEqual(kind, "voice_sample")
+        self.assertIs(op, self.d.sample_op)
+        self.assertEqual(self.played, [])  # nothing plays outside the owner
+
+    def test_stop_cancels_only_this_sample(self):
+        with patch.object(assistant_ui.threading, "Thread"):
             self.d.playSample_(None)
-            self.assertEqual(self.d.sample_button.title(), "Stop")
-            self.assertTrue(pump(lambda: self.d.sample_button.title() == "Play Sample"))
-        fetch.assert_called_once_with(assistant_ui.SAMPLE_LINE, key="fish-typed", voice_id="defaultvoice01")
-        self.assertEqual(self.played, ["/tmp/s.wav"])
-
-    def test_stop_while_fetching_never_starts_playback(self):
-        self.d.key_fields["FISH_AUDIO_API_KEY"].setStringValue_("fish-typed")
-        with patch.object(siri, "fetch_tts", return_value=("/tmp/s.wav", 10, False)):
-            with patch.object(assistant_ui.threading, "Thread") as thread:
-                self.d.playSample_(None)
-                run = thread.call_args.kwargs["target"]
-            self.d.playSample_(None)  # Stop
-            voice_output.stop.assert_called_once()
-            run()  # the fetch finishes after Stop
+        op = self.d.sample_op
+        self.d.playSample_(None)  # Stop
+        self.assertTrue(op.cancelled.is_set())
+        voice_output.stop.assert_called_once_with(owner=op)  # never a bare stop of Jev's own speech
+        siri.play_sample(op, siri.contextlib.nullcontext)  # the fetch finishes afterwards
         self.assertEqual(self.played, [])
-        self.assertEqual(self.d.sample_button.title(), "Play Sample")
+
+    def test_close_and_reopen_during_fetch(self):
+        with patch.object(assistant_ui.threading, "Thread"):
+            self.d.playSample_(None)
+        old = self.d.sample_op
+        self.d.closeSettings_(None)
+        self.assertTrue(old.cancelled.is_set())
+        self.d._show_settings()
+        self.d.key_fields["FISH_AUDIO_API_KEY"].setStringValue_("fish-typed")
+        with patch.object(assistant_ui.threading, "Thread"):
+            self.d.playSample_(None)
+        new = self.d.sample_op
+        self.assertNotEqual(new.id, old.id)
+        self.d.sampleState_({"op": old.id, "state": "done", "text": "old"})  # the old one lands late
+        self.assertIs(self.d.sample_op, new)
+        self.assertEqual(self.d.sample_button.title(), "Stop")
+        siri.play_sample(old, siri.contextlib.nullcontext)
+        self.assertEqual(self.played, [])
 
     def test_muted_or_no_key_explains_and_fetches_nothing(self):
-        with patch.object(siri, "fetch_tts") as fetch:
+        self.d.key_fields["FISH_AUDIO_API_KEY"].setStringValue_("")
+        self.d.playSample_(None)
+        self.assertEqual(self.d.sample_result.stringValue(), "Enter a Fish Audio key first.")
+        with patch.object(voice_output, "muted", lambda: True):
             self.d.playSample_(None)
-            self.assertEqual(self.d.sample_result.stringValue(), "Enter a Fish Audio key first.")
-            with patch.object(voice_output, "muted", lambda: True):
-                self.d.playSample_(None)
-            self.assertIn("muted", self.d.sample_result.stringValue())
-        fetch.assert_not_called()
-
-    def test_close_stops_a_playing_sample(self):
-        self.d.sample_playing = True
-        self.d.closeSettings_(None)
-        voice_output.stop.assert_called_once()
+        self.assertIn("muted", self.d.sample_result.stringValue())
+        siri.fetch_tts.assert_not_called()
 
     def test_pane_mirrors_live_gain_and_mute(self):
         with patch.object(voice_output, "volume", lambda: 0.25), patch.object(voice_output, "muted", lambda: True):
@@ -162,6 +210,146 @@ class VoiceSampleTests(Base):
         self.assertAlmostEqual(self.d.settings_voice_slider.doubleValue(), 0.25)
         self.assertFalse(self.d.settings_voice_slider.isEnabled())
         self.assertEqual(self.d.settings_mute.state(), 1)
+
+
+class PlaySampleOwnerTests(unittest.TestCase):
+    """play_sample against the real Floor with a fake recorder: the wake listener must not hear the sample."""
+
+    def setUp(self):
+        self.rec = FakeRec()
+        self.floor = siri.Floor(self.rec)
+        self.reports = []
+        self.op = siri.SampleOp("k", "voiceaaaa01", lambda i, st, t: self.reports.append((st, t)))
+        self.seen = []
+        fake_play = lambda path, owner=None, cancelled=None: (
+            self.seen.append((self.floor.locked(), self.rec.paused, owner)) or True)
+        for p in (patch.object(siri, "fetch_tts", return_value=("/tmp/s.wav", 1, False)),
+                  patch.object(voice_output, "play", side_effect=fake_play), patch.object(siri.time, "sleep")):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_plays_holding_the_floor_with_the_mic_paused(self):
+        siri.play_sample(self.op, self.floor.hold)
+        self.assertEqual(self.seen, [(True, True, self.op)])
+        self.assertFalse(self.floor.locked())
+        self.assertFalse(self.rec.paused)
+        self.assertEqual(self.reports[-1], ("done", ""))
+
+    def test_stop_while_queued_for_the_floor_never_plays(self):
+        import contextlib
+
+        @contextlib.contextmanager
+        def busy_floor():  # Stop is clicked while the sample waits for Jev to finish speaking
+            self.op.cancel()
+            with self.floor.hold():
+                yield
+        siri.play_sample(self.op, busy_floor)
+        self.assertEqual(self.seen, [])
+        self.assertEqual(self.reports[-1], ("done", "Stopped."))
+
+
+class VoiceOutputOwnerTests(unittest.TestCase):
+    def test_stop_with_an_owner_leaves_other_speech_alone(self):
+        sound, mine = MagicMock(), object()
+        with patch.object(voice_output, "_sound", sound), patch.object(voice_output, "_owner", None):
+            voice_output.stop(owner=mine)  # Jev's own reply is playing
+            sound.stop.assert_not_called()
+        with patch.object(voice_output, "_sound", sound), patch.object(voice_output, "_owner", mine):
+            voice_output.stop(owner=mine)
+            sound.stop.assert_called_once()
+
+    def test_cancelled_before_start_never_opens_the_sound(self):
+        import threading
+        cancelled = threading.Event()
+        cancelled.set()
+        with patch.object(voice_output, "muted", lambda: False), patch.object(voice_output, "volume", lambda: 1.0), \
+                patch.object(voice_output, "NSSound") as nssound:
+            self.assertFalse(voice_output.play("/tmp/x.wav", cancelled=cancelled))
+        nssound.alloc.assert_not_called()
+
+
+class AppsPaneTests(Base):
+    def setUp(self):
+        super().setUp()
+        import tempfile, os
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, self.tmp)
+        self.real = os.path.join(self.tmp, "Apps")
+        os.mkdir(self.real)
+        self.link = os.path.join(self.tmp, "link")
+        os.symlink(self.real, self.link)
+
+    def test_add_resolves_symlinks_dedupes_and_rejects_non_folders(self):
+        import os
+        self.d.folder_drafts = []
+        self.d._add_folder(self.link)
+        self.d._add_folder(self.real)  # the same folder through its real path
+        self.assertEqual(self.d.folder_drafts, [os.path.realpath(self.real)])
+        self.d._add_folder(os.path.join(self.tmp, "missing"))
+        self.assertIn("Not a folder", self.d.settings_message.stringValue())
+        self.assertEqual(len(self.d.folder_drafts), 1)
+
+    def test_remove_and_save_validates_before_writing(self):
+        import os, shutil
+        extra = os.path.join(self.tmp, "Extra")
+        os.mkdir(extra)
+        self.d.folder_drafts = []
+        self.d._add_folder(self.real)
+        self.d._add_folder(extra)
+        remove = MagicMock()
+        remove.tag.return_value = 0
+        self.d.removeAppFolder_(remove)
+        self.assertEqual(self.d.folder_drafts, [os.path.realpath(extra)])
+        shutil.rmtree(extra)  # vanished before Save
+        with patch.object(assistant_ui, "save_app_folders") as save_folders, \
+                patch.object(assistant_ui, "save_secret") as save_secret, \
+                patch.object(assistant_ui, "save_answer_settings") as save_answers:
+            self.d.saveSettings_(None)
+        self.assertIn("Not a folder", self.d.settings_message.stringValue())
+        for m in (save_folders, save_secret, save_answers):
+            m.assert_not_called()  # nothing half-saved
+
+    def test_refresh_runs_off_the_main_thread_and_shows_misses(self):
+        import app_catalog, threading
+        where = []
+        with patch.object(app_catalog, "refresh", side_effect=lambda: where.append(threading.current_thread()) or 42), \
+                patch.object(app_catalog, "last_source_misses", return_value={"mdfind": "unavailable"}):
+            self.d.refreshApps_(None)
+            self.assertFalse(self.d.apps_refresh.isEnabled())
+            self.assertTrue(pump(lambda: self.d.apps_refresh.isEnabled()))
+        self.assertIsNot(where[0], threading.main_thread())
+        self.assertEqual(self.d.apps_found.stringValue(), "42 apps · Spotlight unavailable")
+
+
+class AppFolderPrefsTests(unittest.TestCase):
+    def test_saved_to_the_key_app_catalog_reads(self):
+        import model_settings, tempfile, os
+        store = MagicMock()
+        d = tempfile.mkdtemp()
+        self.addCleanup(os.rmdir, d)
+        with patch.object(model_settings, "PREFS", store):
+            model_settings.save_app_folders([d, d])
+        store.setObject_forKey_.assert_called_once_with([os.path.realpath(d)], "app_folders")
+        with self.assertRaises(ValueError):
+            model_settings.clean_app_folders([d] * 1 + [f"/nope/{i}" for i in range(2)])
+
+
+class AsyncReopenTests(Base):
+    def test_voice_lookup_and_app_scan_results_from_an_old_window_are_dropped(self):
+        with patch.object(assistant_ui.threading, "Thread"):
+            self.d.findVoices_(None)
+            self.d.refreshApps_(None)
+            old_voices, old_apps = self.d.ops["voices"], self.d.ops["apps"]
+            self.d.closeSettings_(None)
+            self.d._show_settings()
+            self.d.findVoices_(None)
+            self.d.refreshApps_(None)
+        self.assertNotIn(self.d.ops["voices"], (old_voices, old_apps))
+        self.d.voicesLoaded_({"generation": old_voices, "voices": [{"id": "voiceaaaa01", "title": "Old", "author": ""}],
+                              "query": ""})
+        self.d.appsRefreshed_({"generation": old_apps, "count": 999, "misses": []})
+        self.assertEqual(len(self.d.voice_choices), 1)
+        self.assertEqual(self.d.apps_found.stringValue(), "Scanning…")
 
 
 class VoicePickerTests(Base):

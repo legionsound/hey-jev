@@ -2,12 +2,12 @@
 
 All settings live in the Settings window (System Settings style) and in
 the status window / menu bar. Settings panes: Providers, Answers, Voice,
-Confirmations, Apps, Transcription — in that order
+Confirmations, Apps, Transcription, Permissions — in that order
 (`assistant_ui.py: SETTINGS_PANES`).
 
 ## Settings panes (save-gated, with live exceptions)
 
-The six Settings panes apply on save: closing or Cancel discards
+The Settings panes apply on save: closing or Cancel discards
 unsaved changes. Exceptions, which apply the moment they are touched:
 the voice volume slider and mute control, in the status window, the
 menu bar, and Settings > Voice — Cancel does not undo them.
@@ -70,7 +70,20 @@ an Apps setting.)
 - OCR level for screen reading (`save_ocr_level`).
 - Wake phrase + aliases (`save_wake_settings`), applied live.
 
-## Permissions (first launch)
+## Permissions
+
+Settings > Permissions lists every permission in one place: Microphone,
+Dictation, Accessibility, Screen Recording, and Automation for System
+Events, Spotify, Safari and Google Chrome (`permissions.py`). Each row
+shows what macOS reports now (Granted, Not granted, Not asked yet,
+Restricted, Not running) with its own Request button, which shows
+macOS's prompt, and Open Settings, which opens that Privacy & Security
+page. Status is read again when the window comes forward and after each
+Request. Automation rows need that app open; Hey Jev never opens it to
+ask. The status and Request/Open Settings buttons apply immediately, not
+on save.
+
+What each one is for:
 
 1. Microphone (macOS prompt).
 2. Accessibility: System Settings > Privacy & Security > Accessibility —

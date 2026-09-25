@@ -31,7 +31,9 @@
   Accessibility does not expose. It never makes OCR-only text pressable:
   OCR-only items stay `not_a_control`.
 - "Show what Jev sees" names what's missing (Accessibility, Screen
-  Recording, or a failed read) with Open Settings and Recheck. Each
+  Recording, or a failed read) with Open Permissions (Settings >
+  Permissions, where each permission has its own Request and Open
+  Settings buttons) and Recheck. Each
   toggle-on and Recheck logs what macOS reports for both permissions,
   plus the app's code signature, to `requests.jsonl` (stage
   `permissions`).

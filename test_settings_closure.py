@@ -7,6 +7,7 @@ import requests
 from Foundation import NSDate, NSRunLoop
 
 import assistant_ui
+import permissions
 import siri
 import voice_output
 
@@ -35,7 +36,10 @@ class Base(unittest.TestCase):
                         patch.object(assistant_ui, "wake_settings", lambda: ("Hey Jev", [])),
                         patch.object(voice_output, "cues", lambda provider="fish": self.saved_cues),
                         patch.object(voice_output, "set_cues", MagicMock()),
-                        patch.object(assistant_ui, "begin_sheet", lambda parent, sheet: None)]  # no sheet on screen
+                        patch.object(assistant_ui, "begin_sheet", lambda parent, sheet: None),  # no sheet on screen
+                        patch.object(assistant_ui, "show_settings_window", lambda sheet: None),  # no window either
+                        patch.object(permissions, "snapshot", lambda: {}),  # the Permissions pane reads no real state
+                        patch.object(permissions, "running", lambda bundle: False)]
         self.saved_cues = {"mode": "all", "on": list(voice_output.CUES["fish"])}
         for p in self.patches:
             p.start()
@@ -257,7 +261,7 @@ class FirstSetupSampleTests(Base):
         self.assertTrue(self.d.worker_started and started)
         self.assertTrue(op.cancelled.is_set())
         self.assertIsNone(self.d.sample_op)
-        self.assertTrue(self.d.settings_sheet.isVisible())  # the warning window stayed open
+        self.assertIsNotNone(self.d.settings_sheet)  # the warning window stayed open (closing clears it)
         with patch.object(siri, "fetch_tts", return_value=("/tmp/s.wav", 1, False)), \
                 patch.object(voice_output, "play", side_effect=lambda *a, **k: played.append(a) or True):
             siri.play_sample(*run_args)  # the fetch lands after the mic opened

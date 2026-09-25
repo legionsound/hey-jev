@@ -112,7 +112,9 @@ if #available(macOS 26.0, *) {
                     let session = LanguageModelSession(model: PrivateCloudComputeLanguageModel()) {
                         if !instructions.isEmpty { Instructions(instructions) }
                     }
+                    let done = DispatchSemaphore(value: 0)
                     Task {
+                        defer { done.signal() }
                         do {
                             for h in hist {
                                 if h["role"] == "user" { _ = try? await session.respond(to: h["text"] ?? "") }
@@ -128,7 +130,7 @@ if #available(macOS 26.0, *) {
                                  "error": String(describing: error), "latency_ms": ms] as [String: Any])
                         }
                     }
-                    RunLoop.main.run(until: Date(timeIntervalSinceNow: 120))
+                    done.wait()  // sequential: the next line is read only after this answer is out
                 } else {
                     out(["op": "ask", "id": qid, "status": "unavailable", "text": "",
                          "error": "needs macOS 27", "latency_ms": 0] as [String: Any])
@@ -153,7 +155,9 @@ if #available(macOS 26.0, *) {
                 if !instructions.isEmpty { Instructions(instructions) }
             }
             let options = GenerationOptions(maximumResponseTokens: maxTokens)
+            let done = DispatchSemaphore(value: 0)
             Task {
+                defer { done.signal() }
                 do {
                     for h in hist {
                         if h["role"] == "user" { _ = try? await session.respond(to: h["text"] ?? "") }
@@ -169,7 +173,7 @@ if #available(macOS 26.0, *) {
                          "error": String(describing: error), "latency_ms": ms] as [String: Any])
                 }
             }
-            RunLoop.main.run(until: Date(timeIntervalSinceNow: 120))
+            done.wait()  // sequential: the next line is read only after this answer is out
             continue
         }
     }

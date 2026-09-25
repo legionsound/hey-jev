@@ -18,8 +18,8 @@ This is a fork of [henryklunaris/hey-jev](https://github.com/henryklunaris/hey-j
 Most voice assistants guess, act, and announce success. Hey Jev is built the other way round:
 
 - **It checks before it says "done".** Every action has a readback: the app is actually running, the volume is actually 40, the browser tab actually shows that address. If it can't check, it says so ("I sent that, but I couldn't check whether it worked").
-- **The model decides, Python acts.** Jev, a small classifier model, only answers narrow questions ("is this a command, and which kind?"). It never writes code or picks targets. The target (which app, which URL, which button) is resolved deterministically against what is actually on your Mac or your screen.
-- **Nothing runs twice.** A multi-step request stops at the first step that did not verifiably work and tells you what already happened. Side effects are never retried.
+- **The model decides, Python acts.** Jev, a small classifier model, answers narrow questions ("is this a command, and which kind?"). Where it selects — duplicate-app tie-breaks, screen cards, task actions — the choice is validated against bounded candidates with identity checks, and execution stays deterministic.
+- **Nothing runs twice.** A multi-step request stops at the first step that did not verifiably work and tells you what already happened. Re-sending a request id returns the stored result instead of running again: full results are kept ten minutes, and the id record itself lasts for the whole app run. Side effects are never retried.
 - **You choose what asks first.** Every kind of action (open apps, quit apps, click buttons, type text, start a task…) is either *Ask first* or *Automatic*. Asks appear as a small pop-down from the menu bar.
 
 ## What it can do
@@ -31,15 +31,15 @@ Most voice assistants guess, act, and announce success. Hey Jev is built the oth
 | Music | "play", "pause", "next track", "previous track" (Spotify) |
 | System | "dark mode on", "lock the screen", "put the Mac to sleep" |
 | Timers | "set a timer for 5 minutes", "remind me in 20 minutes to call Sam", "how long is left?", "cancel the timer" |
-| Web | "go to github.com", "go to YouTube", "search Google for rock and roll", "open github.com in Safari" |
-| Screen | "what can I click?", "click Share", "click 4", "type hello into the search field", "press return", "scroll down", "click the video in the bottom-right" |
+| Web | "go to github.com", "go to YouTube", "search Google for rock and roll", "open github.com in Safari" (only Chrome reports a completed load; Safari navigation is unverified) |
+| Screen | "what can I click?", "click Share", "click 4", "type hello into the search field", "press return", "scroll down", "click the video in the bottom-right" (pointer clicks and web scrolls report no verified postcondition) |
 | Tasks | "take over: …" or "work on: …" hands Jev a goal it works through step by step in the current app |
 | Questions | "who wrote Hamlet?", "what time is it?" (optional, via an LLM you choose) |
 | Chaining | "pause Spotify, then open Slack". Up to five steps, joined with "then", "after that" or ", and". A bare "and" never splits, so "play rock and roll" stays one request. |
 
 Say **"stop"** at any time to cancel what's running and anything queued.
 
-The full guide, with every phrase and what each one checks, is in [docs/FEATURES.md](docs/FEATURES.md).
+The formal behaviour spec, with every step state and what each one checks, is in [docs/ENGINE_CONTRACT.md](docs/ENGINE_CONTRACT.md).
 
 ## Quick start
 
@@ -73,7 +73,7 @@ On first launch:
 
 Then choose how you talk to it with the switch in the window: **Hold Option** (hold right Option, talk, let go) or **Hey Jev** (always listening for the wake phrase, which you can change in Settings).
 
-Details on every permission and setting: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+Details on permissions and settings live in Settings itself (panes: Providers, Answers, Voice, Confirmations, Apps, Transcription).
 
 ## Command line
 
@@ -102,7 +102,7 @@ mic ─► Whisper / Apple dictation ─► wake phrase ─► planner ─► en
 3. **Run.** One engine runs every request, voice or CLI, on a single serial queue. It asks first where your settings say to, runs each action under a time limit, and polls a readback until it sees the result or runs out of time.
 4. **Reply.** The spoken line is chosen from what actually happened, never from what was intended.
 
-Architecture, module map and safety rules: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The formal behaviour spec is [docs/ENGINE_CONTRACT.md](docs/ENGINE_CONTRACT.md).
+How the pieces fit and the safety rules: [docs/COMMAND_ARCHITECTURE.md](docs/COMMAND_ARCHITECTURE.md). The formal behaviour spec is [docs/ENGINE_CONTRACT.md](docs/ENGINE_CONTRACT.md).
 
 ## Privacy
 
@@ -114,7 +114,7 @@ Architecture, module map and safety rules: [docs/ARCHITECTURE.md](docs/ARCHITECT
 ## What it costs
 
 - **Jev:** about $0.00004 per command.
-- **Fish Audio:** the `s2.1-pro-free` model is free until the end of November 2026; after that `s2.1-pro` is $15 per million characters. Fixed replies are cached, so normal use is a few cents a day.
+- **Fish Audio:** the `s2.1-pro-free` model is currently free; `s2.1-pro` is listed at $15 per million characters. Check [Fish Audio pricing](https://fish.audio/) for current rates. Fixed replies are cached, so normal use is a few cents a day.
 - **Whisper / Apple dictation:** free, on your Mac.
 - **Answers (optional):** Claude Haiku via OpenRouter, about $0.0002 per answer.
 
@@ -122,14 +122,18 @@ Architecture, module map and safety rules: [docs/ARCHITECTURE.md](docs/ARCHITECT
 
 | Doc | For |
 | --- | --- |
-| [docs/FEATURES.md](docs/FEATURES.md) | Every command, example phrases, what it checks, its limits |
-| [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Settings, keys, permissions, stored files, logs, privacy |
-| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common problems and what the app's messages mean |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | How the pieces fit, request lifecycle, safety invariants |
 | [docs/ENGINE_CONTRACT.md](docs/ENGINE_CONTRACT.md) | The engine's exact rules: step states, confirmation, readback |
-| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Running from source, tests, building, contributing |
+| [docs/COMMAND_ARCHITECTURE.md](docs/COMMAND_ARCHITECTURE.md) | How commands flow, historical design context |
+| [docs/HEY_JEV_OVERHAUL_SPEC.md](docs/HEY_JEV_OVERHAUL_SPEC.md) | Original overhaul goals, historical design context |
+| [docs/CAPABILITY_EFFORT_MAP.md](docs/CAPABILITY_EFFORT_MAP.md) | Capability survey, historical design context |
+| [docs/BUZZ_HANDOFF.md](docs/BUZZ_HANDOFF.md) | Project handoff notes for contributors |
 | [CHANGELOG.md](CHANGELOG.md) | What changed in this fork |
-| [docs/history/](docs/history/) | Design notes written before the build, kept for context |
+
+Status: the integrated features passed their automated checks, but the final live trial in the running app is still pending.
+
+## Contributing
+
+This fork lives at [legionsound/hey-jev](https://github.com/legionsound/hey-jev) and stays separate: development and contributions target Johnny's fork only. Nothing is submitted upstream.
 
 ## Credits and license
 

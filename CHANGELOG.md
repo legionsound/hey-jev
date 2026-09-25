@@ -10,7 +10,7 @@ A ground-up rework of how commands run, plus screen control. Everything a comman
 
 - **One engine for voice and the command line.** `engine.py` runs every request on one serial queue, whether it came from the mic or from `jevctl`. The old `handle()` / `decide()` / `ACTIONS` path is gone.
 - **Results you can trust.** Each step ends as `completed` (the app saw the result), `unverified` (done, but nothing to check), `unknown` (may or may not have happened), `failed`, `skipped`, `unsupported`, `needs_clarification` or `needs_confirmation`. Multi-step requests stop at the first step that did not verifiably work and report what already happened.
-- **No repeated side effects.** A request id is remembered for ten minutes; re-sending it returns the stored result instead of running it again.
+- **No repeated side effects.** A request id is remembered for the whole app run; re-sending it returns the stored result instead of running it again. Full result bodies are kept ten minutes, then dropped while the id record stays.
 - **Confirmations.** Every action belongs to an effect category (open, quit, media, volume, click, type, and so on). Settings > Confirmations sets each one to *Ask first* or *Automatic*. Asks appear as a pop-down from the menu bar and apply to voice and `jevctl` alike.
 - **Spoken stop.** Saying "stop" cancels the running request and anything queued behind it.
 - **Diagnostics.** Every request stage is logged as one JSON line to `~/Library/Logs/Hey Jev/requests.jsonl`, with keys and secrets redacted.
@@ -60,7 +60,7 @@ A ground-up rework of how commands run, plus screen control. Everything a comman
 
 ### Settings and window
 
-- Settings rebuilt in the System Settings style: panes for General, Voice, Transcription, Confirmations, Apps, Models and more.
+- Settings rebuilt in the System Settings style, save-gated (Cancel/close discards): panes for Providers, Answers, Voice, Confirmations, Apps and Transcription, in that order.
 - Every model the app uses (Jev, answers, Whisper, Fish voice model, OCR level) is a setting, defaulting to the original values.
 - Status window redesigned with Liquid Glass.
 - Menu bar icon is now a person-speaking symbol.
@@ -69,4 +69,5 @@ A ground-up rework of how commands run, plus screen control. Everything a comman
 ### Development
 
 - Test suite (stdlib `unittest`) grew from none to several hundred tests covering the engine, planner, actions, screen control, settings and speech.
+- Status of this release: the integrated features passed their automated checks, but the final live trial in the running app is still pending.
 - Design notes kept in `docs/`; the ones written before the build are marked historical.

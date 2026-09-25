@@ -219,6 +219,70 @@ class VoiceSampleTests(Base):
         self.assertEqual(self.d.settings_mute.state(), 1)
 
 
+class FirstSetupSampleTests(Base):
+    """A sample started before setup plays directly; the first Save must silence it before the mic opens."""
+
+    def setUp(self):
+        super().setUp()
+        for p in (patch.object(voice_output, "muted", lambda: False), patch.object(voice_output, "volume", lambda: 1.0),
+                  patch.object(voice_output, "stop", MagicMock())):
+            p.start()
+            self.addCleanup(p.stop)
+        self.d.key_fields["FISH_AUDIO_API_KEY"].setStringValue_("fish-typed")
+
+    def first_save_with_short_phrase(self):
+        self.d.wake_field.setStringValue_("Hi")  # the warning keeps Settings open, so close can't be relied on
+        started = []
+        saves = [patch.object(assistant_ui, n) for n in SAVES]
+        for p in saves:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in saves])
+        with patch.object(assistant_ui, "get_secret", return_value="stored"), patch.object(siri, "reload_keys"), \
+                patch.object(assistant_ui.threading, "Thread") as thread:
+            thread.return_value.start.side_effect = lambda: started.append(True)
+            self.d.saveSettings_(None)
+        return started
+
+    def test_delayed_fetch_never_plays_after_listening_starts(self):
+        played = []
+        with patch.object(assistant_ui.threading, "Thread") as thread:
+            self.d.playSample_(None)
+            run_args = thread.call_args.kwargs["args"]  # (op, nullcontext): the fetch hasn't finished
+        op = self.d.sample_op
+        started = self.first_save_with_short_phrase()
+        self.assertTrue(self.d.worker_started and started)
+        self.assertTrue(op.cancelled.is_set())
+        self.assertIsNone(self.d.sample_op)
+        self.assertTrue(self.d.settings_sheet.isVisible())  # the warning window stayed open
+        with patch.object(siri, "fetch_tts", return_value=("/tmp/s.wav", 1, False)), \
+                patch.object(voice_output, "play", side_effect=lambda *a, **k: played.append(a) or True):
+            siri.play_sample(*run_args)  # the fetch lands after the mic opened
+        self.assertEqual(played, [])
+
+    def test_active_playback_is_stopped_before_listening(self):
+        with patch.object(assistant_ui.threading, "Thread"):
+            self.d.playSample_(None)
+        op = self.d.sample_op
+        self.first_save_with_short_phrase()
+        voice_output.stop.assert_called_once_with(owner=op)
+
+
+class MicTestOwnershipTests(Base):
+    def test_old_mic_result_never_touches_a_reopened_window(self):
+        import queue
+        self.d.worker_started, self.d.controls = True, queue.Queue()
+        self.d.micTest_(None)
+        _kind, old_reply = self.d.controls.get_nowait()
+        self.d.closeSettings_(None)
+        self.d._show_settings()
+        self.d.micTest_(None)
+        self.assertFalse(self.d.test_button.isEnabled())
+        old_reply({"text": "OLD SESSION", "ms": 1, "wake": "Hey Jev", "wake_matched": False})
+        pump(lambda: False, 0.2)
+        self.assertNotIn("OLD SESSION", self.d.test_result.stringValue())
+        self.assertFalse(self.d.test_button.isEnabled())  # still waiting for its own test
+
+
 class PlaySampleOwnerTests(unittest.TestCase):
     """play_sample against the real Floor with a fake recorder: the wake listener must not hear the sample."""
 
@@ -608,30 +672,70 @@ class ModelSettingsSaveTests(Base):
 
 
 class LayoutFitTests(Base):
-    """Every pane's content stays inside the pane, above the Cancel/Save footer, with the most rows it can have."""
+    """Panes scroll when needed. The common panes fit without scrolling at their default rows; every pane's content
+    stays inside its scrolling area, including Confirmations once the task and scroll rows arrive."""
 
-    def bottoms(self, view, offset=0):
-        for sub in view.subviews():
-            if sub.isHidden():
-                continue
-            f = sub.frame()
-            if sub in (self.d.advanced_view, self.d.folder_view):  # full-height containers: measure their content
-                yield from self.bottoms(sub, offset + f.origin.y)
-            else:
-                yield offset + f.origin.y + f.size.height, sub
+    def check_contained(self):
+        for item in self.d.settings_tabs.tabViewItems():
+            doc = item.view().documentView()
+            for sub in doc.subviews():
+                if not sub.isHidden():
+                    f = sub.frame()
+                    self.assertLessEqual(f.origin.y + f.size.height, doc.frame().size.height,
+                                         f"{item.identifier()}: {type(sub).__name__} outside its pane")
 
-    def test_all_panes_fit_with_advanced_open_and_full_folders(self):
+    def heights(self):
+        return {i.identifier(): i.view().documentView().frame().size.height for i in self.d.settings_tabs.tabViewItems()}
+
+    def test_common_panes_fit_without_scrolling(self):
         import tempfile, os
         folders = [tempfile.mkdtemp() for _ in range(assistant_ui.MAX_APP_FOLDERS)]
         self.addCleanup(lambda: [os.rmdir(f) for f in folders])
         self.d.folder_drafts = list(folders)
         self.d._show_folders()
-        self.d.advanced_view.setHidden_(False)
-        for item in self.d.settings_tabs.tabViewItems():
-            pane = item.view()
-            for bottom, sub in self.bottoms(pane):
-                self.assertLessEqual(bottom, assistant_ui.PANE_H,
-                                     f"{item.identifier()}: {type(sub).__name__} ends at {bottom:.0f}")
+        self.d.advanced_toggle.setState_(1)
+        self.d.toggleAdvanced_(self.d.advanced_toggle)
+        for ident, h in self.heights().items():
+            if ident != "confirm":  # Confirmations may scroll; see the next test
+                self.assertEqual(h, assistant_ui.PANE_H, f"{ident} needs scrolling at its default rows")
+        self.check_contained()
+
+    def test_confirmations_scrolls_with_the_task_and_scroll_rows(self):
+        extra = {"task": "Start multi-step tasks", "in_task": "Each step inside a task",
+                 "risky": "Risky buttons", "scroll": "Scroll pages"}
+        self.d.closeSettings_(None)
+        with patch.object(assistant_ui, "EFFECTS", assistant_ui.EFFECTS + tuple(extra)), \
+                patch.dict(assistant_ui.EFFECT_LABELS, extra), \
+                patch.object(assistant_ui, "confirm_policy", lambda: {}):
+            self.d._show_settings()
+        self.assertEqual(len(self.d.policy_popups), 16)
+        confirm = self.d.settings_tabs.tabViewItemAtIndex_(
+            self.d.settings_tabs.indexOfTabViewItemWithIdentifier_("confirm")).view()
+        self.assertGreater(confirm.documentView().frame().size.height, assistant_ui.PANE_H)  # it scrolls
+        self.assertTrue(confirm.hasVerticalScroller())
+        headers = [v.stringValue() for v in confirm.documentView().subviews() if hasattr(v, "stringValue")]
+        self.assertIn("Ask before: everyday", headers)
+        self.assertIn("Ask before: screen and tasks", headers)
+        self.check_contained()
+
+
+class OcrLevelTests(unittest.TestCase):
+    def test_vision_request_follows_the_setting(self):
+        import model_settings, screen
+        for level, expected in (("accurate", (0, True)), ("fast", (1, False))):
+            req = MagicMock()
+            with patch.object(model_settings, "ocr_level", return_value=level):
+                screen.configure_ocr(req)
+            req.setRecognitionLevel_.assert_called_once_with(expected[0])
+            req.setUsesLanguageCorrection_.assert_called_once_with(expected[1])
+        req = MagicMock()
+        with patch.object(model_settings, "ocr_level", side_effect=RuntimeError("unreadable")):
+            self.assertFalse(screen.configure_ocr(req))
+        req.setRecognitionLevel_.assert_called_once_with(0)
+
+    def test_read_text_uses_it(self):
+        import inspect, screen
+        self.assertIn("configure_ocr(req)", inspect.getsource(screen.read_text))
 
 
 class ModelPrefsTests(unittest.TestCase):

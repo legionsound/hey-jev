@@ -33,10 +33,13 @@ class SettingsCloseTests(unittest.TestCase):
             d = self.make()
             d._show_settings()
             d.wake_field.setStringValue_("Okay Zorblat")
-            d.micTestDone_({"text": "Okay Zorblat open Notes", "ms": 90, "wake": "Okay Zorblat", "wake_matched": True})
+            d.ops["mic"] = 1
+            d.micTestDone_({"op": 1, "result": {"text": "Okay Zorblat open Notes", "ms": 90, "wake": "Okay Zorblat",
+                                                "wake_matched": True}})
             self.assertEqual(d.test_result.stringValue(), "“Okay Zorblat open Notes” · heard “Okay Zorblat” · 90 ms")
             d.wake_field.setStringValue_("Hey José")  # typed, not saved: the test still used the running phrase
-            d.micTestDone_({"text": "Hey José open Notes", "ms": 90, "wake": "Okay Zorblat", "wake_matched": False})
+            d.micTestDone_({"op": 1, "result": {"text": "Hey José open Notes", "ms": 90, "wake": "Okay Zorblat",
+                                                "wake_matched": False}})
             self.assertEqual(d.test_result.stringValue(),
                              "“Hey José open Notes” · didn't hear “Okay Zorblat” · 90 ms · Save to test the new phrase")
             d.closeSettings_(None)

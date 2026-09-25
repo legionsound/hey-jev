@@ -136,6 +136,7 @@ def glass_backdrop(window, content):
 PANE_W, PANE_H, FOOTER_H = 580, 600, 56
 OPS = itertools.count(1)  # async Settings operations: ids are never reused, even across window sessions
 GROUP_X, CONTROL_W = 20, 250
+SCREEN_EFFECTS = frozenset({"click", "type", "submit", "scroll", "task", "in_task", "risky"})
 SETTINGS_PANES = (("providers", "Providers", "key.fill"), ("answers", "Answers", "sparkles"),
                   ("voice", "Voice", "speaker.wave.2.fill"), ("confirm", "Confirmations", "checkmark.shield"),
                   ("apps", "Apps", "square.grid.2x2"), ("transcription", "Transcription", "waveform"))
@@ -181,6 +182,11 @@ def form_group(parent, top, header, rows, row_h=40):
             line.setBoxType_(2)  # separator
             box.addSubview_(line)
     return top + row_h * len(rows) + 22
+
+
+def content_bottom(view):
+    """Lowest edge of a flipped view's visible subviews."""
+    return max((v.frame().origin.y + v.frame().size.height for v in view.subviews() if not v.isHidden()), default=0)
 
 
 def footnote(parent, top, value):
@@ -360,6 +366,13 @@ class AppDelegate(NSObject):
     def _start_worker(self):
         if self.worker_started:
             return
+        op = getattr(self, "sample_op", None)
+        if op is not None:  # a sample started before setup plays outside the speech owner: silence it before the mic
+            op.cancel()     # opens (cancel stops it under voice_output's lock, and it can't start afterwards)
+            self.sample_op = None
+            if getattr(self, "settings_sheet", None):
+                self.sample_button.setTitle_("Play Sample")
+                self.sample_result.setStringValue_("Stopped: Hey Jev started listening.")
         self.worker_started = True
         threading.Thread(target=self._run_assistant, daemon=True).start()
 
@@ -548,12 +561,20 @@ class AppDelegate(NSObject):
         self.settings_tabs = tabs
         panes = {}
         for ident, title, _icon in SETTINGS_PANES:
+            # Each pane scrolls when its content is taller than the window, so panes can grow without resizing it.
+            scroll = AppKit.NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, PANE_W, PANE_H))
+            scroll.setHasVerticalScroller_(True)
+            scroll.setAutohidesScrollers_(True)
+            scroll.setDrawsBackground_(False)
+            scroll.setBorderType_(0)
             view = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, PANE_W, PANE_H))
+            scroll.setDocumentView_(view)
             item = NSTabViewItem.alloc().initWithIdentifier_(ident)
             item.setLabel_(title)
-            item.setView_(view)
+            item.setView_(scroll)
             tabs.addTabViewItem_(item)
             panes[ident] = view
+        self.pane_views = panes
         toolbar = NSToolbar.alloc().initWithIdentifier_("HeyJevSettings")
         toolbar.setDelegate_(self)
         toolbar.setDisplayMode_(1)  # icon and label
@@ -703,14 +724,16 @@ class AppDelegate(NSObject):
         c = panes["confirm"]
         policy = confirm_policy()
         self.policy_popups = {}
-        rows = []
+        groups = {"everyday": [], "screen": []}
         for effect in EFFECTS:
             popup = self._popup(None, ["Ask first", "Automatic"], NSMakeRect(0, 0, 140, 24))
-            popup.selectItemAtIndex_(0 if policy[effect] == "ask" else 1)
+            popup.selectItemAtIndex_(0 if policy.get(effect) == "ask" else 1)
             popup.setAccessibilityLabel_(f"{EFFECT_LABELS[effect]} confirmation")
             self.policy_popups[effect] = popup
-            rows.append((EFFECT_LABELS[effect], popup))
-        y = form_group(c, 20, "Ask before doing", rows, row_h=30)
+            groups["screen" if effect in SCREEN_EFFECTS else "everyday"].append((EFFECT_LABELS[effect], popup))
+        y = form_group(c, 20, "Ask before: everyday", groups["everyday"], row_h=30)
+        if groups["screen"]:
+            y = form_group(c, y - 4, "Ask before: screen and tasks", groups["screen"], row_h=30)
         footnote(c, y, "Applies to voice and typed commands. Ask first shows a pop-down from the menu bar.")
         tie_cell = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, CONTROL_W, 24))
         slider = NSSlider.alloc().initWithFrame_(NSMakeRect(0, 0, CONTROL_W - 90, 24))
@@ -815,6 +838,7 @@ class AppDelegate(NSObject):
             button.setKeyEquivalent_("\r" if title == "Save" else "\x1b")
             content.addSubview_(button)
         self.settings_sheet = sheet
+        self._fit_panes()
         self._filter_models()
         self._display_parameters()
         self._sync_voice_pane()
@@ -945,12 +969,14 @@ class AppDelegate(NSObject):
             return
         self.test_button.setEnabled_(False)
         self.test_result.setStringValue_("Listening for 4 seconds…")
+        op = self.ops["mic"] = next(OPS)
         self.controls.put(("mic_test", lambda r: self.performSelectorOnMainThread_withObject_waitUntilDone_(
-            "micTestDone:", r, False)))
+            "micTestDone:", {"op": op, "result": r}, False)))
 
-    def micTestDone_(self, result):
-        if not getattr(self, "settings_sheet", None):
-            return
+    def micTestDone_(self, payload):
+        if not getattr(self, "settings_sheet", None) or payload["op"] != self.ops.get("mic"):
+            return  # closed, or a test from an earlier window: never touches this one
+        result = payload["result"]
         self.test_button.setEnabled_(True)
         if result.get("error"):
             self.test_result.setStringValue_(f"Test failed: {result['error']}")
@@ -1020,6 +1046,18 @@ class AppDelegate(NSObject):
         is_open = bool(sender.state())
         self.advanced_view.setHidden_(not is_open)
         save_advanced_open(is_open)
+        self._fit_panes()
+
+    @objc.python_method
+    def _fit_panes(self):
+        """Size each pane's scrolling content to what it holds: exactly the window when it fits, taller when not."""
+        for view in (getattr(self, "advanced_view", None), getattr(self, "folder_view", None)):
+            if view is not None:
+                f = view.frame()
+                view.setFrameSize_((f.size.width, content_bottom(view)))
+        for view in getattr(self, "pane_views", {}).values():
+            bottom = content_bottom(view)
+            view.setFrameSize_((PANE_W, PANE_H if bottom <= PANE_H else bottom + 16))
 
     @objc.python_method
     def _sync_advanced_summary(self):
@@ -1123,6 +1161,7 @@ class AppDelegate(NSObject):
         y = form_group(self.folder_view, 0, "Extra app folders", rows, row_h=34)
         footnote(self.folder_view, y, "Saved with Save; Refresh Apps then includes them. Symlinks are followed; "
                                       "Finder aliases aren't.")
+        self._fit_panes()
 
     def addAppFolder_(self, _sender):
         panel = AppKit.NSOpenPanel.openPanel()

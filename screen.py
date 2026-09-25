@@ -369,6 +369,19 @@ def _cg_window_id(pid, frame):
     return best[1] if best and best[0] <= 8 else None
 
 
+def configure_ocr(req):
+    """Apply Settings' text reading mode to a Vision request: accurate (0, with language correction) unless the
+    user chose fast (1). An unreadable preference means accurate. -> True when fast."""
+    try:
+        import model_settings
+        fast = model_settings.ocr_level() == "fast"
+    except Exception:
+        fast = False
+    req.setRecognitionLevel_(1 if fast else 0)
+    req.setUsesLanguageCorrection_(not fast)
+    return fast
+
+
 def read_text(pid, frame, deadline):
     """[(text, confidence, (x, y, w, h) screen points)] for one window. Raises Unavailable."""
     import Quartz
@@ -395,8 +408,7 @@ def read_text(pid, frame, deadline):
         from Foundation import NSDictionary, NSURL
         request_cls, handler_cls = _vision_classes()
         req = request_cls.alloc().init()
-        req.setRecognitionLevel_(0)  # accurate
-        req.setUsesLanguageCorrection_(True)
+        configure_ocr(req)
         handler = handler_cls.alloc().initWithURL_options_(NSURL.fileURLWithPath_(path), NSDictionary.dictionary())
         ok = handler.performRequests_error_([req], None)
         if not (ok[0] if isinstance(ok, tuple) else ok):

@@ -283,6 +283,95 @@ class MicTestOwnershipTests(Base):
         self.assertFalse(self.d.test_button.isEnabled())  # still waiting for its own test
 
 
+class TeachJevTests(Base):
+    def setUp(self):
+        super().setUp()
+        import queue
+        self.d.worker_started, self.d.controls = True, queue.Queue()
+
+    def takes(self):
+        out = []
+        while not self.d.controls.empty():
+            kind, reply = self.d.controls.get_nowait()
+            self.assertEqual(kind, "mic_test")  # transcript-only capture; nothing is dispatched
+            out.append(reply)
+        return out
+
+    def run_takes(self, results):
+        self.d.teachWake_(None)
+        for r in results:
+            (reply,) = self.takes()  # one take at a time, the next only after this one's result
+            reply(r)
+            self.assertTrue(pump(lambda: not self.d.controls.empty() or self.d.teach.get("done")))
+
+    def test_needs_the_worker_and_a_saved_phrase(self):
+        self.d.worker_started = False
+        self.d.teachWake_(None)
+        self.assertEqual(self.d.settings_message.stringValue(), "Hey Jev isn't running yet.")
+        self.d.worker_started = True
+        self.d.wake_field.setStringValue_("Okay Zorblat")  # typed, not saved
+        self.d.teachWake_(None)
+        self.assertIn("Save first", self.d.settings_message.stringValue())
+        self.assertEqual(self.takes(), [])
+
+    def test_five_takes_suggest_unchecked_spellings_and_count_skips(self):
+        heard = [{"text": "Hey Jev"}, {"text": "Hey Jazz"}, {"error": "Busy right now."}, {"text": "Hey Jazz"},
+                 {"text": "Hey Jev"}]
+        self.run_takes(heard)
+        self.assertEqual(self.d.teach_status.stringValue(), "Heard it 2 of 4 takes. 1 take skipped (nothing heard or "
+                         "the mic was busy). Tick any spelling that was really you, then Add Selected.")
+        (box, alias), = self.d.teach_boxes
+        self.assertEqual((box.title(), box.state(), alias), ("\u201cHey Jazz\u201d \u00d72", 0, "Hey Jazz"))
+        self.assertFalse(self.d.teach_add.isEnabled())  # nothing is added without a tick
+        box.setState_(1)
+        self.d.teachTicked_(box)
+        with patch.object(assistant_ui, "save_wake_settings") as save:
+            self.d.teachAdd_(None)
+        save.assert_not_called()  # the user saves as usual
+        self.assertEqual(self.d.alias_field.stringValue(), "Hey Jazz")
+        self.assertEqual(self.d.settings_message.stringValue(), "Added 1 spelling. Save to apply.")
+        self.assertIsNone(self.d.teach)
+
+    def test_all_matched(self):
+        self.run_takes([{"text": "Hey Jev"}] * 5)
+        self.assertEqual(self.d.teach_status.stringValue(), "Hey Jev already hears you: 5 of 5 takes matched.")
+        self.assertEqual(self.d.teach_boxes, [])
+
+    def test_stop_mid_sequence_ignores_late_takes(self):
+        self.d.teachWake_(None)
+        (reply,) = self.takes()
+        self.d.teachClose_(None)
+        reply({"text": "Hey Jazz"})
+        pump(lambda: False, 0.2)
+        self.assertEqual(self.takes(), [])  # no further take was started
+        self.assertIsNone(self.d.teach)
+
+    def test_close_and_reopen_ignores_the_old_session(self):
+        self.d.teachWake_(None)
+        (old,) = self.takes()
+        self.d.closeSettings_(None)
+        self.d._show_settings()
+        self.d.teachWake_(None)
+        (new,) = self.takes()
+        old({"text": "Hey Jazz"})
+        pump(lambda: False, 0.2)
+        self.assertEqual(self.d.teach["take"], 1)
+        self.assertEqual(self.d.teach["texts"], [])
+        self.assertEqual(self.takes(), [])
+
+    def test_respects_the_six_spelling_limit(self):
+        self.d.alias_field.setStringValue_("")
+        self.run_takes([{"text": "Hey Jazz"}, {"text": "Hey Jams"}, {"text": "Hey Jazz"}, {"text": "Hey Jams"},
+                        {"text": "Hey Jev"}])
+        full = "A One, B Two, C Three, D Four, E Five"
+        self.d.alias_field.setStringValue_(full)
+        for box, _ in self.d.teach_boxes:
+            box.setState_(1)
+        self.d.teachAdd_(None)
+        self.assertEqual(self.d.alias_field.stringValue(), full + ", Hey Jazz")
+        self.assertIn("1 didn't fit: up to 6 extra spellings", self.d.settings_message.stringValue())
+
+
 class PlaySampleOwnerTests(unittest.TestCase):
     """play_sample against the real Floor with a fake recorder: the wake listener must not hear the sample."""
 

@@ -134,6 +134,7 @@ def glass_backdrop(window, content):
 
 
 PANE_W, PANE_H, FOOTER_H = 580, 600, 56
+TEACH_TAKES = 5
 OPS = itertools.count(1)  # async Settings operations: ids are never reused, even across window sessions
 GROUP_X, CONTROL_W = 20, 250
 SCREEN_EFFECTS = frozenset({"click", "type", "submit", "scroll", "task", "in_task", "risky"})
@@ -169,10 +170,13 @@ def form_group(parent, top, header, rows, row_h=40):
         top += 22
     box = GroupView.alloc().initWithFrame_(NSMakeRect(GROUP_X, top, width, row_h * len(rows)))
     parent.addSubview_(box)
-    for i, (title, control) in enumerate(rows):
+    for i, (title, control, *tip) in enumerate(rows):  # an optional third item is the title's tooltip
         y = i * row_h
         if title:
-            box.addSubview_(text(title, NSMakeRect(14, y + (row_h - 17) / 2, width - CONTROL_W - 40, 17), 13))
+            label_view = text(title, NSMakeRect(14, y + (row_h - 17) / 2, width - CONTROL_W - 40, 17), 13)
+            if tip:
+                label_view.setToolTip_(tip[0])
+            box.addSubview_(label_view)
         f = control.frame()
         control.setFrame_(NSMakeRect(width - 14 - f.size.width, y + (row_h - f.size.height) / 2, f.size.width,
                                      f.size.height))
@@ -818,8 +822,14 @@ class AppDelegate(NSObject):
                                      "Only these exact spellings count.")
         reset = NSButton.buttonWithTitle_target_action_("Use \u201cHey Jev\u201d", self, "resetWake:")
         reset.setToolTip_("Put back the default phrase and clear the extra spellings. Save to apply.")
+        teach = NSButton.buttonWithTitle_target_action_("Teach Jev\u2026", self, "teachWake:")
+        teach.setToolTip_("Say your phrase 5 times; Hey Jev suggests spellings it heard that you can add.")
+        wake_buttons = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, CONTROL_W, 28))
+        for view, x in ((teach, 0), (reset, CONTROL_W - 124)):
+            view.setFrame_(NSMakeRect(x, 0, 124 if view is reset else CONTROL_W - 132, 28))
+            wake_buttons.addSubview_(view)
         y = form_group(h, y + 28, "Wake phrase", [("Phrase", self.wake_field), ("Also accept", self.alias_field),
-                                                   ("Default", reset)])
+                                                   ("", wake_buttons)])
         footnote(h, y, "1 to 4 words. A single short or common word can wake Hey Jev by accident.")
         y += 8
         self.test_button = NSButton.buttonWithTitle_target_action_("Test Microphone", self, "micTest:")
@@ -1153,8 +1163,10 @@ class AppDelegate(NSObject):
             remove = NSButton.buttonWithTitle_target_action_("Remove", self, "removeAppFolder:")
             remove.setTag_(i)
             remove.setAccessibilityLabel_(f"Remove {path}")
-            shown = "~" + path[len(home):] if path.startswith(home + "/") else path
-            rows.append((shown, remove))
+            full = "~" + path[len(home):] if path.startswith(home + "/") else path
+            parent = os.path.basename(os.path.dirname(path.rstrip("/")))
+            rows.append((f"{os.path.basename(path.rstrip('/')) or path}  \u00b7  {parent}" if parent else full, remove, full))
+            remove.setToolTip_(f"Remove {full}")
         add = NSButton.buttonWithTitle_target_action_("Add Folder…", self, "addAppFolder:")
         add.setEnabled_(len(self.folder_drafts) < MAX_APP_FOLDERS)
         rows.append(("" if self.folder_drafts else "None added", add))
@@ -1213,6 +1225,145 @@ class AppDelegate(NSObject):
         self.apps_found.setStringValue_(f"{payload['count']} apps" + (f" · {', '.join(missed)} unavailable" if missed else ""))
         self.apps_found.setToolTip_(self.apps_found.stringValue())
 
+    # Teach Jev: 5 transcript-only takes through the mic test, then spellings the user may add.
+    def teachWake_(self, _sender):
+        import wake
+        phrase, aliases = wake_settings()
+        if not self.worker_started:
+            self.settings_message.setStringValue_("Hey Jev isn't running yet.")
+            return
+        try:
+            unsaved = (wake.validate(self.wake_field.stringValue()), wake.parse_aliases(self.alias_field.stringValue())) \
+                != (phrase, list(aliases))
+        except ValueError:
+            unsaved = True
+        if unsaved:
+            self.settings_message.setStringValue_("Save first: Teach Jev listens for the saved phrase.")
+            return
+        self.teach = {"op": next(OPS), "phrase": phrase, "aliases": list(aliases), "texts": [], "skipped": 0, "take": 0}
+        self._show_teach_sheet()
+        self._teach_next()
+
+    @objc.python_method
+    def _show_teach_sheet(self):
+        panel = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+            NSMakeRect(0, 0, 420, 300), NSWindowStyleMaskTitled, NSBackingStoreBuffered, False)
+        panel.setReleasedWhenClosed_(False)
+        content = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, 420, 300))
+        panel.setContentView_(content)
+        content.addSubview_(text("Teach Jev your wake phrase", NSMakeRect(20, 18, 380, 20), 15, weight=0.3))
+        self.teach_status = text("", NSMakeRect(20, 46, 380, 56), 13, NSColor.secondaryLabelColor())
+        self.teach_status.setLineBreakMode_(0)
+        self.teach_status.cell().setWraps_(True)
+        content.addSubview_(self.teach_status)
+        self.teach_list = FlippedView.alloc().initWithFrame_(NSMakeRect(20, 108, 380, 140))
+        content.addSubview_(self.teach_list)
+        self.teach_boxes = []
+        self.teach_add = NSButton.buttonWithTitle_target_action_("Add Selected", self, "teachAdd:")
+        self.teach_add.setFrame_(NSMakeRect(300, 254, 104, 28))
+        self.teach_add.setEnabled_(False)
+        self.teach_close = NSButton.buttonWithTitle_target_action_("Stop", self, "teachClose:")
+        self.teach_close.setFrame_(NSMakeRect(196, 254, 96, 28))
+        self.teach_close.setKeyEquivalent_("\x1b")
+        for view in (self.teach_add, self.teach_close):
+            content.addSubview_(view)
+        self.teach_sheet = panel
+        self.settings_sheet.beginSheet_completionHandler_(panel, None)
+
+    @objc.python_method
+    def _teach_next(self):
+        t = self.teach
+        t["take"] += 1
+        self.teach_status.setStringValue_(f"Say \u201c{t['phrase']}\u201d once, then wait ({t['take']} of {TEACH_TAKES})\u2026")
+        op = t["op"]
+        self.controls.put(("mic_test", lambda r: self.performSelectorOnMainThread_withObject_waitUntilDone_(
+            "teachTake:", {"op": op, "result": r}, False)))
+
+    def teachTake_(self, payload):
+        t = getattr(self, "teach", None)
+        if t is None or payload["op"] != t["op"] or not getattr(self, "settings_sheet", None):
+            return  # stopped, closed, or from an earlier session
+        r = payload["result"]
+        if r.get("error") or not (r.get("text") or "").strip():
+            t["skipped"] += 1
+        else:
+            t["texts"].append(r["text"])
+        if t["take"] < TEACH_TAKES:
+            self._teach_next()
+        else:
+            self._teach_finish()
+
+    @objc.python_method
+    def _teach_finish(self):
+        import wake
+        t = self.teach
+        result = wake.learn(t["phrase"], t["aliases"], t["texts"])
+        t["done"] = True
+        heard, matched = result["takes"], result["matched"]
+        skipped = f" {t['skipped']} take{'s' * (t['skipped'] != 1)} skipped (nothing heard or the mic was busy)." \
+            if t["skipped"] else ""
+        if not heard:
+            line = "Nothing was heard." + skipped
+        elif matched == heard and not result["candidates"]:
+            line = f"Hey Jev already hears you: {matched} of {heard} takes matched." + skipped
+        else:
+            line = f"Heard it {matched} of {heard} takes." + skipped
+            line += " Tick any spelling that was really you, then Add Selected." if result["candidates"] else \
+                " No new spellings to suggest."
+        self.teach_status.setStringValue_(line)
+        for i, c in enumerate(result["candidates"][:5]):
+            box = NSButton.checkboxWithTitle_target_action_(f"\u201c{c['alias']}\u201d \u00d7{c['count']}", self,
+                                                           "teachTicked:")
+            box.setFrame_(NSMakeRect(0, i * 28, 380, 22))
+            box.setState_(0)  # never pre-checked
+            self.teach_list.addSubview_(box)
+            self.teach_boxes.append((box, c["alias"]))
+        self.teach_close.setTitle_("Close")
+
+    def teachTicked_(self, _sender):
+        self.teach_add.setEnabled_(any(b.state() for b, _ in self.teach_boxes))
+
+    def teachAdd_(self, _sender):
+        import wake
+        picked = [alias for box, alias in self.teach_boxes if box.state()]
+        if not picked:
+            return
+        try:
+            current = wake.parse_aliases(self.alias_field.stringValue())
+        except ValueError:
+            current = []
+        have = {" ".join(wake.words(a)) for a in current + [self.teach["phrase"]]}
+        added, full = [], 0
+        for alias in picked:
+            if " ".join(wake.words(alias)) in have:
+                continue
+            if len(current) >= wake.MAX_ALIASES:
+                full += 1
+                continue
+            current.append(alias)
+            added.append(alias)
+            have.add(" ".join(wake.words(alias)))
+        self.alias_field.setStringValue_(", ".join(current))
+        self._end_teach()
+        msg = f"Added {len(added)} spelling{'s' * (len(added) != 1)}. Save to apply." if added else "Nothing new to add."
+        if full:
+            msg += f" {full} didn't fit: up to {wake.MAX_ALIASES} extra spellings."
+        self.settings_message.setStringValue_(msg)
+
+    def teachClose_(self, _sender):
+        self._end_teach()
+
+    @objc.python_method
+    def _end_teach(self):
+        """Stop or close: later takes are ignored, and nothing heard is kept."""
+        self.teach = None
+        sheet = getattr(self, "teach_sheet", None)
+        self.teach_sheet = None
+        if sheet is not None:
+            if getattr(self, "settings_sheet", None):
+                self.settings_sheet.endSheet_(sheet)
+            sheet.orderOut_(None)
+
     def resetWake_(self, _sender):
         import wake
         self.wake_field.setStringValue_(wake.DEFAULT)
@@ -1243,6 +1394,7 @@ class AppDelegate(NSObject):
         """Unsaved edits are dropped and any model fetch in flight is ignored when it lands."""
         self.fetch_generation += 1
         self.ops = {}
+        self._end_teach()
         if getattr(self, "sample_op", None) is not None:
             self.sample_op.cancel()
         self.sample_op = None

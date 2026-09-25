@@ -892,6 +892,21 @@ class VoiceCueTests(Base):
         self.save()
         voice_output.set_cues.assert_called_once_with("fish", "none", [])
 
+    def test_second_save_in_an_open_window_compares_with_what_was_saved(self):
+        def saved(provider, mode, on=()):
+            self.saved_cues = {"mode": mode, "on": list(on) if mode == "some" else
+                               list(voice_output.CUES["fish"]) if mode == "all" else []}
+        voice_output.set_cues.side_effect = saved
+        self.d.wake_field.setStringValue_("Jo")  # the short-phrase warning keeps Settings open after Save
+        self.d.cue_mode.selectItemAtIndex_(2)
+        self.save()
+        self.assertIsNotNone(self.d.settings_sheet)
+        self.assertEqual(self.saved_cues["mode"], "none")
+        self.d.cue_mode.selectItemAtIndex_(0)  # back to All in the same window
+        self.save()
+        self.assertEqual(voice_output.set_cues.call_args_list[-1].args, ("fish", "all", []))
+        self.assertEqual(self.saved_cues["mode"], "all")
+
     def test_saved_some_is_shown_as_saved(self):
         self.d.closeSettings_(None)
         self.saved_cues = {"mode": "some", "on": ["cheerful"]}

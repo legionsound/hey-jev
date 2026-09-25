@@ -1495,8 +1495,8 @@ class AppDelegate(NSObject):
                 if model != jev_model(provider):
                     save_jev_model(provider, model)
             mode, on = self._cue_choice()
-            start = self.cue_start
-            if (mode, on) != (start["mode"], start["on"] if start["mode"] == "some" else []):
+            saved = voice_output.cues("fish")  # live value: an earlier Save in this window may have changed it
+            if (mode, on) != (saved["mode"], saved["on"] if saved["mode"] == "some" else []):
                 voice_output.set_cues("fish", mode, on)  # the next spoken line follows it
             if self.fish_model_popup.titleOfSelectedItem() != fish_model():
                 save_fish_model(self.fish_model_popup.titleOfSelectedItem())

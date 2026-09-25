@@ -102,7 +102,8 @@ def bounded(fn, deadline, *args, effect=False):
     return box["ok"]
 
 
-_tokens = []  # [(element, token)], oldest first; equality is the AX element's own
+_tokens = {}  # element -> token, oldest first. AX elements hash with CFHash and compare with CFEqual (checked
+_elements = {}  # token -> element                  2026-09-25), so a lookup is the element's own identity
 _token_lock = threading.Lock()
 _next_token = [0]  # never reused, whatever the cache size
 TOKEN_CAP = 4000
@@ -111,19 +112,21 @@ TOKEN_CAP = 4000
 def token(element):
     """A local id for this exact element, never reused. Once evicted, an element's old token names nothing."""
     with _token_lock:
-        for el, tok in _tokens:
-            if el == element:
-                return tok
+        tok = _tokens.get(element)
+        if tok is not None:
+            return tok
         _next_token[0] += 1
         tok = f"e{_next_token[0]}"
-        _tokens.append((element, tok))
-        del _tokens[:-TOKEN_CAP]
+        _tokens[element], _elements[tok] = tok, element
+        while len(_tokens) > TOKEN_CAP:
+            old = next(iter(_tokens))
+            _elements.pop(_tokens.pop(old), None)
         return tok
 
 
 def element_for(tok):
     with _token_lock:
-        return next((el for el, t in _tokens if t == tok), None)
+        return _elements.get(tok)
 
 
 def process_start(pid, deadline):
@@ -593,14 +596,9 @@ def _ax_window(pid, frame):
     AS = _AS()
     app_el = AS.AXUIElementCreateApplication(pid)
     AS.AXUIElementSetMessagingTimeout(app_el, AX_MESSAGE_TIMEOUT)
-    best = None
-    for w in _attr(app_el, "AXWindows") or []:
-        f = _frame(w)
-        if f:
-            d = sum(abs(a - b) for a, b in zip(f, frame))
-            if best is None or d < best[0]:
-                best = (d, w)
-    return best[1] if best and best[0] <= 8 else None
+    near = [w for w in _attr(app_el, "AXWindows") or [] for f in [_frame(w)]
+            if f and sum(abs(a - b) for a, b in zip(f, frame)) <= 8]
+    return near[0] if len(near) == 1 else None  # two same-sized windows (two maximized ones) can't be told apart
 
 
 def _covered(frame, above):
@@ -618,7 +616,7 @@ BACK_WALK = 0.4  # seconds each window behind the front one may take to walk
 def front_with_text(pid, deadline):
     """The front window's controls now, its text off the pixels in the background (Vision runs natively, so it
     overlaps the reads of the windows behind). -> (snapshot without text, finish()); finish() waits for the text,
-    still under the deadline, and returns the full snapshot."""
+    still under the deadline, and returns the full snapshot (new items: the caller filters them again)."""
     part = _observe_ax(pid, deadline)
     box = {}
 
@@ -661,6 +659,7 @@ def observe_desktop(deadline=None, front_ocr=False):
                 continue
             if front and front_ocr:
                 snap, finish = front_with_text(pid, deadline)
+                front_snap, front_at = snap, len(above)
             else:
                 snap = observe(pid=pid, ocr=False, deadline=deadline, window=ax, walk_cap=None if front else BACK_WALK)
         except (Unavailable, TimedOut, Wedged):
@@ -671,8 +670,11 @@ def observe_desktop(deadline=None, front_ocr=False):
             snap.items = [i for i in snap.items if not _covered(i.frame, above)]
         snaps.append(snap)
         above.append(frame)
-    if finish is not None:  # the front window is never covered: its full read replaces the text-less one as is
-        snaps[0] = finish()
+    if finish is not None:  # the full read replaces the text-less one, minus anything a window above it covers
+        full, k = finish(), next(k for k, s in enumerate(snaps) if s is front_snap)
+        cover = above[:front_at]
+        full.items = [i for i in full.items if not _covered(i.frame, cover)] if cover else full.items
+        snaps[k] = full
     return snaps, skipped
 
 
@@ -711,9 +713,10 @@ def scope_of(item, snap):
 def still_visible(pid, window_frame, item_frame, deadline):
     """Whether this window is still on screen and nothing now stacked above it covers the control's centre."""
     wins = bounded(visible_windows, deadline)
-    at = next((n for n, (p, f) in enumerate(wins)
-               if p == pid and sum(abs(a - b) for a, b in zip(f, window_frame)) <= 8), None)
-    return at is not None and not _covered(item_frame, [f for _, f in wins[:at]])
+    at = [n for n, (p, f) in enumerate(wins) if p == pid and sum(abs(a - b) for a, b in zip(f, window_frame)) <= 8]
+    if len(at) != 1:  # gone, or two same-sized windows of that app: which one it is can't be known, so not visible
+        return False
+    return not _covered(item_frame, [f for _, f in wins[:at[0]]])
 
 
 _shown = {}  # version -> Snapshot, the last few lists put in front of the user
@@ -916,7 +919,8 @@ def in_front(pid, window_ref, deadline):
 def bring_forward(pid, window_ref, deadline):
     """Make this window the frontmost app's focused window, through Accessibility (an agent app can't take focus
     with activate()). Needed before a keyboard press: keys go to the focused window, never a background one. Waits
-    until macOS reports it in front. -> True once it is, False if it never got there (nothing else was done)."""
+    until macOS reports it in front. -> True once it is, False if it never got there (the raise may still have
+    moved windows: callers report that)."""
     def run():
         AS = _AS()
         app_el = AS.AXUIElementCreateApplication(pid)

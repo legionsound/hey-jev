@@ -487,9 +487,9 @@ def _choice(snap, item):
     return {"name": f"{item.label} ({where})", "where": where, "target": _screen_target(snap, item)}
 
 
-def resolve_pinned(t):
+def resolve_pinned(t, deadline=None):
     """An answer to "which one?": the exact control offered then, only if it is still there, unchanged."""
-    deadline = resolve_deadline()
+    deadline = deadline or resolve_deadline()
     try:
         snap = _target_window(t, deadline)
     except (screen.Unavailable, screen.TimedOut, screen.Wedged) as exc:
@@ -600,11 +600,7 @@ def resolve_screen_press(args):
     if "pinned" in args:
         return resolve_pinned(args["pinned"])
     deadline = resolve_deadline()
-    try:
-        snap = screen.observe(ocr=False, deadline=deadline)
-    except (screen.Unavailable, screen.TimedOut, screen.Wedged) as exc:
-        return ("none", f"can't read the screen: {exc}")
-    controls = [i for i in snap.items if _live(i)]
+    seen = None
     if args.get("number") is not None:
         shown = _shown_list(args)
         if shown == "stale":
@@ -615,7 +611,13 @@ def resolve_screen_press(args):
         if seen.source == "ocr":
             return ("none", "not_a_control")
         if seen.home is not None:  # a desktop list: that exact control, re-read in its own window, wherever it is now
-            return resolve_pinned(_screen_target(seen.home, seen))
+            return resolve_pinned(_screen_target(seen.home, seen), deadline)
+    try:
+        snap = screen.observe(ocr=False, deadline=deadline)
+    except (screen.Unavailable, screen.TimedOut, screen.Wedged) as exc:
+        return ("none", f"can't read the screen: {exc}")
+    controls = [i for i in snap.items if _live(i)]
+    if seen is not None:
         if (shown.pid, shown.started, shown.window_token) != (snap.pid, snap.started, snap.window_token):
             return ("none", "screen_changed")
         now = next((i for i in controls if i.token == seen.token and i.key() == seen.key()), None)
@@ -752,6 +754,14 @@ def _took_raise(t):
 
 
 def run_screen_press(t, deadline):
+    try:
+        _run_press(t, deadline)
+    except Exception:
+        _raised.discard(id(t))  # no verify will follow to collect it; the failure message carries the raise
+        raise
+
+
+def _run_press(t, deadline):
     ref = _find(t, deadline)
     try:
         before = (screen.signature(t["pid"], deadline), screen.element_state(ref, deadline))
@@ -761,28 +771,31 @@ def run_screen_press(t, deadline):
         web = screen.chromium_page(t["pid"], ref, deadline)
     except (screen.TimedOut, screen.Wedged) as exc:
         raise Failed(f"screen read failed before the press: {exc}")
+    raised = ""  # once a raise was attempted, every report says so: the press failed, but the window moved
+    _raised.discard(id(t))
     if web:  # keys go to the focused window only: a page in a window behind is brought to the front first
         win = screen.element_for(t["window"])
         try:
             if win is None:
                 raise Failed("that window is gone, so nothing was pressed")
             if not screen.in_front(t["pid"], win, deadline):
-                if not screen.bring_forward(t["pid"], win, deadline):
-                    raise Failed("that window wouldn't come to the front, so nothing was pressed")
+                raised = f" (I brought {t.get('app') or 'that app'} to the front)"
                 _raised.add(id(t))
+                if not screen.bring_forward(t["pid"], win, deadline):
+                    raise Failed("that window wouldn't come to the front, so nothing was pressed" + raised)
         except (screen.TimedOut, screen.Wedged) as exc:
-            raise Failed(f"couldn't bring that window forward, so nothing was pressed ({exc})")
+            raise Failed(f"couldn't bring that window forward, so nothing was pressed{raised} ({exc})")
     _pressed[id(t)] = (before, time.monotonic(), ref)
     try:
         err = screen.page_key(t["pid"], ref, t["role"], deadline) if web else screen.press(ref, deadline)
     except screen.Wedged as exc:
-        raise Failed(str(exc))  # refused before sending: nothing was pressed
+        raise Failed(str(exc) + raised)  # refused before sending: nothing was pressed
     except screen.TimedOut as exc:
-        raise Uncertain(f"the app did not answer the press in time ({exc})")
+        raise Uncertain(f"the app did not answer the press in time ({exc}){raised}")
     if err == screen.NOT_FOCUSED:
-        raise Failed("the page wouldn't focus that control, so nothing was pressed")
+        raise Failed("the page wouldn't focus that control, so nothing was pressed" + raised)
     if err == screen.TOO_LATE:
-        raise Failed("the page took too long to focus that control, so nothing was pressed")
+        raise Failed("the page took too long to focus that control, so nothing was pressed" + raised)
     if err in AX_GONE:
         raise Failed(f"the app refused the press (AX error {err})")
     if err != 0:

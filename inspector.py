@@ -26,7 +26,9 @@ _ops = itertools.count(1)  # generation numbers, never reused
 class Numbering:
     """Stable numbers: an element keeps its number while it stays in view; new elements get the next free number;
     a number isn't reused until numbering restarts (the app or window changes). A desktop view spans every window, so
-    it never restarts on focus changes: each item is keyed by its own window as well."""
+    it never restarts on focus changes: each item is keyed by its own window as well, and a new item takes the lowest
+    free number (safe: a spoken number is bound to the exact list shown, and a list that changed mid-sentence is
+    refused)."""
 
     def __init__(self):
         self.scope, self.numbers, self.next = None, {}, 1
@@ -35,17 +37,22 @@ class Numbering:
         scope = "desktop" if snap.desktop else (snap.pid, snap.started, snap.window_token)
         if scope != self.scope:
             self.scope, self.numbers, self.next = scope, {}, 1
-        seen = set()
-        for i in snap.items:
-            key = (screen.scope_of(i, snap),
-                   i.token if i.ref is not None else ("ocr", i.label, tuple(round(v) for v in i.frame)))
-            if key not in self.numbers:
-                self.numbers[key] = self.next
-                self.next += 1
-            i.n = self.numbers[key]
-            seen.add(key)
+        keys = [(screen.scope_of(i, snap),
+                 i.token if i.ref is not None else ("ocr", i.label, tuple(round(v) for v in i.frame)))
+                for i in snap.items]
+        seen = set(keys)
         for key in [k for k in self.numbers if k not in seen]:  # gone from view: its number retires
             del self.numbers[key]
+        used = set(self.numbers.values())
+        free = (n for n in itertools.count(1) if n not in used)
+        for i, key in zip(snap.items, keys):
+            if key not in self.numbers:
+                if snap.desktop:  # the lowest free number: a busy page mustn't push numbers into the thousands
+                    self.numbers[key] = next(free)
+                else:
+                    self.numbers[key] = self.next
+                    self.next += 1
+            i.n = self.numbers[key]
         return snap
 
 

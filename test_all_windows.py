@@ -210,5 +210,95 @@ class OverlayTests(unittest.TestCase):
         self.assertEqual(len(assistant_ui.numbers_window(view).windows), 2)
 
 
+class ReviewFixTests(unittest.TestCase):
+    """Independent review of 8d1c0e5."""
+
+    def setUp(self):
+        p = patch.object(diagnostics, "record", lambda *a, **k: None)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_two_same_sized_windows_of_one_app_are_never_guessed_between(self):
+        a, b = object(), object()
+        frames = {a: (0, 0, 800, 600), b: (0, 0, 800, 600)}
+
+        class AS:
+            AXUIElementCreateApplication = staticmethod(lambda pid: "app")
+            AXUIElementSetMessagingTimeout = staticmethod(lambda el, t: 0)
+        with patch.object(screen, "_AS", lambda: AS), patch.object(screen, "_attr", lambda el, n: [a, b]), \
+                patch.object(screen, "_frame", lambda w: frames[w]):
+            self.assertIsNone(screen._ax_window(1, (0, 0, 800, 600)))
+            frames[b] = (900, 0, 800, 600)
+            self.assertIs(screen._ax_window(1, (0, 0, 800, 600)), a)
+        wins = [(1, (0, 0, 800, 600)), (1, (0, 0, 800, 600))]
+        with patch.object(screen, "visible_windows", lambda: wins):
+            self.assertFalse(screen.still_visible(1, (0, 0, 800, 600), (10, 10, 5, 5), time.monotonic() + 1))
+
+    def test_a_front_window_under_an_unread_one_keeps_its_covered_items_out(self):
+        pages = snap([item(1, "Under", frame=(100, 100, 40, 20)), item(2, "Clear", frame=(700, 500, 40, 20))],
+                     pid=1, window="Doc", app="Pages")
+        wins = [(9, (0, 0, 400, 300)), (1, (0, 0, 800, 600))]  # pid 9's window is on top but can't be read
+        with patch.object(screen, "trusted", lambda: True), patch.object(screen, "frontmost", lambda: (1, "x", "x")), \
+                patch.object(screen, "visible_windows", lambda: wins), \
+                patch.object(screen, "_ax_window", lambda pid, frame: None), \
+                patch.object(screen, "front_with_text", lambda pid, d: (
+                    snap(list(pages.items), pid=1, window="Doc"), lambda: snap(list(pages.items), pid=1, window="Doc"))):
+            snaps, skipped = screen.observe_desktop(front_ocr=True)
+        self.assertEqual(([i.label for i in snaps[0].items], skipped), (["Clear"], 1))
+
+    def test_desktop_numbers_take_the_lowest_free_number(self):
+        num = inspector.Numbering()
+        first = snap([item(0, "a"), item(0, "b"), item(0, "c")])
+        first.desktop = True
+        num.apply(first)
+        self.assertEqual([i.n for i in first.items], [1, 2, 3])
+        second = snap([first.items[0], item(0, "d"), first.items[2]])
+        second.desktop = True
+        num.apply(second)
+        self.assertEqual([i.n for i in second.items], [1, 2, 3])  # b left, so d takes its 2
+        third = snap([second.items[1], item(0, "e")])
+        third.desktop = True
+        num.apply(third)
+        self.assertEqual([i.n for i in third.items], [2, 1])  # d keeps 2; e takes the lowest free
+
+    def listed(self):
+        pages = snap([item(1, "Save")], pid=1, window="Doc", app="Pages")
+        mail = snap([item(1, "Send", frame=(900, 500, 60, 20))], pid=2, window="Draft", app="Mail")
+        focused = snap([item(1, "Inbox")], pid=2, window="Inbox", app="Mail")
+        view = desktop([(1, (0, 0, 800, 600)), (2, (850, 350, 600, 400))], {1: pages, 2: mail}, 1)
+        screen.remember(view)
+        return pages, mail, focused
+
+    def test_a_number_in_a_background_window_rereads_that_window_even_when_the_front_is_unreadable(self):
+        pages, mail, focused = self.listed()
+        reads, deadlines = [], []
+
+        def observe(pid=None, ocr=True, deadline=None, window=None, walk_cap=None):
+            reads.append((pid, window is not None))
+            deadlines.append(deadline)
+            if pid is None:
+                raise screen.Unavailable("no window")
+            return mail if window is not None else focused  # Mail's focused window is another one
+        with patch.object(screen, "observe", observe), patch.object(actions, "VISIBLE", lambda *a: True):
+            got = actions.resolve_screen_press({"number": 2})
+        self.assertEqual((got[0], got[1]["label"]), ("target", "Send"))
+        self.assertEqual(reads, [(2, False), (2, True)])  # never needed the front; re-read in its own window
+        self.assertEqual(len(set(deadlines)), 1)  # one budget for the whole resolve
+
+    def test_a_raise_that_fails_says_the_window_moved(self):
+        mail = snap([item(2, "Watch", role="AXLink")], pid=2, window="Draft", app="Mail")
+        t = actions._screen_target(mail, mail.items[0])
+        with patch.object(actions, "_find", lambda t, d: mail.items[0].ref), \
+                patch.object(screen, "signature", lambda pid, d: {}), patch.object(screen, "element_state", lambda r, d: {}), \
+                patch.object(screen, "chromium_page", lambda pid, ref, d: True), \
+                patch.object(screen, "in_front", lambda pid, win, d: False), \
+                patch.object(screen, "bring_forward", lambda pid, win, d: True), \
+                patch.object(screen, "page_key", lambda *a: screen.NOT_FOCUSED):
+            with self.assertRaises(actions.Failed) as got:
+                actions.run_screen_press(t, time.monotonic() + 2)
+        self.assertIn("I brought Mail to the front", str(got.exception))
+        self.assertNotIn(id(t), actions._raised)
+
+
 if __name__ == "__main__":
     unittest.main()

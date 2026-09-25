@@ -378,7 +378,7 @@ class BoundaryTests(unittest.TestCase):
     real_press = staticmethod(screen.press)
 
     def test_tokens_are_never_reused_and_evicted_ones_go_stale(self):
-        with patch.object(screen, "_tokens", []), patch.object(screen, "_next_token", [0]), \
+        with patch.object(screen, "_tokens", {}), patch.object(screen, "_elements", {}), patch.object(screen, "_next_token", [0]), \
                 patch.object(screen, "TOKEN_CAP", 50):
             objs = [object() for _ in range(52)]
             toks = [screen.token(o) for o in objs]
@@ -386,6 +386,9 @@ class BoundaryTests(unittest.TestCase):
             self.assertIsNone(screen.element_for(toks[0]))  # evicted: names nothing, never a newer element
             self.assertIs(screen.element_for(toks[-1]), objs[-1])
             self.assertEqual(screen.token(objs[-1]), toks[-1])
+            self.assertNotEqual(screen.token(objs[0]), toks[0])  # an evicted element comes back as a new token
+            self.assertLessEqual(len(screen._tokens), 50)
+            self.assertEqual(len(screen._elements), len(screen._tokens))
 
     def test_a_late_press_holds_the_boundary_and_is_never_reported_as_clean(self):
         import threading

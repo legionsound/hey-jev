@@ -10,7 +10,7 @@ Voice control for your Mac. Say "Hey Jev" or hold the right Option key, tell it 
 "Hey Jev, take over: turn on dark mode in System Settings"
 ```
 
-This is a fork of [henryklunaris/hey-jev](https://github.com/henryklunaris/hey-jev). The command engine was rebuilt from scratch. On top of that, the fork adds screen control across every visible window, a command-line bridge into the running app, Apple on-device dictation, answers from Apple's models or a Claude Code or Codex session, and a redesigned Settings window. [CHANGELOG.md](CHANGELOG.md) has the full list.
+This is a fork of [henryklunaris/hey-jev](https://github.com/henryklunaris/hey-jev). The command engine was rebuilt from scratch. On top of that, the fork adds screen control across every visible window, a command-line bridge into the running app, Apple on-device dictation, a wake phrase you choose yourself, answers from Apple's models or a Claude Code or Codex session, and a redesigned Settings window. [CHANGELOG.md](CHANGELOG.md) has the full list.
 
 Hey Jev runs on macOS only (Sequoia or later). It works through Accessibility, AppleScript and the Keychain, so there is no Windows or Linux version.
 
@@ -42,6 +42,10 @@ You decide what needs your OK. Each kind of action (opening apps, quitting apps,
 | Chaining | "pause Spotify, then open Slack". Up to five steps joined with "then", "after that" or ", and". A bare "and" never splits a request, so "play rock and roll" stays one thing. |
 
 Say "stop" at any point to cancel what's running and everything queued behind it.
+
+### Your own wake phrase
+
+"Hey Jev" is only the default. In Settings > Transcription you can change it to anything up to four words, like "Computer" or "Okay Mac", and it takes effect right away without a restart. Speech recognition doesn't always spell unusual words the same way, so you can add up to six extra spellings it should also accept. Or press Teach Jev, say your phrase five times, and Hey Jev shows the spellings it actually heard so you can add them with one click. Very short or common words still work, but it warns you they may wake it by accident.
 
 ### Screen control
 
@@ -93,7 +97,7 @@ The first time you open it:
 
 Settings > Permissions shows all of these in one place, with the current status of each and a button to request it or jump to the right page in System Settings.
 
-Finally, pick how you want to talk to it using the switch in the main window. **Hold Option** listens while you hold the right Option key. **Hey Jev** listens all the time for the wake phrase, which you can change in Settings, or teach it by saying it a few times.
+Finally, pick how you want to talk to it using the switch in the main window. **Hold Option** listens while you hold the right Option key. **Hey Jev** listens all the time for your wake phrase.
 
 ## Command line
 

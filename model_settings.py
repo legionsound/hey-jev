@@ -197,3 +197,120 @@ def tiebreak_threshold():
 
 def save_tiebreak_threshold(value):
     PREFS.setInteger_forKey_(max(TIEBREAK_MIN, min(TIEBREAK_MAX, int(round(value)))), "tiebreak_threshold")
+
+
+def advanced_open():
+    """Whether Settings shows the Advanced answer parameters expanded. Collapsed by default."""
+    return bool(PREFS.boolForKey_("settings_advanced_open"))
+
+
+def save_advanced_open(value):
+    PREFS.setBool_forKey_(bool(value), "settings_advanced_open")
+
+
+DEFAULT_VOICE = {"id": "9a9cf47702da476aa4629e2506d4a857", "title": "Hey Jev voice"}
+VOICE_ID_RE = re.compile(r"[A-Za-z0-9_-]{8,64}")
+
+
+def voice():
+    """-> {"id", "title"} of the Fish Audio voice Jev speaks with. Invalid storage falls back to the default."""
+    try:
+        saved = json.loads(PREFS.stringForKey_("fish_voice") or "{}")
+        if VOICE_ID_RE.fullmatch(saved["id"]) and isinstance(saved.get("title"), str):
+            return {"id": saved["id"], "title": saved["title"][:80] or saved["id"]}
+    except (ValueError, KeyError, TypeError):
+        pass
+    return dict(DEFAULT_VOICE)
+
+
+def save_voice(voice_id, title):
+    if not isinstance(voice_id, str) or not VOICE_ID_RE.fullmatch(voice_id):
+        raise ValueError("That voice ID isn't valid.")
+    PREFS.setObject_forKey_(json.dumps({"id": voice_id, "title": str(title)[:80]}), "fish_voice")
+
+
+MAX_APP_FOLDERS = 6
+
+
+def app_folders():
+    """User-added folders app discovery also scans (app_catalog reads the same key)."""
+    raw = PREFS.arrayForKey_("app_folders")
+    return [str(p) for p in raw] if raw is not None else []
+
+
+def clean_app_folders(paths):
+    """-> real, existing, de-duplicated absolute folders, at most MAX_APP_FOLDERS. Raises ValueError otherwise."""
+    import os
+    out = []
+    for p in paths:
+        real = os.path.realpath(os.path.expanduser(str(p)))
+        if not os.path.isabs(real) or not os.path.isdir(real):
+            raise ValueError(f"Not a folder: {p}")
+        if real not in out:
+            out.append(real)
+    if len(out) > MAX_APP_FOLDERS:
+        raise ValueError(f"Up to {MAX_APP_FOLDERS} extra app folders.")
+    return out
+
+
+def save_app_folders(paths):
+    paths = clean_app_folders(paths)
+    PREFS.setObject_forKey_(paths, "app_folders")
+    return paths
+
+
+# Models the app uses beyond the answer model. Each default is today's hard-coded value, so nothing changes until
+# the user picks something.
+JEV_MODELS = {"openrouter": "typesafe/jev-1.13", "typesafe": "jev-latest"}
+MODEL_ID_RE = re.compile(r"[A-Za-z0-9._:/+-]{1,80}")
+FISH_MODELS = ("s2.1-pro-free", "s2.1-pro", "s2-pro", "s1", "drama-3-preview")  # docs.fish.audio TTS "model" header
+WHISPER_SIZES = {"tiny.en": "75 MB", "base.en": "145 MB", "small.en": "480 MB", "medium.en": "1.5 GB"}
+OCR_LEVELS = ("accurate", "fast")
+
+
+def _choice(key, allowed, default):
+    saved = PREFS.stringForKey_(key)
+    return saved if saved in allowed else default
+
+
+def jev_model(provider):
+    saved = PREFS.stringForKey_(f"jev_model_{provider}")
+    return saved if isinstance(saved, str) and MODEL_ID_RE.fullmatch(saved) else JEV_MODELS.get(provider, JEV_MODELS["typesafe"])
+
+
+def save_jev_model(provider, model):
+    model = (model or "").strip() or JEV_MODELS[provider]
+    if provider not in JEV_MODELS or not MODEL_ID_RE.fullmatch(model):
+        raise ValueError("Jev model: letters, numbers and . _ : / + - only.")
+    PREFS.setObject_forKey_(model, f"jev_model_{provider}")
+
+
+def fish_model():
+    return _choice("fish_model", FISH_MODELS, FISH_MODELS[0])
+
+
+def save_fish_model(model):
+    if model not in FISH_MODELS:
+        raise ValueError(f"Unknown Fish Audio model: {model}")
+    PREFS.setObject_forKey_(model, "fish_model")
+
+
+def whisper_model():
+    return _choice("whisper_model", WHISPER_SIZES, "small.en")
+
+
+def save_whisper_model(size):
+    if size not in WHISPER_SIZES:
+        raise ValueError(f"Unknown Whisper size: {size}")
+    PREFS.setObject_forKey_(size, "whisper_model")
+
+
+def ocr_level():
+    """Screen text reading: "accurate" (default) or "fast" (quicker, rougher)."""
+    return _choice("ocr_level", OCR_LEVELS, "accurate")
+
+
+def save_ocr_level(level):
+    if level not in OCR_LEVELS:
+        raise ValueError(f"Unknown text reading mode: {level}")
+    PREFS.setObject_forKey_(level, "ocr_level")

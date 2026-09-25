@@ -1057,7 +1057,10 @@ class PickTests(unittest.TestCase):
                  "click the third video in the chrome tab": {"noun": "video", "ordinal": 3, "app": "chrome"},
                  "click the video in the bottom-right": {"noun": "video", "where": "bottom-right"},
                  "play the last song": {"noun": "song", "ordinal": -1},
-                 "open the 2nd result": {"noun": "result", "ordinal": 2}}
+                 "open the 2nd result": {"noun": "result", "ordinal": 2},
+                 "Click on the third YouTube video": {"noun": "video", "kind": "YouTube", "ordinal": 3},
+                 "click the second Nate Herk video in Chrome": {"noun": "video", "kind": "Nate Herk", "ordinal": 2,
+                                                               "app": "Chrome"}}
         for said, want in cases.items():
             self.assertEqual(planner.pick_args(said), want, said)
         for said in ["click the video", "click Save", "click the third"]:
@@ -1068,6 +1071,11 @@ class PickTests(unittest.TestCase):
         v = self.run_pick({"noun": "video", "ordinal": 3}, g)
         self.assertEqual((v["state"], self.presses), ("completed", [g.items[4].ref]))  # Video C starts row two
         self.assertEqual(self.sent[0][0], "video")
+
+    def test_a_qualified_noun_is_what_jev_is_asked_about(self):
+        g = self.grid()
+        v = self.run_pick({"noun": "video", "kind": "YouTube", "ordinal": 3}, g)
+        self.assertEqual((v["state"], self.presses, self.sent[0][0]), ("completed", [g.items[4].ref], "YouTube video"))
 
     def test_the_video_in_the_bottom_right(self):
         g = self.grid()

@@ -400,7 +400,7 @@ def direct(clause):
 ORDINALS = {w: i for i, w in enumerate("first second third fourth fifth sixth seventh eighth ninth tenth".split(), 1)}
 NOUNS = r"video|result|link|song|track|post|article|email|message|item|row|tab|button|thumbnail|playlist|channel"
 PICK = re.compile(r"^\W*(?:please\s+)?(?:click|press|tap|open|play|select|choose|pick)\s+(?:on\s+)?the\s+"
-                  r"(?:(?P<ord>" + "|".join(ORDINALS) + r"|last|\d{1,2}(?:st|nd|rd|th))\s+)?(?P<noun>" + NOUNS + r")s?"
+                  r"(?:(?P<ord>" + "|".join(ORDINALS) + r"|last|\d{1,2}(?:st|nd|rd|th))\s+)?(?P<q>(?:(?!(?:" + NOUNS + r")s?\b)[\w'-]+\s+){1,2}?)?(?P<noun>" + NOUNS + r")s?\b"
                   r"(?:\s+(?:in|at|on)\s+the\s+(?P<v>top|bottom|middle)(?:[\s-]+(?P<h>left|right))?"
                   r"(?:\s+(?:corner|of\s+the\s+(?:page|screen|window)))?)?"
                   r"(?:\s+(?:in|on)\s+(?:the\s+)?(?P<app>[\w .'-]+?)(?:\s+(?:tab|window|app))?)?[\s.!?]*$", re.I)
@@ -413,6 +413,8 @@ def pick_args(clause):
     if not m or not (m["ord"] or m["v"]):
         return None
     out = {"noun": m["noun"].lower()}
+    if m["q"]:
+        out["kind"] = m["q"].strip()  # "the third YouTube video": Jev hears "YouTube video"
     if m["ord"]:
         o = m["ord"].lower()
         out["ordinal"] = -1 if o == "last" else ORDINALS.get(o) or int(re.match(r"\d+", o).group())

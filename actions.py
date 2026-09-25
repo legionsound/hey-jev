@@ -1040,7 +1040,8 @@ def resolve_screen_pick(args):
         return ("none", "that app isn't in front")
     noun = args.get("noun", "item")
     pool = [i for i in snap.items if _live(i) and not i.from_value]
-    roles = ROLE_NOUNS.get(noun, "jev")
+    roles = ROLE_NOUNS.get(noun, "jev") if not args.get("kind") else "jev"  # a qualified noun is Jev's to judge
+    noun = f"{args['kind']} {noun}" if args.get("kind") else noun
     if roles is None:
         group = pool
     elif roles != "jev":

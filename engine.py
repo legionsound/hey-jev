@@ -265,6 +265,7 @@ class Engine:
         covered = policy.get("in_task", "auto") == "auto"
         self._set(head, state="running")
         history, seen, idle, repeats, pinned, last_ok, typed, first = [], [], 0, 0, None, None, set(), None
+        apps, expect = task.apps_in_goal(goal), None  # expect: the bundle our own verified open_app step brought up
 
         def finish(state, why):
             self._set(head, state=state, detail=why, facts={"steps": len(rec["steps"]) - 1})
@@ -289,38 +290,51 @@ class Engine:
             if n == task.MAX_STEPS:
                 return finish("unverified", "step limit")
             try:
-                if pinned and screen.frontmost()[0] != pinned[0]:
+                if expect:  # we just opened this app: wait (briefly) for exactly it to come forward, then pin it
+                    wait_until = min(end, time.monotonic() + 3)
+                    while screen.frontmost()[2] != expect:
+                        if time.monotonic() >= wait_until:
+                            return finish("unverified", "the app I opened didn't come to the front")
+                        time.sleep(0.1)
+                    pinned, expect = None, None
+                elif pinned and screen.frontmost()[0] != pinned[0]:
                     return finish("unverified", "another app came forward")
                 snap = screen.observe(pid=pinned[0] if pinned else None, ocr=True,
                                       deadline=min(end, time.monotonic() + 4))
             except screen.Unavailable as exc:  # our own reason strings, never screen text
                 why = str(exc)
-                if "Hey Jev is in front" in why:
-                    why = "Hey Jev's own window was in front; switch to the app first"
-                return finish("failed", f"couldn't read the screen: {why}")
+                if pinned is None and apps and not history:
+                    snap = None  # nothing readable yet (Hey Jev's own window, say): opening the goal's app may help
+                else:
+                    if "Hey Jev is in front" in why:
+                        why = "Hey Jev's own window was in front; switch to the app first"
+                    return finish("failed", f"couldn't read the screen: {why}")
             except Exception as exc:
                 return finish("failed", f"couldn't read the screen ({type(exc).__name__})")
             stop = interrupted()
             if stop:
                 return finish(*stop)
-            if pinned is None:
+            if snap is None:
+                pass  # no window to pin yet
+            elif pinned is None:
                 pinned = (snap.pid, snap.started, snap.window_token)
             elif (snap.pid, snap.started) != pinned[:2]:
                 return finish("unverified", "the app changed under me")
             elif snap.window_token != pinned[2]:  # never adopted: a change can't be proven to be ours
                 return finish("unverified", "the window changed")
-            items, _fields = task.shareable(snap)
+            items = task.shareable(snap)[0] if snap is not None else []
             first = first if first is not None else items
-            sig = task.signature(snap, items)
+            sig = task.signature(snap, items) if snap is not None else ("none",)
             if last_ok is not None:
                 idle = idle + 1 if sig == last_ok else 0
                 if idle >= task.MAX_IDLE:
                     return finish("unverified", "stuck: nothing changed")
             tried = [a for s_, a in seen if s_ == sig]
-            screen.remember(snap)  # a press or type by number resolves against exactly this list
-            field = self._task_field(snap, end)
+            if snap is not None:
+                screen.remember(snap)  # a press or type by number resolves against exactly this list
+            field = self._task_field(snap, end) if snap is not None else None
             got = self._ask_jev(rec, min(end, time.monotonic() + task.JEV_TIMEOUT), task.decide,
-                                self.task_jev, goal, snap, items, history, tried, field, typed)
+                                self.task_jev, goal, snap, items, history, tried, field, typed, apps)
             stop = interrupted()  # stop or the deadline wins over any answer, late or failed
             if stop:
                 return finish(*stop)
@@ -345,13 +359,16 @@ class Engine:
                     return finish("completed", "done, checked on screen")
                 return finish("unverified", "Jev judged it done; not checked" if check is None
                               else "Jev judged it done, but the screen doesn't show it")
-            if kind == "press_item":
+            if kind == "open_app":
+                what = ("app.open", {"app": item.get("name")})
+            elif kind == "press_item":
                 what = ("screen.press", {"number": item.n})
             elif kind == "type_text":
                 what = ("screen.type", {"text": task.typed_text(goal), "number": item.n})
             else:
                 what = ("screen.submit", {"element": field["token"]})
-            desc = f"{kind}:{item.token if item else field['token'] if field else ''}"
+            desc = (f"open_app:{item.get('bundle_id')}" if kind == "open_app"
+                    else f"{kind}:{item.token if item else field['token'] if field else ''}")
             if desc in tried:
                 repeats += 1
                 if repeats >= task.MAX_REPEATS:
@@ -359,7 +376,7 @@ class Engine:
             else:
                 repeats = 0
             seen.append((sig, desc))
-            decided = (snap.pid, snap.window_token)
+            decided = (snap.pid, snap.window_token) if snap is not None else None
 
             def still_pinned(decided=decided):
                 """Just before dispatch: the same app in front, the same window, as when Jev decided."""
@@ -372,9 +389,11 @@ class Engine:
                     return "couldn't re-check the screen"
                 return None
             step = self._new_step(rec, kind, what[0])
-            state = self._step(rec, step, what[1], covered=covered, until=end, check=still_pinned)
-            history.append({"press_item": f"pressed '{item.label}'" if item else "pressed",
-                            "type_text": f"typed the quoted text into '{item.label}'" if item else "typed",
+            state = self._step(rec, step, what[1], covered=covered, until=end,
+                               check=still_pinned if decided is not None else None)
+            history.append({"open_app": f"opened {item.get('name')}" if kind == "open_app" else "",
+                            "press_item": f"pressed '{item.label}'" if item and kind == "press_item" else "pressed",
+                            "type_text": f"typed the quoted text into '{item.label}'" if item and kind == "type_text" else "typed",
                             "submit": "pressed Return"}[kind] + (" (checked)" if state == "completed" else f" ({state})"))
             if state != "completed":  # never retried: a press that may have landed stays as it is
                 why = {"unverified": "a step went through but couldn't be checked",
@@ -386,6 +405,8 @@ class Engine:
                 return finish("cancelled" if state == "cancelled" else state if state == "failed" else "unverified", why)
             if kind == "type_text":
                 typed.add(item.token)
+            if kind == "open_app":
+                expect = (step.get("target") or {}).get("bundle_id") or item.get("bundle_id")  # only this app may be adopted
             last_ok = sig
 
     def _ask_jev(self, rec, deadline, fn, *args):

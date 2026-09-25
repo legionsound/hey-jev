@@ -384,5 +384,88 @@ class TaskTests(unittest.TestCase):
         self.assertEqual((v["state"], s.presses), ("declined", []))
 
 
+
+SETTINGS = {"name": "System Settings", "path": "/System/Applications/System Settings.app",
+            "bundle_id": "com.apple.systempreferences"}
+
+
+class OpenAppTests(unittest.TestCase):
+    """A task can open the app its goal names, then carries on only in exactly that app."""
+    run_task = TaskTests.run_task
+
+    def setUp(self):
+        TaskTests.setUp(self)
+        import app_catalog
+        old = app_catalog._inventory
+        app_catalog._set_inventory([SETTINGS, {"name": "Notes", "path": "/Apps/Notes.app", "bundle_id": "com.notes"}])
+        self.addCleanup(setattr, app_catalog, "_inventory", old)
+        self.opened, self.front_after_open = [], SETTINGS["bundle_id"]
+        fake = actions.entry("open", lambda a: ("target", dict(SETTINGS)) if a.get("app") == "System Settings"
+                             else ("none", "no such app"),
+                             lambda t, d: self.opened.append(t["bundle_id"]), lambda t, d: ("done", {}), "running")
+        p = patch.dict(actions.ACTIONS, {"app.open": fake})
+        p.start()
+        self.addCleanup(p.stop)
+
+    def screen(self, after_open):
+        s = Screen(self, [after_open])
+
+        def observe(pid=None, ocr=True, deadline=None):
+            if not self.opened:
+                raise screen.Unavailable("Hey Jev is in front and no app handed off to it")
+            return after_open
+        front = lambda: (99, "Hey Jev", "com.heyjev") if not self.opened else (after_open.pid, after_open.app,
+                                                                                 self.front_after_open)
+        for name, fn in (("observe", observe), ("frontmost", front)):
+            p = patch.object(screen, name, fn)
+            p.start()
+            self.addCleanup(p.stop)
+        return s
+
+    def settings_snap(self):
+        dark = item(1, "Dark", role="AXRadioButton")
+        return screen.Snapshot(40, "System Settings", SETTINGS["bundle_id"], "Appearance", (0, 0, 400, 300), [dark],
+                               window_ref=WIN, started="s", text_frames=[])
+
+    def test_apps_the_goal_names(self):
+        self.assertEqual([a["name"] for a in task.apps_in_goal("turn on dark mode in system settings")],
+                         ["System Settings"])
+        self.assertEqual([a["name"] for a in task.apps_in_goal("write it in Notes")], ["Notes"])
+        self.assertEqual(task.apps_in_goal("note it"), [])  # whole names only, never a fragment
+
+    def test_from_hey_jevs_own_window_it_opens_the_named_app_and_carries_on_there(self):
+        s = self.screen(self.settings_snap())
+        v = self.run_task("turn on dark mode in System Settings",
+                          [{"kind": ("open_app", 0.9), "app": ("a0", 0.9)},
+                           {"kind": ("press_item", 0.9), "item": ("i0", 0.9)}, {"kind": ("done", 0.9)}])
+        first = self.sent[0]
+        self.assertEqual(set(first[1]["kind"]["criteria"]), {"open_app", "done", "stuck"})  # nothing on screen to press
+        self.assertEqual(first[0]["app"], None)
+        self.assertEqual(self.opened, [SETTINGS["bundle_id"]])
+        self.assertEqual(len(s.presses), 1)  # the press landed in System Settings
+        self.assertNotIn("open_app", self.sent[1][1]["kind"]["criteria"])  # it's in front now
+        self.assertEqual([(st["action"], st["state"]) for st in v["steps"]][:3],
+                         [("task.run", "unverified"), ("app.open", "completed"), ("screen.press", "completed")])
+
+    def test_a_different_app_coming_forward_after_the_open_stops(self):
+        self.front_after_open = "com.other"
+        s = self.screen(self.settings_snap())
+        with patch.object(time_mod(), "sleep", lambda _: None):
+            v = self.run_task("turn on dark mode in System Settings",
+                              [{"kind": ("open_app", 0.9), "app": ("a0", 0.9)},
+                               {"kind": ("press_item", 0.9), "item": ("i0", 0.9)}])
+        self.assertEqual((v["steps"][0]["detail"], s.presses), ("the app I opened didn't come to the front", []))
+
+    def test_with_no_app_named_an_unreadable_start_still_fails(self):
+        self.screen(self.settings_snap())
+        v = self.run_task("go on", [])
+        self.assertEqual(self.sent, [])
+        self.assertIn("couldn't read the screen", v["steps"][0]["detail"])
+
+
+def time_mod():
+    import time
+    return time
+
 if __name__ == "__main__":
     unittest.main()

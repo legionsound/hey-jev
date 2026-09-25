@@ -50,10 +50,14 @@ def _overlaps(a, b):
 
 
 def shareable(snap):
-    """The items Jev may read: every AX item (labels never come from field values), and OCR lines that don't overlap
-    any editable or secure field. -> (items, field_frames)."""
-    fields = [i.frame for i in snap.items if i.role in FIELD_ROLES or i.secure]
-    out = [i for i in snap.items if i.source != "ocr" or not any(_overlaps(i.frame, f) for f in fields)]
+    """The items Jev may read. Every AX item (labels never come from field values). OCR lines only when the AX walk
+    was complete, and never one overlapping any editable or secure field (all of them, before any cap). When the walk
+    was cut short, unknown fields may exist, so no OCR text is shared at all. A field the app doesn't expose to
+    Accessibility can't be detected; its text could still be read off the pixels. -> (items, field_frames)"""
+    fields = list(snap.field_frames) + [i.frame for i in snap.items if i.role in FIELD_ROLES or i.secure]
+    ocr_ok = snap.walk_complete
+    out = [i for i in snap.items
+           if i.source != "ocr" or (ocr_ok and not any(_overlaps(i.frame, f) for f in fields))]
     return out[:MAX_ITEMS], fields
 
 
@@ -100,7 +104,7 @@ def offer(goal, snap, items, focused_field, typed=()):
     kinds = ["done", "stuck"]
     if press:
         kinds.insert(0, "press_item")
-    if fields and QUOTED.search(goal):
+    if fields and typed_text(goal):
         kinds.insert(0, "type_text")
     if focused_field and focused_field.get("confirm"):
         kinds.insert(0, "submit")
@@ -151,10 +155,30 @@ def decide(jev, goal, snap, items, history, tried, focused_field, typed=()):
     return kind[0], min(kind[1], picked[1]), pool[1][picked[0]]
 
 
-def postcondition(goal, items):
-    """True when the goal names quoted text and that text is now on screen; None when no check can be stated."""
-    wanted = QUOTED.findall(goal)
-    if not wanted:
+UNTIL = re.compile(r'until\s+(?:you\s+see|it\s+(?:shows|says))\s+["“](?P<a>[^"”]+)["”]'
+                   r'|until\s+["“](?P<b>[^"”]+)["”]\s+(?:appears|shows(?:\s+up)?|is\s+(?:on\s+screen|showing))', re.I)
+
+
+def expected_text(goal):
+    """The text the goal explicitly asks to end up on screen ("… until you see "Saved""), or None."""
+    m = UNTIL.search(goal)
+    return (m["a"] or m["b"]) if m else None
+
+
+def typed_text(goal):
+    """The quoted text to type: the first quoted string that isn't the expected end text."""
+    end = expected_text(goal)
+    return next((q for q in QUOTED.findall(goal) if q != end), None)
+
+
+def present(text, items):
+    return text.lower() in " ".join(i.label.lower() for i in items)
+
+
+def postcondition(goal, items, at_start):
+    """True when the goal names text to see ("until you see …") and it is on screen now but wasn't when the task
+    started. None when the goal states no checkable outcome, or the text was already there: it proves nothing."""
+    want = expected_text(goal)
+    if not want or present(want, at_start):
         return None
-    labels = " ".join(i.label.lower() for i in items)
-    return all(w.lower() in labels for w in wanted)
+    return present(want, items)

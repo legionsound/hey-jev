@@ -178,6 +178,8 @@ class Snapshot:
     ms: dict = field(default_factory=dict)
     window_ref: object = field(default=None, repr=False)
     started: str = ""  # process start time
+    field_frames: list = field(default_factory=list, repr=False)  # every editable/secure field, before any cap
+    walk_complete: bool = True  # False when the AX walk hit its node or time cap: unknown fields may exist
 
     @property
     def window_token(self):
@@ -518,9 +520,12 @@ def observe(pid=None, ocr=True, deadline=None):
         if i.source != "ocr":
             ref_extra = next((v for c in controls if c.ref is i.ref for v in [extra[id(c)]]), (True, False, False))
             i.enabled, i.from_value, i.secure = ref_extra
+    fields = [(c.x, c.y, c.w, c.h) for c in controls
+              if c.role in ("AXTextField", "AXTextArea", "AXSearchField", "AXComboBox", "AXSecureTextField")
+              or extra[id(c)][2]]
     return Snapshot(pid, app, bundle, title, wframe, items[:MAX_ITEMS], truncated or len(items) > MAX_ITEMS, ocr_state,
                     {"ax": round((t_ax - t0) * 1000), "ocr": round((time.monotonic() - t_ax) * 1000)},
-                    window_ref=win, started=started)
+                    window_ref=win, started=started, field_frames=fields, walk_complete=not truncated)
 
 
 def remember(snap):
@@ -675,3 +680,15 @@ def _text_digest(win, node_cap=1500, time_cap=0.3):
             h.update(str(v if isinstance(v, str) else "").encode() + b"\0")
         queue.extend(_children(el))
     return h.hexdigest()[:16]
+
+
+def current_window(pid, deadline):
+    """The token of this app's focused (or main) window right now, or None."""
+    def read():
+        AS = _AS()
+        app_el = AS.AXUIElementCreateApplication(pid)
+        AS.AXUIElementSetMessagingTimeout(app_el, AX_MESSAGE_TIMEOUT)
+        w = _window(app_el)
+        return token(w) if w is not None else None
+    return bounded(read, deadline)
+

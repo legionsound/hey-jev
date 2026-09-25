@@ -241,8 +241,9 @@ class Engine:
 
     def _task(self, rec, planned):
         """A multi-step task: one confirmation for the task, then Jev decides each step on the pinned window.
-        Stops at the first step that isn't completed, on a stall, on the step or time budget, on a changed screen,
-        on "stop", or when Jev proposes done (verified only against a stated postcondition)."""
+        One deadline covers everything. Stops at the first step that isn't completed, on a stall, a repeat, the step
+        or time budget, a changed foreground/window/field, "stop", or when Jev proposes done (verified only against
+        an explicit "until you see …" that wasn't already on screen). Details never carry screen text."""
         import task
         import screen
         goal = planned["args"].get("goal", "")
@@ -251,7 +252,7 @@ class Engine:
         head = self._new_step(rec, planned["clause"], "task.run", target={"goal": goal})
         policy = self.policy()
         if policy.get("task", "ask") == "ask":
-            verdict = self._confirm(rec, head, {"goal": goal, "steps": task.MAX_STEPS})
+            verdict = self._confirm(rec, head, {"goal": goal, "steps": task.MAX_STEPS}, end)
             diagnostics.record(rec["id"], "confirm", verdict, step=0, prompt="<task>")
             if verdict != "confirmed":
                 self._set(head, state="declined" if verdict != "cancelled" else "skipped", detail=verdict)
@@ -259,28 +260,40 @@ class Engine:
                     return self._finish(rec, "declined" if verdict != "cancelled" else "cancelled")
         covered = policy.get("in_task", "auto") == "auto"
         self._set(head, state="running")
-        history, seen, idle, repeats, pinned, last_ok, typed, moved = [], [], 0, 0, None, None, set(), False
+        history, seen, idle, repeats, pinned, last_ok, typed, moved, first = [], [], 0, 0, None, None, set(), False, None
 
-        def finish(state, why, **facts):
-            self._set(head, state=state, detail=why, facts={"steps": len(rec["steps"]) - 1, **facts})
+        def finish(state, why):
+            self._set(head, state=state, detail=why, facts={"steps": len(rec["steps"]) - 1})
             diagnostics.record(rec["id"], "task", state, (time.monotonic() - start) * 1000, detail=why,
                                steps=len(rec["steps"]) - 1)
             with self.lock:
                 self._finish(rec, state, detail=why)
 
-        for n in range(task.MAX_STEPS + 1):
+        def interrupted():
+            """A reason to stop now, checked after every wait: stop, or the time budget."""
             with self.lock:
                 if rec["cancel"]:
-                    return finish("cancelled", "you stopped it")
+                    return ("cancelled", "you stopped it")
             if time.monotonic() >= end:
-                return finish("unverified", "time limit")
+                return ("unverified", "time limit")
+            return None
+
+        for n in range(task.MAX_STEPS + 1):
+            stop = interrupted()
+            if stop:
+                return finish(*stop)
             if n == task.MAX_STEPS:
                 return finish("unverified", "step limit")
             try:
+                if pinned and screen.frontmost()[0] != pinned[0]:
+                    return finish("unverified", "another app came forward")
                 snap = screen.observe(pid=pinned[0] if pinned else None, ocr=True,
                                       deadline=min(end, time.monotonic() + 4))
             except Exception as exc:
-                return finish("failed", f"can't read the screen: {exc}")
+                return finish("failed", f"couldn't read the screen ({type(exc).__name__})")
+            stop = interrupted()
+            if stop:
+                return finish(*stop)
             if pinned is None:
                 pinned = (snap.pid, snap.started, snap.window_token)
             elif (snap.pid, snap.started) != pinned[:2]:
@@ -290,22 +303,27 @@ class Engine:
                     return finish("unverified", "the window changed under me")
                 pinned = (snap.pid, snap.started, snap.window_token)
             items, _fields = task.shareable(snap)
+            first = first if first is not None else items
             sig = task.signature(snap, items)
             if last_ok is not None:
                 idle = idle + 1 if sig == last_ok else 0
                 if idle >= task.MAX_IDLE:
                     return finish("unverified", "stuck: nothing changed")
             tried = [a for s_, a in seen if s_ == sig]
-            screen.remember(snap)  # a press by number resolves against exactly this list
+            screen.remember(snap)  # a press or type by number resolves against exactly this list
             field = self._task_field(snap, end)
-            with self.lock:
-                if rec["cancel"]:
-                    return finish("cancelled", "you stopped it")
             try:
-                kind, conf, item = task.decide(self.task_jev, goal, snap, items, history, tried, field, typed)
+                kind, conf, item = screen.bounded(
+                    task.decide, min(end, time.monotonic() + task.JEV_TIMEOUT),
+                    self.task_jev, goal, snap, items, history, tried, field, typed)
+            except screen.TimedOut:
+                return finish("unverified", "Jev didn't answer in time")
             except Exception as exc:
-                return finish("failed", f"Jev couldn't decide: {type(exc).__name__}")
+                return finish("failed", f"Jev couldn't decide ({type(exc).__name__})")
             diagnostics.record(rec["id"], "task_decide", kind, step=n, confidence=round(conf, 2))
+            stop = interrupted()  # a stop or the deadline during the Jev call wins over its answer
+            if stop:
+                return finish(*stop)
             if kind == "invalid":
                 return finish("unverified", "Jev's answer didn't fit this screen")
             if conf < task.GATE:
@@ -313,7 +331,7 @@ class Engine:
             if kind == "stuck":
                 return finish("unverified", "nothing here helps")
             if kind == "done":
-                check = task.postcondition(goal, items)
+                check = task.postcondition(goal, items, first)
                 if check:
                     return finish("completed", "done, checked on screen")
                 return finish("unverified", "Jev judged it done; not checked" if check is None
@@ -321,10 +339,10 @@ class Engine:
             if kind == "press_item":
                 what = ("screen.press", {"number": item.n})
             elif kind == "type_text":
-                what = ("screen.type", {"text": task.QUOTED.search(goal).group(1), "number": item.n})
+                what = ("screen.type", {"text": task.typed_text(goal), "number": item.n})
             else:
-                what = ("screen.submit", {})
-            desc = f"{kind}:{item.label}" if item else kind
+                what = ("screen.submit", {"element": field["token"]})
+            desc = f"{kind}:{item.token if item else field['token'] if field else ''}"
             if desc in tried:
                 repeats += 1
                 if repeats >= task.MAX_REPEATS:
@@ -332,22 +350,33 @@ class Engine:
             else:
                 repeats = 0
             seen.append((sig, desc))
-            step = self._new_step(rec, desc, what[0])
-            state = self._step(rec, step, what[1], covered=covered)
+            decided = (snap.pid, snap.window_token)
+
+            def still_pinned(decided=decided):
+                """Just before dispatch: the same app in front, the same window, as when Jev decided."""
+                try:
+                    if screen.frontmost()[0] != decided[0]:
+                        return "another app came forward"
+                    if screen.current_window(decided[0], min(end, time.monotonic() + 1)) != decided[1]:
+                        return "the window changed under me"
+                except Exception:
+                    return "couldn't re-check the screen"
+                return None
+            step = self._new_step(rec, kind, what[0])
+            state = self._step(rec, step, what[1], covered=covered, until=end, check=still_pinned)
             history.append({"press_item": f"pressed '{item.label}'" if item else "pressed",
                             "type_text": f"typed the quoted text into '{item.label}'" if item else "typed",
                             "submit": "pressed Return"}[kind] + (" (checked)" if state == "completed" else f" ({state})"))
-            if kind == "type_text" and state == "completed":
-                typed.add(item.token)
             if state != "completed":  # never retried: a press that may have landed stays as it is
-                did = history[-1].split(" (")[0]
-                why = {"unverified": f"{did}, but couldn't check that it worked",
-                       "unknown": f"{did}, and I'm not sure it went through",
-                       "failed": f"couldn't do the next step ({did})",
+                why = {"unverified": "a step went through but couldn't be checked",
+                       "unknown": "a step may not have gone through",
+                       "failed": "a step couldn't be done",
                        "declined": "you said no to the next step",
                        "needs_clarification": "the next step was ambiguous",
-                       "cancelled": "you stopped it"}.get(state, f"the next step ended {state}")
+                       "cancelled": "you stopped it"}.get(state, f"a step ended {state}")
                 return finish("cancelled" if state == "cancelled" else state if state == "failed" else "unverified", why)
+            if kind == "type_text":
+                typed.add(item.token)
             last_ok = sig
             moved = bool(step["facts"].get("window_changed"))  # its readback saw the window change
 
@@ -362,7 +391,7 @@ class Engine:
             f = screen.field_facts(ref, deadline)
             if f["secure"] or not f["enabled"] or not f["insertable"] or f["window"] != snap.window_token:
                 return None
-            return {"confirm": screen.can_confirm(ref, deadline)}
+            return {"confirm": screen.can_confirm(ref, deadline), "token": screen.token(ref)}
         except Exception:
             return None
 
@@ -392,8 +421,10 @@ class Engine:
         with self.lock:
             step.update(kw)
 
-    def _step(self, rec, step, args, covered=False):
-        """covered: a step inside a task whose OK the user gave, when the in-task setting lets that OK cover it."""
+    def _step(self, rec, step, args, covered=False, until=None, check=None):
+        """covered: a step inside a task whose OK the user gave, when the in-task setting lets that OK cover it.
+        until: the task's shared deadline, which caps confirmation, waits and execution. check(): the task's own
+        re-check just before dispatch (foreground, window, field); a reason string stops the step undispatched."""
         action = self.actions.get(step["action"]) if step["action"] else None
         if not action:
             self._set(step, state="unsupported")
@@ -435,7 +466,7 @@ class Engine:
         risky = target.get("confirm") and policy.get("risky", "ask") == "ask"
         if forced or risky or (policy.get(action["effect"], "ask") == "ask" and not covered):
             t = time.monotonic()
-            verdict = self._confirm(rec, step, target)
+            verdict = self._confirm(rec, step, target, until)
             diagnostics.record(rec["id"], "confirm", verdict, (time.monotonic() - t) * 1000, step=step["index"],
                                prompt="<screen control>" if step["action"].startswith("screen.")
                                else describe(step["action"], target), forced=forced)
@@ -451,12 +482,19 @@ class Engine:
             if not still:
                 self._set(step, state="failed", detail="target_changed")
                 return "failed"
-        settled = self._settled(rec)
+        settled = self._settled(rec, until)
         if settled == "cancelled":
             self._set(step, state="skipped")
             return "cancelled"
         if not settled:  # an earlier step's effect is still out: nothing overtakes it
             self._set(step, state="failed", detail="an earlier action hasn't finished")
+            return "failed"
+        if until is not None and time.monotonic() >= until:
+            self._set(step, state="failed", detail="time limit")
+            return "failed"
+        why = check() if check else None
+        if why:
+            self._set(step, state="failed", detail=why)
             return "failed"
         with self.lock:  # dispatch boundary: a cancel that lands before this line stops the step, after it cannot
             if rec["cancel"]:
@@ -467,16 +505,18 @@ class Engine:
         diagnostics.record(rec["id"], "dispatch", "running", step=step["index"], action=step["action"],
                            target=loggable(step["action"], target))
         started = time.monotonic()
-        state = self._execute(action, step, target)
+        state = self._execute(action, step, target, until)
         diagnostics.record(rec["id"], "verify", state, (time.monotonic() - started) * 1000, step=step["index"],
                            detail=step.get("detail"), facts=loggable(step["action"], step.get("facts") or {}),
                            target=loggable(step["action"], target))
         return state
 
-    def _settled(self, rec):
+    def _settled(self, rec, until=None):
         """Wait up to PENDING_WAIT for any outstanding effect to land. True: clear. False: still out, so this step must
         not run. "cancelled": the request was cancelled while waiting."""
         end = time.monotonic() + PENDING_WAIT
+        if until is not None:
+            end = min(end, until)
         while self.effect_pending():
             if rec["cancel"]:
                 return "cancelled"
@@ -485,8 +525,10 @@ class Engine:
             time.sleep(POLL)
         return True
 
-    def _execute(self, action, step, target):
+    def _execute(self, action, step, target, until=None):
         deadline = time.monotonic() + action["timeout"]
+        if until is not None:
+            deadline = min(deadline, until)
         try:
             action["run"](target, deadline)
         except Failed as exc:
@@ -537,7 +579,7 @@ class Engine:
         facts = {"tiebreak": {"score": round(float(score), 3), "threshold": need}}
         return (dict(choices[i]) if score >= need else None), facts
 
-    def _confirm(self, rec, step, target):
+    def _confirm(self, rec, step, target, until=None):
         if not self.ask:
             return "no_confirmation_ui"
         with self.lock:
@@ -549,6 +591,8 @@ class Engine:
             step["state"] = "awaiting_confirmation"
         self.ask(dict(p))
         end = time.monotonic() + CONFIRM_TTL
+        if until is not None:
+            end = min(end, until)
         with self.lock:
             while p["decision"] is None:
                 left = end - time.monotonic()

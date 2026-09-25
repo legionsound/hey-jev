@@ -115,6 +115,10 @@ Voice stop: ordinary turns wait on one FIFO turn worker that holds the microphon
 
 Implemented 2026-09-24 on branch screen-control: `screen.list` and `screen.press` above. A clause that starts with "click" or "tap", or that names a UI part (button, checkbox, link, menu item, icon, toggle), always plans as `screen.press`, because Jev's target question hears "the Loud mode checkbox" as volume. Not yet: clicking OCR-only text, scrolling, and multi-step goals.
 
+## Multi-step tasks (stage 3)
+
+"take over: …" / "work on: …" run as one request. The task asks once (category `task`). With `in_task` Automatic, that OK covers its clicks, typing and Return; with Ask first, each step asks. `risky` labels ask unless `risky` is Automatic. One deadline (120 s) caps the task confirmation, every Jev call (at most 10 s, abandoned when late), observations, confirmations, pending-effect waits and each step's execution. Stop and the deadline are re-checked after every wait, and they win over a late answer. Jev is offered only the kinds that can run on the exact snapshot it's shown, and its answer must match that snapshot's opaque ids. Just before each dispatch, the same app must be in front with the same window as when Jev decided. A submit must hit the same focused field. The task follows a different window only when its own previous step's readback saw the window change. Any step that isn't completed ends the task, and nothing is ever retried. `done` is verified only against an explicit "until you see "X"" that appeared during the task. Anything else ends unverified. Jev gets AX item labels, plus OCR lines only when the AX walk was complete and the line overlaps no editable or secure field (all fields, before the item cap). A field an app doesn't expose to Accessibility can't be detected. Stop reasons and speech never carry screen text.
+
 ## Milestone 1
 
 Implemented 2026-09-24. `url.open` is registered too.

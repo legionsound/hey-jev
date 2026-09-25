@@ -27,17 +27,22 @@ class Screen:
 
     def __init__(self, test, snaps):
         self.snaps, self.i, self.presses, self.state = list(snaps), 0, [], {"exists": "yes", "AXValue": "0"}
+        self.front = None  # None: whatever app the current snapshot belongs to
         fns = {"observe": self.observe, "signature": lambda pid, d: {"n": self.i},
                "element_state": lambda ref, d: dict(self.state), "press": self.press,
-               "focused_field": lambda pid, d: None, "process_start": lambda pid, d: "s"}
+               "focused_field": lambda pid, d: None, "process_start": lambda pid, d: "s",
+               "frontmost": lambda: (self.front or self.current().pid, "Pad", "com.pad"),
+               "current_window": lambda pid, d: self.current().window_token}
         for name, fn in fns.items():
             p = patch.object(screen, name, fn)
             p.start()
             test.addCleanup(p.stop)
 
+    def current(self):
+        return self.snaps[min(self.i, len(self.snaps) - 1)]
+
     def observe(self, pid=None, ocr=True, deadline=None):
-        s = self.snaps[min(self.i, len(self.snaps) - 1)]
-        return s
+        return self.current()
 
     def press(self, ref, deadline):
         self.presses.append(ref)
@@ -51,7 +56,7 @@ class TaskTests(unittest.TestCase):
         for p in (patch.object(diagnostics, "record", lambda *a, **k: None),):
             p.start()
             self.addCleanup(p.stop)
-        self.asked, self.sent = [], []
+        self.asked, self.sent, self.jev_override = [], [], None
 
     def run_task(self, goal, answers, policy=None, cancel_after=None):
         plan = [{"clause": f"take over: {goal}", "action": "task.run", "args": {"goal": goal}}]
@@ -61,7 +66,8 @@ class TaskTests(unittest.TestCase):
             self.sent.append((json.loads(state), questions))
             if cancel_after is not None and len(self.sent) > cancel_after:
                 eng.cancel(rid)
-            return next(replies)
+            override = getattr(self, "jev_override", None)
+            return override(state, questions) if override else next(replies)
 
         def ask(pending):
             if pending:
@@ -70,7 +76,8 @@ class TaskTests(unittest.TestCase):
         with patch.object(planner, "plan", lambda *a, **k: ("steps", plan)):
             eng = Engine(lambda _: {}, policy=lambda: {**actions.DEFAULT_POLICY, **(policy or {})}, ask=ask)
             eng.task_jev = jev
-            rid = eng.submit(f"take over: {goal}", "cli")["id"]
+            self.eng = eng
+            rid = self.rid = eng.submit(f"take over: {goal}", "cli")["id"]
             return eng.wait(rid, 20)
 
     def test_the_words_that_start_a_task(self):
@@ -90,10 +97,92 @@ class TaskTests(unittest.TestCase):
         self.assertEqual([s["state"] for s in v["steps"]], ["unverified", "completed"])
         self.assertEqual((v["state"], v["steps"][0]["detail"]), ("unverified", "Jev judged it done; not checked"))
 
-    def test_done_is_verified_only_against_the_screen(self):
-        Screen(self, [snap([item(1, "Saved to Downloads", source="ocr", role="text", pressable=False)])])
-        v = self.run_task('save it and show "Saved"', [{"kind": ("done", 0.9)}])
+    def test_done_is_verified_only_against_an_explicit_outcome_that_appeared(self):
+        saved = item(1, "Saved to Downloads", source="ocr", role="text", pressable=False)
+        Screen(self, [snap([item(1, "Save")]), snap([saved])])
+        v = self.run_task('save it until you see "Saved"', [{"kind": ("press_item", 0.9), "item": ("i0", 0.9)},
+                                                            {"kind": ("done", 0.9)}])
         self.assertEqual((v["state"], v["steps"][0]["detail"]), ("completed", "done, checked on screen"))
+
+    def test_text_that_was_already_there_proves_nothing(self):
+        draft = item(1, "Draft", source="ocr", role="text", pressable=False)
+        Screen(self, [snap([draft])])
+        v = self.run_task('delete "Draft"', [{"kind": ("done", 0.9)}])  # a quoted name isn't a presence goal
+        self.assertEqual(v["state"], "unverified")
+        Screen(self, [snap([item(1, "Saved", source="ocr", role="text", pressable=False)])])
+        v = self.run_task('save it until you see "Saved"', [{"kind": ("done", 0.9)}])  # already on screen at start
+        self.assertEqual((v["state"], v["steps"][0]["detail"]), ("unverified", "Jev judged it done; not checked"))
+
+    def test_the_deadline_and_stop_win_over_a_slow_jev(self):
+        import time
+        s = Screen(self, [snap([item(1, "Next")])])
+        slow = [{"kind": ("press_item", 0.9), "item": ("i0", 0.9)}]
+
+        def late(*a):
+            time.sleep(0.2)
+            return slow[0]
+        with patch.object(task, "BUDGET", 0.1):
+            self.jev_override = late
+            v = self.run_task("go on", slow)
+        self.assertEqual((v["state"], s.presses), ("unverified", []))
+        self.assertIn(v["steps"][0]["detail"], ("time limit", "Jev didn't answer in time"))
+
+    def test_a_jev_that_never_answers_is_abandoned_in_time(self):
+        import time
+        s = Screen(self, [snap([item(1, "Next")])])
+        with patch.object(task, "JEV_TIMEOUT", 0.2):
+            self.jev_override = lambda *a: time.sleep(5)
+            t = time.monotonic()
+            v = self.run_task("go on", [])
+        self.assertLess(time.monotonic() - t, 2)
+        self.assertEqual((v["steps"][0]["detail"], s.presses), ("Jev didn't answer in time", []))
+
+    def test_stop_during_a_delayed_done_reply(self):
+        import time
+        Screen(self, [snap([item(1, "Next")])])
+
+        def reply(*a):
+            self.eng.cancel(self.rid)
+            time.sleep(0.05)
+            return {"kind": ("done", 0.99)}
+        self.jev_override = reply
+        v = self.run_task("go on", [])
+        self.assertEqual(v["state"], "cancelled")
+
+    def test_another_app_in_front_while_jev_decides_means_zero_effects(self):
+        s = Screen(self, [snap([item(1, "Next")])])
+
+        def reply(*a):
+            s.front = 999  # the user switched apps during the model call
+            return {"kind": ("press_item", 0.9), "item": ("i0", 0.9)}
+        self.jev_override = reply
+        v = self.run_task("go on", [])
+        self.assertEqual((v["steps"][1]["detail"], s.presses), ("another app came forward", []))
+
+    def test_ocr_is_withheld_when_fields_cant_all_be_known(self):
+        text = item(2, "account number 1234", source="ocr", role="text", pressable=False, frame=(10, 200, 200, 20))
+        cut = snap([item(1, "Next"), text])
+        cut.walk_complete = False  # the AX walk hit its cap: an unseen field could be anywhere
+        Screen(self, [cut])
+        self.run_task("go on", [{"kind": ("stuck", 0.9)}])
+        self.assertNotIn("1234", json.dumps(self.sent[0][0]))
+        beyond = snap([item(1, "Next"), item(2, "secret words", source="ocr", role="text", pressable=False,
+                                              frame=(10, 300, 100, 20))])
+        beyond.field_frames = [(0, 290, 300, 40)]  # a field past the item cap still excludes its text
+        self.sent.clear()
+        Screen(self, [beyond])
+        self.run_task("go on", [{"kind": ("stuck", 0.9)}])
+        self.assertNotIn("secret", json.dumps(self.sent[0][0]))
+
+    def test_screen_text_stays_out_of_details_and_speech(self):
+        import siri
+        s = Screen(self, [snap([item(1, "Private Folder")])])
+        s.press = lambda ref, d: (s.presses.append(ref), 0)[1]  # unverified press
+        patch.object(screen, "press", s.press).start()
+        logged = []
+        with patch.object(diagnostics, "record", lambda *a, **k: logged.append(k)):
+            v = self.run_task("go on", [{"kind": ("press_item", 0.9), "item": ("i0", 0.9)}])
+        self.assertNotIn("Private", v["steps"][0]["detail"] + siri.line_for(v) + repr(logged))
 
     def test_steps_ask_each_time_when_the_task_ok_does_not_cover_them(self):
         a = item(1, "Next")
@@ -120,7 +209,7 @@ class TaskTests(unittest.TestCase):
         patch.object(screen, "press", s.press).start()
         v = self.run_task("go on", [{"kind": ("press_item", 0.9), "item": ("i0", 0.9)}] * 5)
         self.assertEqual((v["state"], len(s.presses)), ("unverified", 1))
-        self.assertIn("couldn't check", v["steps"][0]["detail"])
+        self.assertIn("couldn't be checked", v["steps"][0]["detail"])
 
     def test_unsure_invalid_and_stuck_all_stop(self):
         for answers, why in [([{"kind": ("press_item", 0.4), "item": ("i0", 0.9)}], "not sure what to do next"),

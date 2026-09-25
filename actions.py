@@ -723,6 +723,8 @@ def resolve_screen_submit(args):
         ref = screen.focused_field(snap.pid, deadline)
         if ref is None:
             return ("none", "no field is selected")
+        if args.get("element") and screen.token(ref) != args["element"]:
+            return ("none", "a different field is selected now")  # a task decided on one field: only that one
         facts = screen.field_facts(ref, deadline)
         if not screen.can_confirm(ref, deadline):
             return ("none", "nothing here to submit")

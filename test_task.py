@@ -310,16 +310,17 @@ class TaskTests(unittest.TestCase):
                              ([{"kind": ("fly", 0.9)}], "Jev's answer didn't fit this screen"),
                              ([{"kind": ("done", float("inf"))}], "Jev's answer didn't fit this screen"),
                              ([{"kind": ("stuck", 0.9)}], "nothing here helps")]:
-            s = Screen(self, [snap([item(1, "Next")])])
+            s = Screen(self, [snap([item(1, "Next"), item(2, "Back")])])  # two candidates, so Jev picks the item
             v = self.run_task("go on", answers)
             self.assertEqual((v["steps"][0]["detail"], s.presses), (why, []), answers)
 
     def test_ocr_text_is_context_never_a_press_target(self):
-        Screen(self, [snap([item(1, "Pay", source="ocr", role="text", pressable=False), item(2, "Next")])])
+        Screen(self, [snap([item(1, "Pay", source="ocr", role="text", pressable=False), item(2, "Next"),
+                            item(3, "Back")])])
         v = self.run_task("go on", [{"kind": ("press_item", 0.9), "item": ("i0", 0.9)}])
         self.assertEqual(v["steps"][0]["detail"], "Jev's answer didn't fit this screen")
         crit = self.sent[0][1]["item"]["criteria"]
-        self.assertEqual(list(crit), ["i1"])
+        self.assertEqual(list(crit), ["i1", "i2"])
 
     def test_field_text_read_off_the_pixels_is_never_sent(self):
         field = item(1, "Message", role="AXTextField", pressable=False, frame=(10, 100, 300, 30))

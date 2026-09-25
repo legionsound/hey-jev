@@ -110,6 +110,9 @@ def validate_jev_response(body, j):
         else:
             _need(_num(a.get("score"), 0, len(expected) - 1) and isinstance(a.get("legend"), dict)
                   and set(a["legend"]) == expected, "bad Jev score")
+            # a score is the weighted position of its own distribution; a quarter level absorbs rounded probabilities
+            mean = sum(int(i) * v for i, v in probs.items()) / sum(probs.values())
+            _need(abs(a["score"] - mean) <= .25, "Jev score doesn't match its distribution")
 
 
 def jev(text, questions=None, *, provider=None, key=None, model=None, timeout=30):
@@ -134,8 +137,8 @@ def jev(text, questions=None, *, provider=None, key=None, model=None, timeout=30
         if a["type"] == "noul":
             p = a["noul"]
             ans[k] = (p >= 0.5, p if p >= 0.5 else 1 - p)
-        elif a["type"] == "score":  # index into the rubric, legend maps it back to the label
-            ans[k] = (a["legend"][str(int(round(a["score"])))], a["confidence"])
+        elif a["type"] == "score":  # index into our own rubric; the returned legend is never trusted for labels
+            ans[k] = (body["questions"][k]["criteria"][int(round(a["score"]))], a["confidence"])
         else:
             ans[k] = (a["choice"], a["confidence"])
     cost = j.get("usage", {}).get("input_tokens", 0) * 0.042 / 1e6
@@ -379,6 +382,8 @@ def line_for(result):
             return say_line("split_please")
         if detail == "bad_percent":
             return say_line("bad_percent")
+        if detail == "unsure_level":
+            return "[clear throat] How loud? Say a percent, like 40 percent."
         if detail == "task_no_goal":
             return "[clear throat] Take over what? Say the goal right after, like: take over, turn on dark mode."
         if detail == "unsupported_browser":

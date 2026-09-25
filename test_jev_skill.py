@@ -142,5 +142,85 @@ class SecretTests(unittest.TestCase):
             secrets_store.save_secret("OPENROUTER_API_KEY", 'a"b')
 
 
+
+class AuditRound2Tests(unittest.TestCase):
+    """Astra's 2026-09-25 audit: singleton selectors and scores that disagree with their distribution."""
+    S = {"s": {"type": "score", "instructions": "how", "criteria": ["low", "mid", "high", "higher", "top"]}}
+
+    def score(self, value, probs):
+        return {"answers": {"s": {"type": "score", "score": value, "confidence": 0.9, "probabilities": probs,
+                                  "legend": {str(i): "x" for i in range(5)}}}}
+
+    def test_a_score_must_be_its_distributions_expectation(self):
+        with self.assertRaises(siri.JevError):
+            call(self.score(4, {"0": 1, "1": 0, "2": 0, "3": 0, "4": 0}), self.S)
+        (ans, _, _), _ = call(self.score(1.5, {"0": 0, "1": .5, "2": .5, "3": 0, "4": 0}), self.S)
+        self.assertIn("s", ans)  # accepted
+
+    def test_a_single_candidate_is_never_asked_as_a_choice(self):
+        import task
+        one = {"i0": object()}
+        q = task.questions(["press_item", "type_text", "open_app"], one, fields=one, openable={"a0": {"name": "Mail"}})
+        self.assertEqual(set(q), {"kind"})
+        siri.validate_jev_request({"state": "x", "questions": q})  # the batch is sendable
+
+    def test_decide_takes_the_only_candidate_at_the_kinds_confidence(self):
+        import task
+        only = object()
+        with patch.object(task, "offer", lambda *a: (["press_item", "done"], {"i0": only}, {}, {})), \
+                patch.object(task, "state_text", lambda *a: "s"):
+            got = task.decide(lambda s, q: {"kind": ("press_item", 0.8)}, "goal", None, [], [], [], None)
+        self.assertEqual(got, ("press_item", 0.8, only))
+
+
 if __name__ == "__main__":
     unittest.main()
+
+    def test_an_unsure_volume_level_asks_instead_of_setting(self):
+        ans = {"target": ("volume", .99), "volume_action": ("set", .99), "volume_scope": ("system", .99),
+               "volume_level": ("loud", .10)}
+        self.assertEqual(planner.step_for(ans, "volume", "set volume loud")[1:], ("clarify", "unsure_level"))
+        ans["volume_level"] = ("loud", .9)
+        self.assertEqual(planner.step_for(ans, "volume", "set volume loud")[1:], ("volume.set", {"level": "loud"}))
+
+    def test_score_labels_come_from_our_rubric_not_the_returned_legend(self):
+        r = {"answers": {"s": {"type": "score", "score": 1, "confidence": 0.9,
+                               "probabilities": {"0": 0, "1": 1, "2": 0, "3": 0, "4": 0},
+                               "legend": {str(i): "EVIL" for i in range(5)}}}}
+        (ans, _, _), _ = call(r, self.S)
+        self.assertEqual(ans["s"][0], "mid")
+
+
+class PickAuditTests(unittest.TestCase):
+    def items(self, n):
+        from types import SimpleNamespace as NS
+        return [NS(source="ax", pressable=True, enabled=True, from_value=False, role="AXLink", label=f"Video {i}",
+                   frame=(0, i * 40, 100, 15), token=f"e{i}", secure=False) for i in range(n)]
+
+    def pick(self, args, flags, truncated=False, n=3):
+        from types import SimpleNamespace as NS
+        snap = NS(items=self.items(n), app="Browser", window_frame=(0, 0, 500, 500), pid=1, started=1,
+                  window_token="w", truncated=truncated)
+        with patch.object(actions.screen, "observe", return_value=snap), \
+                patch.object(actions, "CLASSIFY_ITEMS", return_value=flags), \
+                patch.object(actions, "_live", lambda i: True):
+            return actions.resolve_screen_pick(args)
+
+    def test_a_cut_screen_never_picks(self):
+        self.assertEqual(self.pick({"noun": "video", "ordinal": -1}, [(True, .99)] * 3, truncated=True)[0], "none")
+
+    def test_an_unsure_item_before_the_ordinal_asks(self):
+        got = self.pick({"noun": "video", "ordinal": 1}, [(True, .51), (True, .99), (True, .99)])
+        self.assertEqual(got[0], "choices")
+
+    def test_an_unsure_item_after_the_last_asks(self):
+        got = self.pick({"noun": "video", "ordinal": -1}, [(True, .99), (True, .99), (False, .55)])
+        self.assertEqual(got[0], "choices")
+
+    def test_an_unsure_item_makes_only_one_ask(self):
+        got = self.pick({"noun": "video", "ordinal": 0}, [(True, .99), (False, .55), (False, .99)])
+        self.assertEqual(got[0], "choices")
+
+    def test_sure_answers_still_pick(self):
+        got = self.pick({"noun": "video", "ordinal": 2}, [(True, .99), (False, .99), (True, .9)])
+        self.assertEqual((got[0], got[1]["label"]), ("target", "Video 2"))

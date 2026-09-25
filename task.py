@@ -169,19 +169,20 @@ def offer(goal, snap, items, focused_field, typed=(), apps=()):
 def questions(kinds, press, fields=None, openable=None):
     """One batch. item/app/field depend on kind, so each is asked conditionally ("If pressing is right...") and only
     the one matching the chosen kind is used; the rest are discarded. Deliberate speculative batching (jev skill:
-    dependent questions normally need a second stage) to save a round trip per step; code re-validates the pick."""
+    dependent questions normally need a second stage) to save a round trip per step; code re-validates the pick.
+    A selector with a single candidate isn't asked (Jev choices need 2+ options): decide() takes that one."""
     q = {"kind": {"type": "choice",
                   "instructions": "You are working toward the goal one action at a time. Which kind of action makes "
                                   "the most progress right now? Never one listed as already tried on this screen.",
                   "criteria": {k: KINDS[k] for k in kinds}}}
-    if "press_item" in kinds:
+    if "press_item" in kinds and len(press) > 1:
         q["item"] = {"type": "choice", "instructions": "If pressing a control is right, which one? Only pressable "
                                                        "items can be chosen.",
                      "criteria": {k: f"the pressable item {k}" for k in press}}
-    if "open_app" in kinds:
+    if "open_app" in kinds and len(openable) > 1:
         q["app"] = {"type": "choice", "instructions": "If opening an app is right, which one?",
                     "criteria": {k: f"the app {a.get('name')}" for k, a in openable.items()}}
-    if "type_text" in kinds:
+    if "type_text" in kinds and len(fields) > 1:
         q["field"] = {"type": "choice", "instructions": "If typing is right, into which text field?",
                       "criteria": {k: f"the text field {k}" for k in fields}}
     return q
@@ -210,6 +211,8 @@ def decide(jev, goal, snap, items, history, tried, focused_field, typed=(), apps
     pool = {"press_item": ("item", press), "type_text": ("field", fields), "open_app": ("app", openable)}.get(kind[0])
     if pool is None:
         return kind[0], kind[1], None
+    if len(pool[1]) == 1:  # the only candidate: no selector was asked, the kind's confidence stands
+        return kind[0], kind[1], next(iter(pool[1].values()))
     picked = valid((answers or {}).get(pool[0]), list(pool[1]))
     if picked is None:
         return "invalid", 0.0, None
